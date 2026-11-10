@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Models and data (large, local only)
+*.pt
+*.onnx
+*.engine
+data/
+videos/
+runs/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
