@@ -427,7 +427,7 @@
   - URL: https://github.com/ZOGWORK/control-vision
   - README, this brief, and the footage list are already on main.
 - Every change via PR once Claude starts building.
-- Code-review bot must give 5/5 before merge. Never merge below 5/5.
+- Loopy must give 5/5 before merge. Never merge below 5/5.
 - Commits authored as Sushil Muthuvelkumar (sushilm20@users.noreply.github.com).
 - One feature per PR. Base main only. No stacked PRs.
 
