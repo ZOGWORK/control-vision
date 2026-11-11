@@ -423,7 +423,7 @@
 
 ## Repo and workflow
 
-- Repo: ZOGWORK/control-vision, public. Created Nov 10, 2026.
+- Repo: ZOGWORK/control-vision, private. Created Nov 10, 2026.
   - URL: https://github.com/ZOGWORK/control-vision
   - README, this brief, and the footage list are already on main.
 - Every change via PR once Claude starts building.
