@@ -176,12 +176,13 @@ class ProcessingWorker(QObject):
             self.progress.emit(stage, percent, f"{detail} · elapsed {elapsed:.0f}s")
         try:
             if self.args[10] == "seeded_optical_flow":
-                self.done.emit(track_seeded_video(self.args[0], self.args[2], self.args[3], self.args[11],
-                                                  self.args[4], lambda: self.cancelled, report,
-                                                  self.args[5], self.args[6]))
+                result = track_seeded_video(self.args[0], self.args[2], self.args[3], self.args[11],
+                                            self.args[4], lambda: self.cancelled, report,
+                                            self.args[5], self.args[6])
             else:
-                self.done.emit(track_video(*self.args[:5], cancel=lambda: self.cancelled,
-                                           progress=report, logger=self.args[5], photos_dir=self.args[6], confidence_threshold=self.args[7], goal_roi=self.args[8], reid_model_path=self.args[9]))
+                result = track_video(*self.args[:5], cancel=lambda: self.cancelled,
+                                     progress=report, logger=self.args[5], photos_dir=self.args[6], confidence_threshold=self.args[7], goal_roi=self.args[8], reid_model_path=self.args[9])
+            self.done.emit((result, self.args[10]))
         except InterruptedError:
             self.failed.emit("Processing was cancelled.")
         except Exception as exc:
@@ -758,7 +759,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Open a project", "Open a project before loading one of its saved videos.")
             return
         videos = self.db.connection.execute(
-            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold,scoreboard_ocr_json FROM videos WHERE project_id=? ORDER BY id DESC", (self.project_id,)
+            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold,scoreboard_ocr_json,tracking_mode FROM videos WHERE project_id=? ORDER BY id DESC", (self.project_id,)
         ).fetchall()
         if not videos:
             QMessageBox.information(self, "No videos", "This project has no imported videos yet.")
@@ -773,10 +774,12 @@ class MainWindow(QMainWindow):
     def load_saved_video_id(self, video_id: int | None):
         if not self.db or self.project_id is None or video_id is None: return
         video = self.db.connection.execute(
-            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold,scoreboard_ocr_json FROM videos WHERE project_id=? AND id=?",
+            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold,scoreboard_ocr_json,tracking_mode FROM videos WHERE project_id=? AND id=?",
             (self.project_id, int(video_id)),
         ).fetchone()
         if video is None: return
+        mode_index = self.tracking_mode.findData(video["tracking_mode"] or "yolo")
+        if mode_index >= 0: self.tracking_mode.setCurrentIndex(mode_index)
         path = Path(video["path"])
         if not path.is_file():
             QMessageBox.warning(self, "Video unavailable", f"The saved video path no longer exists: {path}")
@@ -909,12 +912,14 @@ class MainWindow(QMainWindow):
         self.progress_label.setText(f"{stage} — {percent:.0f}% — {detail}")
 
     def processing_done(self, rows):
-        track_rows, photos, roi_events = rows
+        (track_rows, photos, roi_events), tracking_mode = rows
+        self.db.set_tracking_mode(self.video_id, tracking_mode)
         robot_ids = [seed[0] for seed in self.seed_points]
         self.db.replace_tracks(track_rows, robot_ids)
         self.db.replace_photos(robot_ids, photos)
         self.photo_rows = photos
-        preview_only = self.tracking_mode.currentData() == "seeded_optical_flow"
+        saved_mode = self.db.connection.execute("SELECT tracking_mode FROM videos WHERE id=?", (self.video_id,)).fetchone()
+        preview_only = bool(saved_mode and saved_mode["tracking_mode"] == "seeded_optical_flow")
         cycles, cycle_events = ([], []) if preview_only else count_zone_cycles(track_rows, self.zones)
         self.db.replace_analysis(robot_ids, cycles, cycle_events + roi_events)
         self.cycles = self.db.cycles_for_video(self.video_id)
@@ -924,9 +929,9 @@ class MainWindow(QMainWindow):
             by_id.setdefault(robot_id, []).append((t_s, x, y))
         self.tracks = {i: points for i, points in enumerate(by_id.values())}
         self.field_map.tracks = self.tracks; self.field_map.update()
-        tracking_method = "seeded optical flow" if self.tracking_mode.currentData() == "seeded_optical_flow" else "YOLO tracking"
+        tracking_method = "seeded optical flow" if tracking_mode == "seeded_optical_flow" else "YOLO tracking"
         self.log_view.addItem(f"{tracking_method} complete: {len(track_rows):,} mapped robot samples; {len(self.cycles)} zone-trip cycles; {len(photos)} robot photos")
-        if self.tracking_mode.currentData() == "seeded_optical_flow":
+        if tracking_mode == "seeded_optical_flow":
             self.log_view.addItem("Accuracy note: optical-flow is a trail preview only. Cycle counts and movement statistics are omitted; verify every identity and position before any use as evidence.")
         self.progress_label.setText(f"Analysis complete. Samples: {len(track_rows):,}; cycle/event candidates: {len(self.events)}. Review points and statuses before reporting scores.")
         self.refresh_result_tables()
@@ -948,7 +953,9 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value)); self.cycles_table.setItem(row_index, col, item)
             self.cycles_table.item(row_index, 0).setData(Qt.ItemDataRole.UserRole, cycle["start_t_s"])
         track_rows = [tuple(row) for row in self.db.tracks_for_video(self.video_id)]
-        preview_only = self.tracking_mode.currentData() == "seeded_optical_flow"
+        saved_mode = self.db.connection.execute(
+            "SELECT tracking_mode FROM videos WHERE id=?", (self.video_id,)).fetchone()
+        preview_only = bool(saved_mode and saved_mode["tracking_mode"] == "seeded_optical_flow")
         stats = {} if preview_only else robot_statistics(track_rows, [dict(row) for row in self.cycles], self.zones)
         points_by_robot = {}
         robot_alliances = {int(robot["id"]): robot["alliance"] for robot in robots}

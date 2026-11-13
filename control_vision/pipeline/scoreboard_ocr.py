@@ -19,6 +19,11 @@ def _read_digits(engine, frame: np.ndarray, polygon: list[list[float]]) -> tuple
     crop = frame[y0:y1, x0:x1]
     if crop.size == 0:
         return None, 0.0, ""
+    # Keep pixels outside a non-rectangular user ROI from contributing digits.
+    local_points = points - np.asarray([x0, y0], dtype=np.int32)
+    mask = np.zeros(crop.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [local_points], 255)
+    crop = cv2.bitwise_and(crop, crop, mask=mask)
     # UI overlays are often small in 720p streams. Enlarging the ROI helps OCR.
     crop = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
     result = engine(crop)

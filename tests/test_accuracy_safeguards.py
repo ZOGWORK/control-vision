@@ -1,7 +1,11 @@
 import unittest
+import sqlite3
+import tempfile
+from pathlib import Path
 
-from control_vision.pipeline.scoreboard_ocr import _consensus
+from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
 from control_vision.pipeline.tracking import _match_initial_seeds
+from control_vision.storage.database import ProjectDatabase, SCHEMA
 
 
 class SeedMatchingTests(unittest.TestCase):
@@ -32,6 +36,43 @@ class ScoreConsensusTests(unittest.TestCase):
         ])
         self.assertEqual(result["value"], 90)
         self.assertAlmostEqual(result["agreement"], 2 / 3, places=3)
+
+    def test_polygon_roi_masks_pixels_outside_its_shape(self):
+        import numpy as np
+
+        class CaptureEngine:
+            crop = None
+            def __call__(self, image):
+                self.crop = image.copy()
+                return []
+
+        frame = np.full((20, 20, 3), 255, dtype=np.uint8)
+        engine = CaptureEngine()
+        _read_digits(engine, frame, [[0, 0], [19, 0], [0, 19]])
+        self.assertIsNotNone(engine.crop)
+        # The lower-right triangle corner is outside the triangular ROI.
+        self.assertEqual(int(engine.crop[-1, -1].max()), 0)
+
+
+class DatabaseMigrationTests(unittest.TestCase):
+    def test_old_project_gets_default_yolo_mode_and_persists_new_mode(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "old-project.sqlite"
+            old_schema = SCHEMA.replace(
+                ", scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo'", "")
+            connection = sqlite3.connect(path)
+            connection.executescript(old_schema)
+            connection.close()
+            db = ProjectDatabase(path)
+            project_id = db.add_project("migration")
+            video_id = db.add_video(project_id, Path("match.mp4"),
+                                    {"duration_s": 120, "fps": 30, "width": 1280, "height": 720})
+            self.assertEqual(db.connection.execute(
+                "SELECT tracking_mode FROM videos WHERE id=?", (video_id,)).fetchone()[0], "yolo")
+            db.set_tracking_mode(video_id, "seeded_optical_flow")
+            self.assertEqual(db.connection.execute(
+                "SELECT tracking_mode FROM videos WHERE id=?", (video_id,)).fetchone()[0], "seeded_optical_flow")
+            db.close()
 
 
 if __name__ == "__main__":
