@@ -42,7 +42,7 @@
 - Scoring: cycles are reliable, report them plainly.
 - Points are reported with confidence and a human review queue.
 - Weights: versioned in models/ with version, date, and dataset hash.
-- Repo: ZOGWORK/control-vision, private. Created Nov 10, 2026, made private Nov 11, 2026.
+- Repo: ZOGWORK/control-vision, public as of Nov 13, 2026 (confirmed by GitHub repository visibility). Created Nov 10, 2026, made private Nov 11, 2026, then made public by Sushil.
 - README, this brief, and the footage list are already on main.
 
 ## Purpose
