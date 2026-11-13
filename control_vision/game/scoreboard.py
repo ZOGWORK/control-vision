@@ -22,8 +22,7 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
     the robot's alliance. Disqualification is entered by the human reviewer.
     """
     disqualified = disqualified or set()
-    match_resolved = (any(event["status"] in {"confirmed", "rejected"} for event in events)
-                      and not any(event["status"] == "flagged" for event in events))
+    match_resolved = not any(event["status"] == "flagged" for event in events)
     robot_by_id = {int(robot["id"]): robot for robot in robots}
     alliance_scores = {"red": 0, "blue": 0}
     team_points: dict[int, int] = defaultdict(int)
@@ -41,7 +40,7 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
             continue
         points = int(event["points"])
         alliance_scores[alliance] += points
-        event_type = event["event_type"]
+        event_type = _optional_field(event, "event_type") or "unclassified"
         if event_type in {"leave_auto", "park_auto", "park_teleop"}:
             swarm_points[alliance] += points
         if event_type in {"hive_tip_auto", "hive_tip_teleop"}:

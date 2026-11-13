@@ -22,6 +22,16 @@ class CoreScoringTests(unittest.TestCase):
         self.assertEqual(board["alliance_points"], {"red": 5, "blue": 0})
         self.assertEqual(board["ranking_points"]["red"]["WIN_TIE"], 0)
 
+    def test_empty_completed_review_queue_resolves_zero_zero_tie(self):
+        board = calculate_scoreboard([], self.robots)
+        self.assertTrue(board["match_resolved"])
+        self.assertEqual(board["ranking_points"]["red"]["WIN_TIE"], 1)
+        self.assertEqual(board["ranking_points"]["blue"]["WIN_TIE"], 1)
+
+    def test_legacy_confirmed_event_without_type_still_scores(self):
+        board = calculate_scoreboard([{"robot_id": 1, "status": "confirmed", "points": 5}], self.robots)
+        self.assertEqual(board["alliance_points"]["red"], 5)
+
     def test_disqualification_clears_alliance_and_robot_points(self):
         events = [{"robot_id": 1, "status": "confirmed", "points": 20, "event_type": "park_teleop"},
                   {"robot_id": 2, "status": "confirmed", "points": 5, "event_type": "nectar_floor"}]
@@ -38,6 +48,7 @@ class CoreScoringTests(unittest.TestCase):
             project = db.add_project("practice")
             video = db.add_video(project, Path("match.mp4"),
                                  {"duration_s": 150.0, "fps": 30.0, "width": 1280, "height": 720})
+            self.assertEqual(db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (video,)).fetchone()[0], "unprocessed")
             robot = db.add_robot(video, 1001, "red", 50, 60)
             event = db.add_scoring_event(robot, 42.0)
             db.review_event(event, "confirmed", 5, robot, "nectar_floor", "high")
