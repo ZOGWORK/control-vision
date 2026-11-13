@@ -29,10 +29,10 @@ def _fraction(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
 
 
-def _clip_usable(path: str, expected_duration: float) -> bool:
-    if not Path(path).is_file():
+def _clip_usable(path: Path, expected_duration: float) -> bool:
+    if not path.is_file():
         return False
-    capture = cv2.VideoCapture(path)
+    capture = cv2.VideoCapture(str(path))
     try:
         if not capture.isOpened():
             return False
@@ -83,6 +83,18 @@ def _validate_truth(truth: dict) -> None:
         raise ValueError("Holdout truth needs a match label.")
     if len(truth["calibration_landmarks"]) < 4:
         raise ValueError("Holdout truth needs four independent calibration landmarks.")
+    landmark_points = [(float(row["x_ft"]), float(row["y_ft"]))
+                       for row in truth["calibration_landmarks"]]
+    if len(landmark_points) != len(set(landmark_points)):
+        raise ValueError("Calibration landmarks must have distinct field positions.")
+    pixel_points = [(float(row["pixel_x"]), float(row["pixel_y"]))
+                    for row in truth["calibration_landmarks"]]
+    if len(pixel_points) != len(set(pixel_points)):
+        raise ValueError("Calibration landmarks must have distinct pixel positions.")
+    if cv2.contourArea(cv2.convexHull(np.asarray(landmark_points, dtype=np.float32))) < 1:
+        raise ValueError("Calibration landmarks must span an area of the field.")
+    if cv2.contourArea(cv2.convexHull(np.asarray(pixel_points, dtype=np.float32))) < 25:
+        raise ValueError("Calibration landmarks must span an area of the image.")
     if not all(color in truth["official_scores"] for color in ("red", "blue")):
         raise ValueError("Holdout truth needs official red and blue scores.")
     if any(type(row.get("visible")) is not bool for row in truth["tracks"]):
@@ -90,10 +102,21 @@ def _validate_truth(truth: dict) -> None:
     if any(row["visible"] and (row.get("x_ft") is None or row.get("y_ft") is None)
            for row in truth["tracks"]):
         raise ValueError("Every visible truth robot needs field coordinates.")
+    if any(row["visible"] and not (math.isfinite(float(row["x_ft"]))
+                                   and math.isfinite(float(row["y_ft"]))
+                                   and 0 <= float(row["x_ft"]) <= 12
+                                   and 0 <= float(row["y_ft"]) <= 12)
+           for row in truth["tracks"]):
+        raise ValueError("Visible truth positions must be finite and inside the 12-foot field.")
     if any(row.get("count") is None for row in truth["cycles"]):
         raise ValueError("Every team needs a reviewed hand-counted cycle total.")
+    if len(truth["cycles"]) != len({int(row["team_number"]) for row in truth["cycles"]}):
+        raise ValueError("Truth cycle counts may list each team only once.")
     if any(truth["official_scores"][color] is None for color in ("red", "blue")):
         raise ValueError("Both official alliance scores must be reviewed.")
+    if any(type(truth["official_scores"][color]) is not int or truth["official_scores"][color] < 0
+           for color in ("red", "blue")):
+        raise ValueError("Official scores must be nonnegative whole numbers.")
     keys = [(int(row["frame"]), int(row["team_number"])) for row in truth["tracks"]]
     if len(keys) != len(set(keys)):
         raise ValueError("A team may appear only once per truth frame.")
@@ -119,6 +142,8 @@ def evaluate_case(case_file: Path) -> dict:
         robots = connection.execute("SELECT * FROM robots WHERE video_id=?", (video_id,)).fetchall()
         robot_by_id = {row["id"]: row for row in robots}
         team_numbers = {int(row["team_number"]) for row in robots}
+        if len(team_numbers) != len(robots):
+            raise ValueError("Seeded team numbers must be unique within a holdout video.")
         truth_teams = {int(row["team_number"]) for row in truth["tracks"]}
         if truth_teams != team_numbers:
             raise ValueError("Truth track teams must exactly match seeded teams in the project.")
@@ -190,7 +215,12 @@ def evaluate_case(case_file: Path) -> dict:
                 id_switches += 1
             previous_identity[team] = assigned
 
-    matrix = matrix_from_corners(json.loads(calibration["corners_json"]))
+    corners = json.loads(calibration["corners_json"])
+    if any(math.hypot(float(landmark["pixel_x"]) - float(corner[0]),
+                      float(landmark["pixel_y"]) - float(corner[1])) < 5
+           for landmark in truth["calibration_landmarks"] for corner in corners):
+        raise ValueError("Calibration landmarks must be independent of the fitted corners.")
+    matrix = matrix_from_corners(corners)
     inverse = np.linalg.inv(matrix)
     reprojection_errors = []
     for landmark in truth["calibration_landmarks"]:
@@ -213,7 +243,8 @@ def evaluate_case(case_file: Path) -> dict:
         expected_start = max(0.0, float(event["t_s"]) - 3.0)
         expected_end = min(float(video["duration_s"]), float(event["t_s"]) + 3.0)
         candidates = [clip for clip in clip_by_event[int(event["id"])]
-                      if _clip_usable(clip["path"], expected_end - expected_start)]
+                      if _clip_usable((db_path.parent / clip["path"]),
+                                      expected_end - expected_start)]
         if candidates:
             clip_present += 1
         if any(float(clip["start_t_s"]) <= expected_start + 0.15

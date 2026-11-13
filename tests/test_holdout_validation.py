@@ -116,6 +116,47 @@ class HoldoutValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "reviewed true/false"):
                 evaluate_case(case_path)
 
+    def test_duplicate_landmarks_cannot_fake_reprojection_evidence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            case_path, _, _, _ = self.make_case(Path(folder))
+            truth = json.loads(case_path.read_text(encoding="utf-8"))
+            truth["calibration_landmarks"] = [truth["calibration_landmarks"][0]] * 4
+            case_path.write_text(json.dumps(truth), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "distinct field positions"):
+                evaluate_case(case_path)
+
+    def test_relative_clip_path_resolves_from_database_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            case_path, _, _, _ = self.make_case(Path(folder))
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            db.connection.execute("UPDATE clips SET path=?", ("clip.mp4",))
+            db.connection.commit()
+            db.close()
+            case = evaluate_case(case_path)
+            self.assertEqual(case["highlights"]["clips_present"], 1)
+            self.assertEqual(case["highlights"]["clips_cover_three_seconds_each_side"], 1)
+
+    def test_collinear_landmarks_cannot_fake_reprojection_evidence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            case_path, _, _, _ = self.make_case(Path(folder))
+            truth = json.loads(case_path.read_text(encoding="utf-8"))
+            truth["calibration_landmarks"] = [
+                {"x_ft": x, "y_ft": x, "pixel_x": x / 12 * 100,
+                 "pixel_y": x / 12 * 100} for x in (2, 4, 6, 8)]
+            case_path.write_text(json.dumps(truth), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "span an area"):
+                evaluate_case(case_path)
+
+    def test_fitted_corner_cannot_count_as_independent_landmark(self):
+        with tempfile.TemporaryDirectory() as folder:
+            case_path, _, _, _ = self.make_case(Path(folder))
+            truth = json.loads(case_path.read_text(encoding="utf-8"))
+            truth["calibration_landmarks"][0] = {
+                "x_ft": 0, "y_ft": 0, "pixel_x": 0, "pixel_y": 0}
+            case_path.write_text(json.dumps(truth), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "independent of the fitted corners"):
+                evaluate_case(case_path)
+
 
 if __name__ == "__main__":
     unittest.main()
