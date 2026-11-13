@@ -397,7 +397,7 @@ class MainWindow(QMainWindow):
         self.read_scoreboard_btn = QPushButton("Read final scoreboard from video")
         self.use_ocr_btn = QPushButton("Use OCR reading in score comparison")
         self.use_ocr_btn.setEnabled(False)
-        self.scoreboard_ocr_status = QLabel("Scoreboard OCR uses user-drawn red and blue ROIs and a multi-frame vote. Review the proposal before using it.")
+        self.scoreboard_ocr_status = QLabel("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
         self.scoreboard_ocr_status.setWordWrap(True)
         ocr_row = QHBoxLayout(); ocr_row.addWidget(self.read_scoreboard_btn); ocr_row.addWidget(self.use_ocr_btn)
         export_layout.addLayout(ocr_row); export_layout.addWidget(self.scoreboard_ocr_status)
@@ -567,7 +567,7 @@ class MainWindow(QMainWindow):
         self._mode = name; self.canvas.roi_points = []
         if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
         alliance = "red" if "red" in name else "blue"
-        self.statusBar().showMessage(f"Outline the full {alliance} score digits, including their baselines. Click at least three corners, then double-click to save.")
+        self.statusBar().showMessage(f"On the final results screen, outline only the {alliance} score digits. Click at least three corners, then double-click to save.")
 
     def finish_roi(self):
         if self._mode not in {"roi", "scoreboard_red_roi", "scoreboard_blue_roi"}: return
@@ -708,7 +708,7 @@ class MainWindow(QMainWindow):
         self.official_red.clear()
         self.official_blue.clear()
         self.use_ocr_btn.setEnabled(False)
-        self.scoreboard_ocr_status.setText("Scoreboard OCR uses user-drawn red and blue ROIs and a multi-frame vote. Review the proposal before using it.")
+        self.scoreboard_ocr_status.setText("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
         self.disq_red.setChecked(False); self.disq_blue.setChecked(False)
         self.swarm_threshold.setValue(16); self.pollinator_1_threshold.setValue(4); self.pollinator_2_threshold.setValue(7)
         self.cycles_table.setRowCount(0)
@@ -788,7 +788,7 @@ class MainWindow(QMainWindow):
         self.corners.clear(); self.seed_points.clear(); self.robot_labels.clear(); self.tracks.clear(); self.zones.clear(); self.cycles.clear(); self.events = []
         self.zone_remove_combo.clear(); self.official_red.clear(); self.official_blue.clear()
         self.use_ocr_btn.setEnabled(False)
-        self.scoreboard_ocr_status.setText("Draw red and blue scoreboard ROIs, then run OCR to propose the final video scoreboard values.")
+        self.scoreboard_ocr_status.setText("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
         self.disq_red.setChecked(False); self.disq_blue.setChecked(False)
         self.swarm_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["swarm_leave_park_points"]))
         self.pollinator_1_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["pollinator_1_hive_tips"]))
@@ -1197,7 +1197,7 @@ class MainWindow(QMainWindow):
 
     def show_scoreboard_ocr(self, result: dict | None):
         if not result:
-            self.scoreboard_ocr_status.setText("Scoreboard OCR uses user-drawn red and blue ROIs and a multi-frame vote. Review the proposal before using it.")
+            self.scoreboard_ocr_status.setText("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
             self.use_ocr_btn.setEnabled(False)
             return
         red, blue = result.get("red", {}), result.get("blue", {})
