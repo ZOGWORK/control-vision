@@ -389,7 +389,7 @@ class DatabaseMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "old-project.sqlite"
             old_schema = SCHEMA.replace(
-                ", scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo'", "").replace(
+                ", scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo', analysis_status TEXT NOT NULL DEFAULT 'ready'", "").replace(
                 ", origin_robot_id INTEGER", "")
             connection = sqlite3.connect(path)
             connection.executescript(old_schema)
@@ -400,6 +400,8 @@ class DatabaseMigrationTests(unittest.TestCase):
                                     {"duration_s": 120, "fps": 30, "width": 1280, "height": 720})
             self.assertEqual(db.connection.execute(
                 "SELECT tracking_mode FROM videos WHERE id=?", (video_id,)).fetchone()[0], "yolo")
+            self.assertEqual(db.connection.execute(
+                "SELECT analysis_status FROM videos WHERE id=?", (video_id,)).fetchone()[0], "ready")
             db.set_tracking_mode(video_id, "seeded_optical_flow")
             self.assertEqual(db.connection.execute(
                 "SELECT tracking_mode FROM videos WHERE id=?", (video_id,)).fetchone()[0], "seeded_optical_flow")
@@ -422,6 +424,44 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(len(matching), 1)
             self.assertEqual(matching[0]["status"], "confirmed")
             db.close()
+
+    def test_failed_rerun_persists_invalid_status_and_blocks_export(self):
+        import os
+        from PySide6.QtWidgets import QApplication
+        from control_vision.app.main_window import MainWindow
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "project.sqlite"
+            db = ProjectDatabase(path)
+            project_id = db.add_project("rerun")
+            video_id = db.add_video(project_id, Path("match.mp4"),
+                                    {"duration_s": 120, "fps": 30, "width": 1280, "height": 720})
+            robot_id = db.add_robot(video_id, 1234, "red", 10, 10)
+            db.replace_tracks([(robot_id, 0, 0.0, 2.0, 2.0, .9)])
+            db.set_analysis_status(video_id, "running")
+            window = MainWindow()
+            window.db = db
+            window.video_id = video_id
+            window.tabs.setCurrentIndex(2)
+            window.stats_table.setRowCount(1)
+            window.tracks = {robot_id: [(0.0, 2.0, 2.0)]}
+            window.processing_failed("model failed")
+            self.assertEqual(window.tabs.currentIndex(), 1)
+            self.assertFalse(window.tabs.isTabEnabled(2))
+            self.assertFalse(window.tabs.isTabEnabled(6))
+            self.assertEqual(window.stats_table.rowCount(), 0)
+            self.assertEqual(window.tracks, {})
+            with patch("control_vision.app.main_window.QMessageBox.warning") as warning:
+                self.assertFalse(window._results_current())
+                warning.assert_called_once()
+            window.close()
+            reopened = ProjectDatabase(path)
+            self.assertEqual(reopened.connection.execute(
+                "SELECT analysis_status FROM videos WHERE id=?", (video_id,)).fetchone()[0], "failed")
+            self.assertEqual(len(reopened.tracks_for_video(video_id)), 1)
+            reopened.close()
 
     def test_reprocessing_keeps_reassigned_event_without_collapsing_another_robot(self):
         with tempfile.TemporaryDirectory() as folder:

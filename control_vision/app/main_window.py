@@ -716,10 +716,41 @@ class MainWindow(QMainWindow):
         self.review_table.setRowCount(0)
         self.scoring_table.setRowCount(0)
         self.clip_list.clear()
+        self._set_results_enabled(True)
         self.progress_label.setText("Project opened. Load or import a match video to begin.")
         self.slider.setValue(0)
         self.refresh_result_tables()
         self.refresh_home()
+
+    def _set_results_enabled(self, enabled: bool):
+        """Hide saved analysis while a rerun is active or has failed."""
+        if not enabled:
+            self.tracks = {}
+            self.cycles = []
+            self.events = []
+            self.photo_rows = []
+            self.field_map.tracks = {}
+            self.field_map.update()
+            self.cycles_table.setRowCount(0)
+            self.stats_table.setRowCount(0)
+            self.review_table.setRowCount(0)
+            self.scoring_table.setRowCount(0)
+            self.clip_list.clear()
+            if 2 <= self.tabs.currentIndex() <= 6:
+                self.tabs.setCurrentIndex(1)
+        for index in range(2, 7):
+            self.tabs.setTabEnabled(index, enabled)
+
+    def _results_current(self) -> bool:
+        if not self.db or self.video_id is None:
+            return False
+        row = self.db.connection.execute(
+            "SELECT analysis_status FROM videos WHERE id=?", (self.video_id,)).fetchone()
+        if row and row["analysis_status"] == "ready":
+            return True
+        QMessageBox.warning(self, "Analysis unavailable",
+                            "The last analysis did not finish. Process this video successfully before reviewing or exporting results.")
+        return False
 
     def import_video(self):
         if _video_switch_blocked(self): return
@@ -763,6 +794,7 @@ class MainWindow(QMainWindow):
         self.canvas.roi_points = []
         self.canvas.named_rois = {}
         self.field_map.zones = {}; self.field_map.tracks = {}; self.field_map.update()
+        self._set_results_enabled(True)
         self.duration = float(metadata["duration_s"])
         self.capture = cv2.VideoCapture(str(path))
         self.canvas.show_frame(frame)
@@ -798,7 +830,7 @@ class MainWindow(QMainWindow):
         if _video_switch_blocked(self): return
         if not self.db or self.project_id is None or video_id is None: return
         video = self.db.connection.execute(
-            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold,scoreboard_ocr_json,tracking_mode FROM videos WHERE project_id=? AND id=?",
+            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold,scoreboard_ocr_json,tracking_mode,analysis_status FROM videos WHERE project_id=? AND id=?",
             (self.project_id, int(video_id)),
         ).fetchone()
         if video is None: return
@@ -818,6 +850,8 @@ class MainWindow(QMainWindow):
         if self.capture: self.capture.release()
         self.capture = cap
         self.video_id, self.video_path, self.metadata = video["id"], path, metadata
+        results_available = video["analysis_status"] == "ready"
+        self._set_results_enabled(results_available)
         self.duration = float(metadata["duration_s"]); self.current_time = 0
         self.official_red.setText(str(video["official_red"]) if video["official_red"] is not None else "")
         self.official_blue.setText(str(video["official_blue"]) if video["official_blue"] is not None else "")
@@ -833,20 +867,22 @@ class MainWindow(QMainWindow):
         self.scoreboard_ocr = json.loads(video["scoreboard_ocr_json"]) if video["scoreboard_ocr_json"] else None
         self.show_scoreboard_ocr(self.scoreboard_ocr)
         self.zone_remove_combo.clear(); self.zone_remove_combo.addItems(self.zones.keys())
-        self.events = self.db.events_for_video(self.video_id)
-        self.photo_rows = self.db.photos_for_video(self.video_id)
+        self.events = self.db.events_for_video(self.video_id) if results_available else []
+        self.photo_rows = self.db.photos_for_video(self.video_id) if results_available else []
         robots = self.db.connection.execute("SELECT id,team_number,alliance,seed_x,seed_y FROM robots WHERE video_id=? ORDER BY id", (self.video_id,)).fetchall()
         self.seed_points = [(row["id"], row["seed_x"], row["seed_y"]) for row in robots if row["seed_x"] is not None and row["seed_y"] is not None]
         self.robot_labels = [f"{row['team_number']} ({row['alliance']})" for row in robots]
         self.canvas.show_frame(frame, [(int(x), int(y), str(index + 1)) for index, (x, y) in enumerate(self.corners)])
         self.refresh_home()
         self.progress_label.setText(f"Loaded {path.name}. Corners: {len(self.corners)}/4; seeded identities: {len(self.seed_points)}.")
-        rows = self.db.connection.execute("SELECT robot_id,t_s,x_ft,y_ft FROM tracks WHERE robot_id IN (SELECT id FROM robots WHERE video_id=?) ORDER BY frame", (self.video_id,)).fetchall()
+        rows = self.db.connection.execute("SELECT robot_id,t_s,x_ft,y_ft FROM tracks WHERE robot_id IN (SELECT id FROM robots WHERE video_id=?) ORDER BY frame", (self.video_id,)).fetchall() if results_available else []
         track_by_id = {}
         for row in rows: track_by_id.setdefault(row["robot_id"], []).append((row["t_s"], row["x_ft"], row["y_ft"]))
         self.tracks = {i: values for i, values in enumerate(track_by_id.values())}
         self.field_map.tracks = self.tracks; self.field_map.current_time = 0; self.field_map.update()
         self.refresh_result_tables()
+        if not results_available:
+            self.progress_label.setText("The last analysis did not finish. Saved results are hidden until this video is processed successfully.")
 
     def select_corner(self):
         if self.video_path is None: return
@@ -918,6 +954,8 @@ class MainWindow(QMainWindow):
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s")); self.logger.addHandler(handler)
         self.logger.info("Video probed: %s; %s", self.video_path, self.metadata)
         self.logger.info("Zones: %s; sample fps: %s; confidence threshold: %s; tracking mode: %s", self.zones, self.sample_rate.currentText(), self.confidence_spin.value(), mode)
+        self.db.set_analysis_status(self.video_id, "running")
+        self._set_results_enabled(False)
         self.process_btn.setEnabled(False)
         photos_dir = self.project_dir() / "photos"
         alliances = {row["id"]: row["alliance"] for row in self.db.robots_for_video(self.video_id)}
@@ -931,7 +969,10 @@ class MainWindow(QMainWindow):
         self._worker.failed.connect(self.processing_failed)
         self._worker.done.connect(self._thread.quit); self._worker.failed.connect(self._thread.quit)
         self._processing_active = True
-        self._thread.start()
+        try:
+            self._thread.start()
+        except Exception as exc:
+            self.processing_failed(f"Could not start analysis: {exc}")
 
     def show_progress(self, stage, percent, detail):
         self.progress_label.setText(f"{stage} — {percent:.0f}% — {detail}")
@@ -947,6 +988,8 @@ class MainWindow(QMainWindow):
         preview_only = bool(saved_mode and saved_mode["tracking_mode"] == "seeded_optical_flow")
         cycles, cycle_events = ([], []) if preview_only else count_zone_cycles(track_rows, self.zones)
         self.db.replace_analysis(robot_ids, cycles, cycle_events + roi_events)
+        self.db.set_analysis_status(self.video_id, "ready")
+        self._set_results_enabled(True)
         self.cycles = self.db.cycles_for_video(self.video_id)
         self.events = self.db.events_for_video(self.video_id)
         by_id = {}
@@ -966,6 +1009,11 @@ class MainWindow(QMainWindow):
 
     def refresh_result_tables(self):
         if not self.db or self.video_id is None: return
+        status = self.db.connection.execute(
+            "SELECT analysis_status FROM videos WHERE id=?", (self.video_id,)).fetchone()
+        if status and status["analysis_status"] != "ready":
+            self._set_results_enabled(False)
+            return
         self.cycles = self.db.cycles_for_video(self.video_id)
         self.events = self.db.events_for_video(self.video_id)
         robots = self.db.robots_for_video(self.video_id)
@@ -984,11 +1032,6 @@ class MainWindow(QMainWindow):
             "SELECT tracking_mode FROM videos WHERE id=?", (self.video_id,)).fetchone()
         preview_only = bool(saved_mode and saved_mode["tracking_mode"] == "seeded_optical_flow")
         stats = {} if preview_only else robot_statistics(track_rows, [dict(row) for row in self.cycles], self.zones)
-        points_by_robot = {}
-        robot_alliances = {int(robot["id"]): robot["alliance"] for robot in robots}
-        for event in self.events:
-            if event["status"] == "confirmed" and event["robot_id"] is not None and event["event_alliance"] == robot_alliances.get(int(event["robot_id"])):
-                points_by_robot[event["robot_id"]] = points_by_robot.get(event["robot_id"], 0) + event["points"]
         board = calculate_scoreboard(self.events, robots, self.swarm_threshold.value(), self.pollinator_1_threshold.value(),
                                      self.pollinator_2_threshold.value(), {a for a, cb in (("red", self.disq_red), ("blue", self.disq_blue)) if cb.isChecked()})
         self.stats_table.setRowCount(len(robots))
@@ -999,7 +1042,7 @@ class MainWindow(QMainWindow):
                                                 "distance_ft": None if preview_only else 0})
             zone_seconds = values.get("zone_time_s", {})
             zone_summary = "Unavailable in preview mode" if preview_only else ", ".join(f"{name}: {seconds:.1f}" for name, seconds in zone_seconds.items())
-            display = [robot["team_number"], robot["alliance"], values["cycles"], "—" if preview_only else f"{values['cycle_time_avg_s']:.2f}", "—" if preview_only else f"{values['top_speed_ft_s']:.2f}", "—" if preview_only else f"{values['distance_ft']:.2f}", zone_summary, points_by_robot.get(robot["id"], 0), board["team_ranking_points"].get(int(robot["id"]), 0)]
+            display = [robot["team_number"], robot["alliance"], values["cycles"], "—" if preview_only else f"{values['cycle_time_avg_s']:.2f}", "—" if preview_only else f"{values['top_speed_ft_s']:.2f}", "—" if preview_only else f"{values['distance_ft']:.2f}", zone_summary, board["team_points"].get(int(robot["id"]), 0), board["team_ranking_points"].get(int(robot["id"]), 0)]
             for col, value in enumerate(display): self.stats_table.setItem(row_index, col, QTableWidgetItem(str(value)))
         flagged = [event for event in self.events if event["status"] == "flagged"]
         self.review_table.setRowCount(len(flagged))
@@ -1197,6 +1240,7 @@ class MainWindow(QMainWindow):
             if event: self.seek(round(event["t_s"] / max(self.duration, 0.001) * 1000))
 
     def generate_clips(self):
+        if not self._results_current(): return
         if not self.db or not self.video_path or not self.events:
             QMessageBox.information(self, "No events", "Process the video and review candidate events first."); return
         ffmpeg = self.ffmpeg_path_edit.text().strip() or None
@@ -1234,6 +1278,7 @@ class MainWindow(QMainWindow):
         else: QMessageBox.warning(self, "Clip unavailable", f"The clip file is missing: {path}")
 
     def export_selected_clip(self):
+        if not self._results_current(): return
         item = self.clip_list.currentItem()
         if not item: return
         source = Path(item.data(Qt.ItemDataRole.UserRole))
@@ -1242,25 +1287,23 @@ class MainWindow(QMainWindow):
             shutil.copy2(source, target)
 
     def export_csv(self):
+        if not self._results_current(): return
         if not self.db or self.video_id is None: return
         target, _ = QFileDialog.getSaveFileName(self, "Export statistics", "control-vision-stats.csv", "CSV (*.csv)")
         if not target: return
         events = self.db.events_for_video(self.video_id)
-        points = {}
-        robot_alliances = {int(robot["id"]): robot["alliance"] for robot in self.db.robots_for_video(self.video_id)}
-        for event in events:
-            if event["status"] == "confirmed" and event["robot_id"] is not None and event["event_alliance"] == robot_alliances.get(int(event["robot_id"])):
-                points[event["robot_id"]] = points.get(event["robot_id"], 0) + event["points"]
         video = self.db.connection.execute("SELECT * FROM videos WHERE id=?", (self.video_id,)).fetchone()
         board = calculate_scoreboard(events, self.db.robots_for_video(self.video_id), int(video["swarm_threshold"]),
                                      int(video["pollinator_1_threshold"]), int(video["pollinator_2_threshold"]),
                                      {a for a, col in (("red", "red_disqualified"), ("blue", "blue_disqualified")) if video[col]})
         export_stats_csv(Path(target), self.db.robots_for_video(self.video_id),
                          [tuple(row) for row in self.db.tracks_for_video(self.video_id)],
-                         [dict(row) for row in self.db.cycles_for_video(self.video_id)], self.zones, points, board["team_ranking_points"])
+                         [dict(row) for row in self.db.cycles_for_video(self.video_id)], self.zones,
+                         board["team_points"], board["team_ranking_points"])
         QMessageBox.information(self, "Export complete", f"Saved {target}")
 
     def export_json(self):
+        if not self._results_current(): return
         if not self.db or self.video_id is None: return
         target, _ = QFileDialog.getSaveFileName(self, "Export Scout JSON", "control-vision-match.json", "JSON (*.json)")
         if not target: return
@@ -1276,6 +1319,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Export complete", f"Saved {target}")
 
     def export_photos(self):
+        if not self._results_current(): return
         if not self.db or self.video_id is None: return
         folder = QFileDialog.getExistingDirectory(self, "Choose robot photo export folder")
         if not folder: return
@@ -1287,6 +1331,9 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Photos exported", f"Exported {copied} robot photo(s). Photos below 200×200 pixels are skipped and listed in the run log.")
 
     def processing_failed(self, message):
+        if self.db and self.video_id is not None:
+            self.db.set_analysis_status(self.video_id, "failed")
+        self._set_results_enabled(False)
         self.progress_label.setText(message)
         self.log_view.addItem(message)
         self.process_btn.setEnabled(True)
