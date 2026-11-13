@@ -11,6 +11,12 @@ def create_highlight(video: Path, output: Path, event_time_s: float, ffmpeg_path
                      before_s: float = 3.0, after_s: float = 3.0) -> tuple[float, float]:
     executable = ffmpeg_path or shutil.which("ffmpeg")
     if not executable:
+        try:
+            import imageio_ffmpeg
+            executable = imageio_ffmpeg.get_ffmpeg_exe()
+        except (ImportError, RuntimeError):
+            executable = None
+    if not executable:
         raise RuntimeError("FFmpeg was not found. Install FFmpeg and add ffmpeg.exe to PATH or set its path in Settings.")
     start = max(0.0, event_time_s - before_s)
     end = event_time_s + after_s

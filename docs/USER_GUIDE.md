@@ -2,7 +2,7 @@
 
 ## Prepare a local install
 
-Use Python 3.11 or newer, install the pinned packages in `requirements.txt`, and run `python -m control_vision`. A locally trained YOLO11n ONNX file with class 0 named `robot` is required for detection. Control Vision intentionally does not download weights. Install FFmpeg and add `ffmpeg.exe` to PATH to make highlight clips; the full path can also be entered under Settings.
+Use Python 3.11 or newer, install the pinned packages in `requirements.txt`, and run `python -m control_vision`. Accurate full-match robot detection requires a locally trained YOLO model with class 0 named `robot`; Control Vision does not download weights. A seeded optical-flow preview is available without a model, but it is not accurate enough for scoring or unattended identity attribution. Install FFmpeg and add `ffmpeg.exe` to PATH to make highlight clips; the packaged Windows build includes FFmpeg.
 
 ## Analyze a practice video or match
 
@@ -11,7 +11,8 @@ Use Python 3.11 or newer, install the pinned packages in `requirements.txt`, and
 3. Choose a clear field frame and click the field corners clockwise, starting at the top-left. The points map to a 12 by 12 foot square. Reuse Calibration copies a previous video calibration and scales the corner pixels to the new resolution; visually confirm it before processing.
 4. On the top-down map, choose a zone type and Draw Zone. Click polygon vertices and double-click to finish. Use names that match the field manual. No default zone coordinates are supplied because the manual diagram was not included.
 5. Seed each visible robot by clicking near its floor contact point, then enter the team number and alliance. Up to four robots are supported.
-6. Set the local model path, confidence threshold, and sample rate under Settings, then press Process. Cancel stops after the current frame. Logs go to `run_logs/`.
+6. Set the tracking method, model path, confidence threshold, and sample rate under Settings, then press Process. YOLO is the intended detector when a validated local model is available. Seeded optical flow is a preview only. Cancel stops after the current frame. Logs go to `run_logs/`.
+7. To read the final on-video scoreboard, draw the red and blue scoreboard ROIs in Analysis, open Export, and run the OCR proposal. Review its values and readable-frame count before choosing Use OCR reading. This stores proposed official totals; it does not create per-robot scored events.
 
 ## Interpret results
 
@@ -24,3 +25,5 @@ Statistics CSV and Scout JSON exports use the reviewed database values. Official
 ## Known verification limits
 
 No trained weights, labeled dataset, or holdout videos ship with the source. The UI and code do not claim measured ID-switch, track-completeness, cycle-count, scoring, or CPU-performance results. Zone crossings and manually reviewed points are practical scaffolding; score-value inference from robot motion alone is not automatic.
+
+The Salk Q3 final-board OCR smoke check read Red 156 / Blue 93 at 158.483s and 159.483s, with 2 readable frames out of 12 sampled. This verifies that pipeline path on one fixed-camera video only; the app caps temporal confidence and requires review.

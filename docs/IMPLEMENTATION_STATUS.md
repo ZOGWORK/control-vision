@@ -13,6 +13,7 @@ This is the scope ledger for the build brief. It separates implemented product b
 - Candidate highlight generation, in-app playback, export, best-frame robot PNGs, CSV stats and Scout JSON.
 - BIOBUZZ TU09 reference and configured scoring values, including separate match points and Ranking Points, phase timing, fouls as opponent credits, and manual confirmation of end-state achievements.
 - Official score comparison and manual DQ/event threshold controls. Confirmed events are the only video-derived points included in totals; flagged events keep the score visibly pending.
+- Offline scoreboard OCR using user-drawn red/blue ROIs, RapidOCR local models and multi-frame consensus. OCR values are reviewable proposals and require explicit user acceptance before comparison; these are not scored events.
 - Optional local ReID model selection for BoT-SORT; absence is logged and appearance matching remains disabled.
 - Local training utilities for frame extraction, dataset hashing, YOLO fine-tuning, versioned ONNX export, and ONNX Runtime CPU smoke check.
 
@@ -22,7 +23,8 @@ This is the scope ledger for the build brief. It separates implemented product b
 - The detector UI is described as ONNX-first, but Ultralytics' BoT-SORT `model.track` backend path has not been verified as ONNX Runtime CPU on target machines. No target-laptop measurement is available.
 - ReID accepts a compatible user-supplied model; no OSNet architecture checkpoint has been bundled or validated.
 - OC-SORT fallback and StrongSORT AFLink + GSI offline tracklet stitching are not implemented. Current tracking is BoT-SORT only.
-- Scoreboard OCR (PaddleOCR voting), reconciliation among zone crossings, ROI counts, OCR and official scores, and OCR-sourced events are not implemented. All final point events remain human-reviewed; scoreboard OCR has no claimed accuracy.
+- OCR reconciliation with zone/element evidence is not implemented. OCR proposes official scoreboard totals only; all point-event attribution remains human-reviewed. On the sampled Salk Q3 clip it returned 156–93 from 2 readable frames of 12, so the UI confidence is capped and this is not a general accuracy claim.
+- The seeded optical-flow mode is an experimental movement preview, not a full-match identity detector. A real Q3 smoke run retained 212 points from two seeds across a 170-second clip, with one seed represented in only 11 sampled points. Do not use these tracks as scoring evidence.
 - Automatic scoring for HIVE, FLOWER ownership/bottom NECTAR, GARDEN, robot parking/LEAVE and referee calls is not implemented. ROI changes are only review candidates; visual and referee evidence must be interpreted by a human.
 - Model training and acceptance targets cannot be completed without suitable labeled BIOBUZZ data, fixed-camera footage screening, and held-out matches with hand-counted cycles / official results. No accuracy, speed, or holdout acceptance claim is made.
 - The app includes a BIOBUZZ TU09 rule reference and manual-derived point/RP logic, but does not replace event referees, Robot Inspectors, the official scoring system, or later manual/team updates.

@@ -31,6 +31,10 @@ def export_scout_json(path: Path, video: dict, robots, tracks, cycles, events, c
     board = calculate_scoreboard(events, robots, int(video.get("swarm_threshold", 16)),
                                  int(video.get("pollinator_1_threshold", 4)), int(video.get("pollinator_2_threshold", 7)), disqualified)
     official_scores = official_scores or {"red": None, "blue": None}
+    try:
+        scoreboard_ocr = json.loads(video.get("scoreboard_ocr_json") or "null")
+    except (TypeError, json.JSONDecodeError):
+        scoreboard_ocr = None
     team_values = []
     for robot in robots:
         values = stats.get(robot["id"], {"cycles": 0, "cycle_time_avg_s": 0, "top_speed_ft_s": 0, "distance_ft": 0, "zone_time_s": {}})
@@ -44,6 +48,7 @@ def export_scout_json(path: Path, video: dict, robots, tracks, cycles, events, c
     payload = {"app": "control-vision", "version": "1.0.0", "event_code": video.get("event_code"),
                "match": video.get("match_number"), "video": Path(video["path"]).name,
                "teams": team_values, "official_alliance_scores": official_scores,
+               "scoreboard_ocr": scoreboard_ocr,
                "alliance_results": {alliance: {"points_video": board["alliance_points"][alliance], **board["ranking_points"][alliance]} for alliance in ("red", "blue")},
                "clips": [{"event_time_s": clip["t_s"], "robot": clip["team_number"], "points": clip["points"], "clip": Path(clip["path"]).name} for clip in clips],
                "photos": [{"team_number": photo["team_number"], "photo": Path(photo["path"]).name} for photo in photos]}

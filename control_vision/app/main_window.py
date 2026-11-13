@@ -26,9 +26,11 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from control_vision.pipeline.ingest import VideoError, probe_video
 from control_vision.pipeline.tracking import track_video
+from control_vision.pipeline.manual_tracking import track_seeded_video
 from control_vision.pipeline.cycles import count_zone_cycles
 from control_vision.pipeline.clips import create_highlight, thumbnail
 from control_vision.pipeline.stats import robot_statistics
+from control_vision.pipeline.scoreboard_ocr import read_scoreboard
 from control_vision.scout.exports import export_scout_json, export_stats_csv
 from control_vision.storage.database import ProjectDatabase
 from control_vision.game.scoreboard import calculate_scoreboard, classify_match_time
@@ -45,6 +47,7 @@ class FrameCanvas(QLabel):
         self.setStyleSheet("background:#111827;color:#cbd5e1;border:1px solid #334155")
         self._frame_size = (0, 0)
         self.roi_points: list[list[float]] = []
+        self.named_rois: dict[str, list[list[float]]] = {}
 
     def show_frame(self, frame: np.ndarray, annotations: list[tuple[int, int, str]] | None = None):
         self._last_frame = frame.copy()
@@ -58,6 +61,11 @@ class FrameCanvas(QLabel):
             painter.setPen(QPen(color, 4))
             painter.drawEllipse(x - 7, y - 7, 14, 14)
             painter.drawText(x + 10, y, label)
+        roi_colors = {"goal_roi": "#facc15", "scoreboard_red_roi": "#fb7185", "scoreboard_blue_roi": "#60a5fa"}
+        for name, points in self.named_rois.items():
+            if len(points) < 3: continue
+            painter.setPen(QPen(QColor(roi_colors.get(name, "#c4b5fd")), 2))
+            painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in points]))
         if len(self.roi_points) >= 3:
             painter.setPen(QPen(QColor("#facc15"), 3))
             painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in self.roi_points]))
@@ -167,12 +175,43 @@ class ProcessingWorker(QObject):
             elapsed = time.monotonic() - started
             self.progress.emit(stage, percent, f"{detail} · elapsed {elapsed:.0f}s")
         try:
-            self.done.emit(track_video(*self.args[:5], cancel=lambda: self.cancelled,
-                                       progress=report, logger=self.args[5], photos_dir=self.args[6], confidence_threshold=self.args[7], goal_roi=self.args[8], reid_model_path=self.args[9]))
+            if self.args[10] == "seeded_optical_flow":
+                self.done.emit(track_seeded_video(self.args[0], self.args[2], self.args[3], self.args[11],
+                                                  self.args[4], lambda: self.cancelled, report,
+                                                  self.args[5], self.args[6]))
+            else:
+                self.done.emit(track_video(*self.args[:5], cancel=lambda: self.cancelled,
+                                           progress=report, logger=self.args[5], photos_dir=self.args[6], confidence_threshold=self.args[7], goal_roi=self.args[8], reid_model_path=self.args[9]))
         except InterruptedError:
             self.failed.emit("Processing was cancelled.")
         except Exception as exc:
             self.args[5].exception("Processing failed")
+            self.failed.emit(str(exc))
+
+
+class ScoreboardOcrWorker(QObject):
+    progress = Signal(float, str)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, video_path: Path, red_roi: list[list[float]], blue_roi: list[list[float]]):
+        super().__init__()
+        self.video_path = video_path
+        self.red_roi = red_roi
+        self.blue_roi = blue_roi
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def run(self):
+        try:
+            self.done.emit(read_scoreboard(self.video_path, self.red_roi, self.blue_roi,
+                                           progress=lambda percent, detail: self.progress.emit(percent, detail),
+                                           cancel=lambda: self.cancelled))
+        except InterruptedError:
+            self.failed.emit("Scoreboard OCR was cancelled.")
+        except Exception as exc:
             self.failed.emit(str(exc))
 
 
@@ -250,9 +289,11 @@ class MainWindow(QMainWindow):
         self.zone_type = QComboBox(); self.zone_type.addItems(["scoring", "pickup", "park"])
         self.zone_btn = QPushButton("Draw Zone")
         self.goal_roi_btn = QPushButton("Draw scoring-element ROI")
+        self.red_score_roi_btn = QPushButton("Set red scoreboard ROI")
+        self.blue_score_roi_btn = QPushButton("Set blue scoreboard ROI")
         self.zone_remove_combo = QComboBox(); self.zone_remove_btn = QPushButton("Remove selected zone")
         self.zone_help = QLabel("Draw zones on the map; double-click to finish a polygon. Geometry is user supplied.")
-        zone_toolbar.addWidget(self.reuse_calibration_btn); zone_toolbar.addWidget(self.zone_type); zone_toolbar.addWidget(self.zone_btn); zone_toolbar.addWidget(self.goal_roi_btn); zone_toolbar.addWidget(self.zone_remove_combo); zone_toolbar.addWidget(self.zone_remove_btn); zone_toolbar.addWidget(self.zone_help, 1)
+        zone_toolbar.addWidget(self.reuse_calibration_btn); zone_toolbar.addWidget(self.zone_type); zone_toolbar.addWidget(self.zone_btn); zone_toolbar.addWidget(self.goal_roi_btn); zone_toolbar.addWidget(self.red_score_roi_btn); zone_toolbar.addWidget(self.blue_score_roi_btn); zone_toolbar.addWidget(self.zone_remove_combo); zone_toolbar.addWidget(self.zone_remove_btn); zone_toolbar.addWidget(self.zone_help, 1)
         layout.addLayout(zone_toolbar)
 
         body = QHBoxLayout()
@@ -333,8 +374,15 @@ class MainWindow(QMainWindow):
         clips_layout.addLayout(clips_controls); clips_layout.addWidget(self.clip_list); self.tabs.addTab(clips_page, "Highlights")
         export_page = QWidget(); export_layout = QVBoxLayout(export_page)
         self.official_red = QLineEdit(); self.official_blue = QLineEdit(); self.official_red.setPlaceholderText("Optional"); self.official_blue.setPlaceholderText("Optional")
-        official_row = QHBoxLayout(); official_row.addWidget(QLabel("Official red total")); official_row.addWidget(self.official_red); official_row.addWidget(QLabel("Official blue total")); official_row.addWidget(self.official_blue)
+        official_row = QHBoxLayout(); official_row.addWidget(QLabel("Scoreboard / official red total")); official_row.addWidget(self.official_red); official_row.addWidget(QLabel("Scoreboard / official blue total")); official_row.addWidget(self.official_blue)
         export_layout.addLayout(official_row)
+        self.read_scoreboard_btn = QPushButton("Read final scoreboard from video")
+        self.use_ocr_btn = QPushButton("Use OCR reading in score comparison")
+        self.use_ocr_btn.setEnabled(False)
+        self.scoreboard_ocr_status = QLabel("Scoreboard OCR uses user-drawn red and blue ROIs and a multi-frame vote. Review the proposal before using it.")
+        self.scoreboard_ocr_status.setWordWrap(True)
+        ocr_row = QHBoxLayout(); ocr_row.addWidget(self.read_scoreboard_btn); ocr_row.addWidget(self.use_ocr_btn)
+        export_layout.addLayout(ocr_row); export_layout.addWidget(self.scoreboard_ocr_status)
         self.score_compare = QLabel("Video totals include confirmed events only."); export_layout.addWidget(self.score_compare)
         rp_row = QHBoxLayout()
         self.disq_red = QCheckBox("Red disqualified"); self.disq_blue = QCheckBox("Blue disqualified")
@@ -350,13 +398,15 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(export_page, "Export")
         settings_page = QWidget(); settings_layout = QFormLayout(settings_page)
         self.model_path_edit = QLineEdit(); self.reid_path_edit = QLineEdit(); self.ffmpeg_path_edit = QLineEdit()
+        self.tracking_mode = QComboBox(); self.tracking_mode.addItem("YOLO11 local model (recommended with trained weights)", "yolo")
+        self.tracking_mode.addItem("Seeded optical flow preview (no model; not accurate enough for scoring)", "seeded_optical_flow")
         self.model_browse_btn = QPushButton("Browse…"); self.reid_browse_btn = QPushButton("Browse…"); self.ffmpeg_browse_btn = QPushButton("Browse…")
         model_row = QHBoxLayout(); model_row.addWidget(self.model_path_edit); model_row.addWidget(self.model_browse_btn)
         reid_row = QHBoxLayout(); reid_row.addWidget(self.reid_path_edit); reid_row.addWidget(self.reid_browse_btn)
         ffmpeg_row = QHBoxLayout(); ffmpeg_row.addWidget(self.ffmpeg_path_edit); ffmpeg_row.addWidget(self.ffmpeg_browse_btn)
         self.confidence_spin = QDoubleSpinBox(); self.confidence_spin.setRange(0.05, 0.95); self.confidence_spin.setSingleStep(0.05); self.confidence_spin.setValue(0.25)
         self.settings_save_btn = QPushButton("Save settings")
-        settings_layout.addRow("YOLO11n ONNX model", model_row); settings_layout.addRow("Optional local ReID embeddings (ONNX) or compatible YOLO .pt", reid_row); settings_layout.addRow("FFmpeg executable (blank uses PATH)", ffmpeg_row); settings_layout.addRow("Detection confidence", self.confidence_spin); settings_layout.addRow("Sample rate (frames per second)", self.sample_rate); settings_layout.addRow(self.settings_save_btn)
+        settings_layout.addRow("Tracking method", self.tracking_mode); settings_layout.addRow("YOLO11n ONNX model", model_row); settings_layout.addRow("Optional local ReID embeddings (ONNX) or compatible YOLO .pt", reid_row); settings_layout.addRow("FFmpeg executable (blank uses PATH)", ffmpeg_row); settings_layout.addRow("Detection confidence", self.confidence_spin); settings_layout.addRow("Sample rate (frames per second)", self.sample_rate); settings_layout.addRow(self.settings_save_btn)
         self.tabs.addTab(settings_page, "Settings")
         rules_page = QWidget(); rules_layout = QVBoxLayout(rules_page)
         self.rules_browser = QTextBrowser(); self.rules_browser.setOpenExternalLinks(True)
@@ -372,6 +422,8 @@ class MainWindow(QMainWindow):
         self.robot_btn.clicked.connect(self.seed_robot)
         self.zone_btn.clicked.connect(self.start_zone_drawing)
         self.goal_roi_btn.clicked.connect(self.start_roi_drawing)
+        self.red_score_roi_btn.clicked.connect(lambda: self.start_named_roi_drawing("scoreboard_red_roi"))
+        self.blue_score_roi_btn.clicked.connect(lambda: self.start_named_roi_drawing("scoreboard_blue_roi"))
         self.zone_remove_btn.clicked.connect(self.remove_selected_zone)
         self.reuse_calibration_btn.clicked.connect(self.reuse_calibration)
         self.process_btn.clicked.connect(self.process)
@@ -393,6 +445,8 @@ class MainWindow(QMainWindow):
         self.csv_export_btn.clicked.connect(self.export_csv)
         self.json_export_btn.clicked.connect(self.export_json)
         self.photos_export_btn.clicked.connect(self.export_photos)
+        self.read_scoreboard_btn.clicked.connect(self.start_scoreboard_ocr)
+        self.use_ocr_btn.clicked.connect(self.apply_scoreboard_ocr)
         self.official_red.textChanged.connect(self.update_score_comparison)
         self.official_blue.textChanged.connect(self.update_score_comparison)
         self.review_alliance.currentIndexChanged.connect(self.update_score_comparison)
@@ -410,6 +464,9 @@ class MainWindow(QMainWindow):
         self._mode = None
         self._worker = None
         self._thread = None
+        self._ocr_worker = None
+        self._ocr_thread = None
+        self.scoreboard_ocr = None
 
     def project_dir(self) -> Path | None:
         return self.db.path.parent if self.db else None
@@ -426,7 +483,8 @@ class MainWindow(QMainWindow):
         if not folder:
             QMessageBox.information(self, "Open a project", "Project settings are saved with the active project."); return
         settings = {"model_path": self.model_path_edit.text().strip(), "reid_model_path": self.reid_path_edit.text().strip(), "ffmpeg_path": self.ffmpeg_path_edit.text().strip(),
-                    "confidence": self.confidence_spin.value(), "sample_fps": int(self.sample_rate.currentText())}
+                    "confidence": self.confidence_spin.value(), "sample_fps": int(self.sample_rate.currentText()),
+                    "tracking_mode": self.tracking_mode.currentData()}
         (folder / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
         self.statusBar().showMessage("Settings saved in this project.")
 
@@ -461,6 +519,8 @@ class MainWindow(QMainWindow):
         try:
             settings = json.loads(path.read_text(encoding="utf-8"))
             self.model_path_edit.setText(settings.get("model_path", ""))
+            mode_index = self.tracking_mode.findData(settings.get("tracking_mode", "yolo"))
+            if mode_index >= 0: self.tracking_mode.setCurrentIndex(mode_index)
             self.reid_path_edit.setText(settings.get("reid_model_path", ""))
             self.ffmpeg_path_edit.setText(settings.get("ffmpeg_path", ""))
             self.confidence_spin.setValue(float(settings.get("confidence", 0.25)))
@@ -481,23 +541,36 @@ class MainWindow(QMainWindow):
         if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
         self.statusBar().showMessage("Draw an image-space polygon around a HIVE CELL, FLOWER, or GARDEN; double-click to finish.")
 
+    def start_named_roi_drawing(self, name: str):
+        if self.video_id is None:
+            QMessageBox.information(self, "Import a video", "Import or load a video before drawing scoreboard ROIs."); return
+        self._mode = name; self.canvas.roi_points = []
+        if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
+        alliance = "red" if "red" in name else "blue"
+        self.statusBar().showMessage(f"Outline the full {alliance} score digits, including their baselines. Click at least three corners, then double-click to save.")
+
     def finish_roi(self):
-        if self._mode != "roi": return
+        if self._mode not in {"roi", "scoreboard_red_roi", "scoreboard_blue_roi"}: return
+        name = "goal_roi" if self._mode == "roi" else self._mode
         if len(self.canvas.roi_points) < 3:
-            self.statusBar().showMessage("A scoring-element ROI needs at least three vertices."); return
-        self.zones["goal_roi"] = {"type": "goal_roi", "points": self.canvas.roi_points.copy()}
-        if "goal_roi" not in [self.zone_remove_combo.itemText(i) for i in range(self.zone_remove_combo.count())]:
-            self.zone_remove_combo.addItem("goal_roi")
+            self.statusBar().showMessage("The selected ROI needs at least three vertices."); return
+        self.zones[name] = {"type": name, "points": self.canvas.roi_points.copy()}
+        self.canvas.named_rois[name] = self.canvas.roi_points.copy()
+        if name not in [self.zone_remove_combo.itemText(i) for i in range(self.zone_remove_combo.count())]:
+            self.zone_remove_combo.addItem(name)
         self.db.save_calibration(self.video_id, self.corners, self.zones)
         self._mode = None
         if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
-        self.statusBar().showMessage("Scoring-element ROI saved. Ball-count changes remain flagged for human review.")
+        message = "Scoring-element ROI saved. Ball-count changes remain flagged for human review." if name == "goal_roi" else f"{name.replace('_', ' ').title()} saved for local multi-frame OCR."
+        self.statusBar().showMessage(message)
 
     def remove_selected_zone(self):
         name = self.zone_remove_combo.currentText()
         if not name or name not in self.zones: return
         del self.zones[name]
-        if name == "goal_roi": self.canvas.roi_points = []
+        if name.endswith("_roi"):
+            self.canvas.named_rois.pop(name, None)
+            if name == "goal_roi": self.canvas.roi_points = []
         self.field_map.zones = self.zones; self.field_map.update()
         self.db.save_calibration(self.video_id, self.corners, self.zones)
         self.zone_remove_combo.removeItem(self.zone_remove_combo.currentIndex())
@@ -537,11 +610,12 @@ class MainWindow(QMainWindow):
         sx, sy = self.metadata["width"] / source["width"], self.metadata["height"] / source["height"]
         self.corners = [[round(x * sx, 2), round(y * sy, 2)] for x, y in corners]
         self.zones = json.loads(source["zones_json"] or "{}")
-        if "goal_roi" in self.zones:
-            self.zones["goal_roi"]["points"] = [[round(x * sx, 2), round(y * sy, 2)] for x, y in self.zones["goal_roi"].get("points", [])]
+        for roi_name, roi in self.zones.items():
+            if roi_name.endswith("_roi"):
+                roi["points"] = [[round(x * sx, 2), round(y * sy, 2)] for x, y in roi.get("points", [])]
         self.zone_remove_combo.clear(); self.zone_remove_combo.addItems(self.zones.keys())
         self.db.save_calibration(self.video_id, self.corners, self.zones)
-        self.field_map.zones = self.zones; self.canvas.roi_points = self.zones.get("goal_roi", {}).get("points", []); self.field_map.update()
+        self.field_map.zones = self.zones; self.canvas.named_rois = {key: val.get("points", []) for key, val in self.zones.items() if key.endswith("_roi")}; self.canvas.roi_points = self.zones.get("goal_roi", {}).get("points", []); self.field_map.update()
         if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
         self.statusBar().showMessage("Corners and user-drawn zones copied. Confirm they align with this camera view before processing.")
 
@@ -591,6 +665,7 @@ class MainWindow(QMainWindow):
             self.capture.release()
         self.capture = None
         self.video_id = self.video_path = self.metadata = None
+        self.scoreboard_ocr = None
         self.corners = []
         self.zones = {}
         self.seed_points = []
@@ -601,6 +676,7 @@ class MainWindow(QMainWindow):
         self.photo_rows = []
         self.current_time = self.duration = 0.0
         self.canvas.roi_points = []
+        self.canvas.named_rois = {}
         self.canvas.clear()
         self.field_map.zones = {}
         self.field_map.tracks = {}
@@ -609,6 +685,8 @@ class MainWindow(QMainWindow):
         self.zone_remove_combo.clear()
         self.official_red.clear()
         self.official_blue.clear()
+        self.use_ocr_btn.setEnabled(False)
+        self.scoreboard_ocr_status.setText("Scoreboard OCR uses user-drawn red and blue ROIs and a multi-frame vote. Review the proposal before using it.")
         self.disq_red.setChecked(False); self.disq_blue.setChecked(False)
         self.swarm_threshold.setValue(16); self.pollinator_1_threshold.setValue(4); self.pollinator_2_threshold.setValue(7)
         self.cycles_table.setRowCount(0)
@@ -631,6 +709,13 @@ class MainWindow(QMainWindow):
         path = Path(selected)
         try:
             metadata = probe_video(path)
+            video_warnings = []
+            if metadata["width"] < 1280 or metadata["height"] < 720:
+                video_warnings.append(f"Resolution is {metadata['width']}×{metadata['height']}; 1280×720 or higher is recommended.")
+            if metadata["fps"] < 15:
+                video_warnings.append(f"Frame rate is {metadata['fps']:.1f} fps; 15 fps or higher is recommended.")
+            if video_warnings:
+                QMessageBox.warning(self, "Video quality warning", "\n".join(video_warnings) + "\n\nYou can still import this video.")
             event_code, ok = QInputDialog.getText(self, "Match details", "Event code (optional)")
             if not ok: return
             match_number, ok = QInputDialog.getText(self, "Match details", "Match number (optional, e.g. Q12)")
@@ -643,13 +728,17 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Video import failed", str(exc)); return
         if self.capture: self.capture.release()
         self.video_id, self.video_path, self.metadata = video_id, path, metadata
+        self.scoreboard_ocr = None
         self.corners.clear(); self.seed_points.clear(); self.robot_labels.clear(); self.tracks.clear(); self.zones.clear(); self.cycles.clear(); self.events = []
         self.zone_remove_combo.clear(); self.official_red.clear(); self.official_blue.clear()
+        self.use_ocr_btn.setEnabled(False)
+        self.scoreboard_ocr_status.setText("Draw red and blue scoreboard ROIs, then run OCR to propose the final video scoreboard values.")
         self.disq_red.setChecked(False); self.disq_blue.setChecked(False)
         self.swarm_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["swarm_leave_park_points"]))
         self.pollinator_1_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["pollinator_1_hive_tips"]))
         self.pollinator_2_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["pollinator_2_hive_tips"]))
         self.canvas.roi_points = []
+        self.canvas.named_rois = {}
         self.field_map.zones = {}; self.field_map.tracks = {}; self.field_map.update()
         self.duration = float(metadata["duration_s"])
         self.capture = cv2.VideoCapture(str(path))
@@ -669,7 +758,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Open a project", "Open a project before loading one of its saved videos.")
             return
         videos = self.db.connection.execute(
-            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold FROM videos WHERE project_id=? ORDER BY id DESC", (self.project_id,)
+            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold,scoreboard_ocr_json FROM videos WHERE project_id=? ORDER BY id DESC", (self.project_id,)
         ).fetchall()
         if not videos:
             QMessageBox.information(self, "No videos", "This project has no imported videos yet.")
@@ -684,7 +773,7 @@ class MainWindow(QMainWindow):
     def load_saved_video_id(self, video_id: int | None):
         if not self.db or self.project_id is None or video_id is None: return
         video = self.db.connection.execute(
-            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold FROM videos WHERE project_id=? AND id=?",
+            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold,scoreboard_ocr_json FROM videos WHERE project_id=? AND id=?",
             (self.project_id, int(video_id)),
         ).fetchone()
         if video is None: return
@@ -713,6 +802,9 @@ class MainWindow(QMainWindow):
         self.zones = json.loads(zones_row["zones_json"] or "{}") if zones_row else {}
         self.field_map.zones = self.zones
         self.canvas.roi_points = self.zones.get("goal_roi", {}).get("points", [])
+        self.canvas.named_rois = {key: val.get("points", []) for key, val in self.zones.items() if key.endswith("_roi")}
+        self.scoreboard_ocr = json.loads(video["scoreboard_ocr_json"]) if video["scoreboard_ocr_json"] else None
+        self.show_scoreboard_ocr(self.scoreboard_ocr)
         self.zone_remove_combo.clear(); self.zone_remove_combo.addItems(self.zones.keys())
         self.events = self.db.events_for_video(self.video_id)
         self.photo_rows = self.db.photos_for_video(self.video_id)
@@ -768,7 +860,7 @@ class MainWindow(QMainWindow):
                     self.capture.set(cv2.CAP_PROP_POS_MSEC, 0); ok, frame = self.capture.read()
                     if ok: self.canvas.show_frame(frame, [(sx, sy, label) for (_, sx, sy), label in zip(self.seed_points, self.robot_labels)])
             self._mode = None
-        elif self._mode == "roi":
+        elif self._mode == "roi" or self._mode in {"scoreboard_red_roi", "scoreboard_blue_roi"}:
             self.canvas.roi_points.append([x, y])
             if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
 
@@ -776,14 +868,16 @@ class MainWindow(QMainWindow):
         if not self.db or not self.video_path or len(self.corners) != 4 or not self.seed_points:
             QMessageBox.information(self, "Setup incomplete", "Create a project, import a video, select four corners, and seed at least one robot first.")
             return
+        mode = self.tracking_mode.currentData()
         model_path = self.model_path_edit.text().strip()
-        if not model_path:
-            model_path, _ = QFileDialog.getOpenFileName(self, "Select local YOLO11n ONNX model", "models", "ONNX model (*.onnx)")
-            if not model_path: return
-            self.model_path_edit.setText(model_path)
-        if not Path(model_path).is_file():
-            QMessageBox.warning(self, "Model not found", f"No model file exists at {model_path}. Select the local YOLO11n ONNX weights in Settings.")
-            return
+        if mode == "yolo":
+            if not model_path:
+                model_path, _ = QFileDialog.getOpenFileName(self, "Select local YOLO11n ONNX model", "models", "ONNX model (*.onnx)")
+                if not model_path: return
+                self.model_path_edit.setText(model_path)
+            if not Path(model_path).is_file():
+                QMessageBox.warning(self, "Model not found", f"No model file exists at {model_path}. Choose Seeded optical flow for model-free tracking or select a trained local YOLO model in Settings.")
+                return
         settings_path = self.project_dir() / "settings.json"
         try:
             settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
@@ -796,12 +890,13 @@ class MainWindow(QMainWindow):
         handler = logging.FileHandler(log_dir / f"run-{stamp}.log", encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s")); self.logger.addHandler(handler)
         self.logger.info("Video probed: %s; %s", self.video_path, self.metadata)
-        self.logger.info("Zones: %s; sample fps: %s; confidence threshold: %s", self.zones, self.sample_rate.currentText(), self.confidence_spin.value())
+        self.logger.info("Zones: %s; sample fps: %s; confidence threshold: %s; tracking mode: %s", self.zones, self.sample_rate.currentText(), self.confidence_spin.value(), mode)
         self.process_btn.setEnabled(False)
         photos_dir = self.project_dir() / "photos"
+        alliances = {row["id"]: row["alliance"] for row in self.db.robots_for_video(self.video_id)}
         self._worker = ProcessingWorker((self.video_path, Path(model_path), self.corners.copy(), self.seed_points.copy(),
                                          float(self.sample_rate.currentText()), self.logger, photos_dir, self.confidence_spin.value(),
-                                         self.zones.get("goal_roi", {}).get("points"), self.reid_path_edit.text().strip()))
+                                         self.zones.get("goal_roi", {}).get("points"), self.reid_path_edit.text().strip(), mode, alliances))
         self._thread = QThread(self); self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self.show_progress)
@@ -828,7 +923,10 @@ class MainWindow(QMainWindow):
             by_id.setdefault(robot_id, []).append((t_s, x, y))
         self.tracks = {i: points for i, points in enumerate(by_id.values())}
         self.field_map.tracks = self.tracks; self.field_map.update()
-        self.log_view.addItem(f"Tracking complete: {len(track_rows):,} mapped robot samples; {len(self.cycles)} zone-trip cycles; {len(photos)} robot photos")
+        tracking_method = "seeded optical flow" if self.tracking_mode.currentData() == "seeded_optical_flow" else "YOLO tracking"
+        self.log_view.addItem(f"{tracking_method} complete: {len(track_rows):,} mapped robot samples; {len(self.cycles)} zone-trip cycles; {len(photos)} robot photos")
+        if self.tracking_mode.currentData() == "seeded_optical_flow":
+            self.log_view.addItem("Accuracy note: optical-flow points are a preview only. Verify identity and every position; do not use these estimates as confirmed scoring evidence.")
         self.progress_label.setText(f"Analysis complete. Samples: {len(track_rows):,}; cycle/event candidates: {len(self.events)}. Review points and statuses before reporting scores.")
         self.refresh_result_tables()
         self.process_btn.setEnabled(True)
@@ -982,6 +1080,68 @@ class MainWindow(QMainWindow):
         self.db.set_official_scores(self.video_id, int(red) if red else None, int(blue) if blue else None,
                                     disqualified, self.swarm_threshold.value(), self.pollinator_1_threshold.value(), self.pollinator_2_threshold.value())
         self.update_score_comparison()
+
+    def start_scoreboard_ocr(self):
+        if not self.video_path or not self.video_id:
+            QMessageBox.information(self, "Load a video", "Import or load a video before reading its scoreboard."); return
+        red = self.zones.get("scoreboard_red_roi", {}).get("points")
+        blue = self.zones.get("scoreboard_blue_roi", {}).get("points")
+        if not red or not blue:
+            QMessageBox.information(self, "Set scoreboard ROIs", "Draw the red and blue scoreboard ROIs on the video frame first."); return
+        self.read_scoreboard_btn.setEnabled(False)
+        self.use_ocr_btn.setEnabled(False)
+        self._ocr_worker = ScoreboardOcrWorker(self.video_path, red, blue)
+        self._ocr_thread = QThread(self)
+        self._ocr_worker.moveToThread(self._ocr_thread)
+        self._ocr_thread.started.connect(self._ocr_worker.run)
+        self._ocr_worker.progress.connect(self.show_ocr_progress)
+        self._ocr_worker.done.connect(self.scoreboard_ocr_done)
+        self._ocr_worker.failed.connect(self.scoreboard_ocr_failed)
+        self._ocr_worker.done.connect(self._ocr_thread.quit)
+        self._ocr_worker.failed.connect(self._ocr_thread.quit)
+        self._ocr_thread.finished.connect(self._ocr_thread.deleteLater)
+        self._ocr_thread.start()
+
+    def show_ocr_progress(self, percent: float, detail: str):
+        self.scoreboard_ocr_status.setText(f"Reading scoreboard frames — {percent:.0f}% — {detail}")
+
+    def show_scoreboard_ocr(self, result: dict | None):
+        if not result:
+            self.scoreboard_ocr_status.setText("Scoreboard OCR uses user-drawn red and blue ROIs and a multi-frame vote. Review the proposal before using it.")
+            self.use_ocr_btn.setEnabled(False)
+            return
+        red, blue = result.get("red", {}), result.get("blue", {})
+        total_frames = result.get("frames_sampled", 0)
+        def describe(alliance, value):
+            score = value.get("value")
+            if score is None: return f"{alliance}: no readable score"
+            return f"{alliance}: {score} (evidence {value.get('confidence', 0):.0%}; OCR recognition {value.get('recognition_confidence', 0):.0%}; agreement {value.get('agreement', 0):.0%}; {value.get('samples', 0)}/{total_frames} readable frames)"
+        self.scoreboard_ocr_status.setText(
+            "OCR proposal from final scoreboard window — " + describe("Red", red) + "; " + describe("Blue", blue) +
+            ". These are video readings; review them before using the score comparison.")
+        self.use_ocr_btn.setEnabled(red.get("value") is not None and blue.get("value") is not None)
+
+    def scoreboard_ocr_done(self, result: dict):
+        self.scoreboard_ocr = result
+        if self.db and self.video_id is not None:
+            self.db.set_scoreboard_ocr(self.video_id, result)
+        self.read_scoreboard_btn.setEnabled(True)
+        self.show_scoreboard_ocr(result)
+
+    def scoreboard_ocr_failed(self, message: str):
+        self.read_scoreboard_btn.setEnabled(True)
+        self.scoreboard_ocr_status.setText(f"Scoreboard OCR did not finish: {message}")
+
+    def apply_scoreboard_ocr(self):
+        if not self.scoreboard_ocr:
+            return
+        red = self.scoreboard_ocr.get("red", {}).get("value")
+        blue = self.scoreboard_ocr.get("blue", {}).get("value")
+        if red is None or blue is None:
+            return
+        self.official_red.setText(str(red))
+        self.official_blue.setText(str(blue))
+        self.save_official_scores()
 
     def preview_review_event(self, row: int, column: int):
         item = self.review_table.item(row, 0)

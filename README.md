@@ -16,11 +16,12 @@ You upload a video of an FTC match and it tells you what happened — per robot,
 
 ## How it works
 
-- Detection: YOLO11n.
+- Detection: YOLO11n with locally supplied BIOBUZZ weights (none are bundled yet). Seeded optical flow is an experimental preview only, not accurate enough for scoring.
 - Tracking: BoT-SORT, with optional user-supplied local ReID model. OC-SORT fallback and AFLink/GSI tracklet stitching are not implemented.
 - Field mapping: one homography per video (click the 4 field corners once) to a top-down 12×12 ft field.
 - Cycles: user-drawn pickup-to-scoring zone trips, medium confidence until ball detection is available.
 - Scoring: zone trips create flagged, zero-point candidates. Optional scoring-element detections can suggest count changes inside a user-drawn ROI. A human must review the video and enter points.
+- Scoreboard OCR: local RapidOCR models vote over user-drawn red/blue scoreboard ROIs. Values remain proposals until the user reviews and accepts them; they are not per-robot scoring events.
 - Runs fully offline on your own machine. No API calls. No cloud GPU.
 
 ## Docs
@@ -44,7 +45,7 @@ python -m control_vision
 
 Create a project folder, import a video, click its four field corners, seed each robot identity, then select the local model and process. Videos stay at their original paths; project records and run logs are stored in the project folder. No pretrained model is bundled, and the app does not download weights.
 
-The current build includes the project hub, tracking workflow, user-drawn zones, zone-trip cycles, BIOBUZZ review/scoring and Ranking Point logic, rule reference, FFmpeg highlights, statistics, Scout JSON and robot-photo exports, optional local ReID configuration, and local training utilities. It does not include trained BIOBUZZ weights; ONNX scoreboard OCR, OC-SORT fallback and AFLink/GSI stitching remain unimplemented. See the implementation status for blockers. Holdout acceptance metrics are unmeasured; no accuracy or speed claim is implied.
+The current build includes the project hub, tracking workflow, user-drawn zones, zone-trip cycles, BIOBUZZ review/scoring and Ranking Point logic, rule reference, FFmpeg highlights, statistics, Scout JSON and robot-photo exports, optional local ReID configuration, local training utilities, and scoreboard OCR. It does not include trained BIOBUZZ weights; OC-SORT fallback and AFLink/GSI stitching remain unimplemented. See the implementation status for blockers. Holdout acceptance metrics are unmeasured; no robot-detection accuracy or speed claim is implied.
 
 ## Workflow
 

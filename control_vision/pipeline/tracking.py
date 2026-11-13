@@ -12,6 +12,35 @@ from control_vision.pipeline.homography import matrix_from_corners, project_poin
 from control_vision.pipeline.zones import point_in_polygon
 
 
+def _match_initial_seeds(seed_points, detections, assigned_robot_ids, assigned_track_ids, max_distance):
+    """One-to-one seed assignment with a hard distance gate; never guess late entrants."""
+    remaining = [seed for seed in seed_points if seed[0] not in assigned_robot_ids]
+    candidates = [det for det in detections if det[0] >= 0 and det[0] not in assigned_track_ids]
+    best: dict[int, tuple[int, float]] = {}
+
+    def search(index: int, used: set[int], mapping: dict[int, tuple[int, float]], total_distance: float):
+        nonlocal best
+        if index == len(remaining):
+            best_distance = sum(item[1] for item in best.values())
+            if (len(mapping), -total_distance) > (len(best), -best_distance):
+                best = dict(mapping)
+            return
+        robot_id, sx, sy = remaining[index]
+        search(index + 1, used, mapping, total_distance)
+        for detection in candidates:
+            track_id, x, y = detection[:3]
+            if track_id in used:
+                continue
+            distance = ((sx - x) ** 2 + (sy - y) ** 2) ** 0.5
+            if distance <= max_distance:
+                mapping[robot_id] = (track_id, distance)
+                search(index + 1, used | {track_id}, mapping, total_distance + distance)
+                del mapping[robot_id]
+
+    search(0, set(), {}, 0.0)
+    return best
+
+
 def track_video(
     video_path: Path,
     model_path: Path,
@@ -74,6 +103,7 @@ def track_video(
     matrix = matrix_from_corners(corners)
     seed_to_track: dict[int, int] = {}
     identities_seeded = False
+    seed_assignment_deadline_s = 3.0
     robot_ids = [seed[0] for seed in seed_points]
     rows: list[tuple[int, int, float, float, float, float]] = []
     best_photos: dict[int, tuple[int, float, float, object]] = {}
@@ -123,18 +153,16 @@ def track_video(
             if sampled == 29 and empty == 30:
                 raise RuntimeError("No robots were detected in the first 30 sampled frames. Check the video and robot model.")
             logger.info("Sampled frame %d (%.3fs): %d robot detections; %d scoring elements in ROI", frame_index, t_s, len(detections), len(roi_balls))
-            if not identities_seeded and detections:
-                available = {index for index, robot_id in enumerate(robot_ids) if robot_id not in seed_to_track}
-                assigned_track_ids = set(seed_to_track.values())
-                for tid, x, y, _, _ in detections:
-                    if not available or tid < 0 or tid in assigned_track_ids:
-                        continue
-                    index = min(available, key=lambda i: (seed_points[i][1] - x) ** 2 + (seed_points[i][2] - y) ** 2)
-                    seed_to_track[robot_ids[index]] = tid
-                    available.remove(index)
-                    assigned_track_ids.add(tid)
+            if not identities_seeded and detections and t_s <= seed_assignment_deadline_s:
+                max_distance = max(60.0, min(frame.shape[:2]) * 0.22)
+                matches = _match_initial_seeds(seed_points, detections, set(seed_to_track),
+                                               set(seed_to_track.values()), max_distance)
+                for robot_id, (track_id, distance) in matches.items():
+                    seed_to_track[robot_id] = track_id
+                    logger.info("Seeded robot %d to detector track %d at %.1f px from click", robot_id, track_id, distance)
                 identities_seeded = len(seed_to_track) == len(robot_ids)
-                logger.info("Seeded %d of %d identities from first usable sampled frame", len(seed_to_track), len(robot_ids))
+                if matches:
+                    logger.info("Seeded %d of %d identities during initial %.1fs window", len(seed_to_track), len(robot_ids), seed_assignment_deadline_s)
             for tid, x, y, conf, bbox in detections:
                 robot_id = next((rid for rid, assigned in seed_to_track.items() if assigned == tid), None)
                 if robot_id is None:
@@ -194,6 +222,9 @@ def track_video(
                          sum(r[4] for r in neighbors) / len(neighbors), row[5]))
     rows.sort(key=lambda row: (row[1], row[0]))
     logger.info("Sampled frames: %d; mapped track points: %d", sampled, len(rows))
+    if len(seed_to_track) < len(robot_ids):
+        logger.warning("Only %d of %d robot identities were safely matched within %.1fs. Unmatched seeds are omitted instead of guessed.",
+                       len(seed_to_track), len(robot_ids), seed_assignment_deadline_s)
     photo_rows = []
     if photos_dir:
         photos_dir.mkdir(parents=True, exist_ok=True)

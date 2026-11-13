@@ -9,7 +9,7 @@ from typing import Any
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS videos (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), path TEXT NOT NULL, duration_s REAL, fps REAL, width INTEGER, height INTEGER, event_code TEXT, match_number TEXT, official_red INTEGER, official_blue INTEGER, red_disqualified INTEGER NOT NULL DEFAULT 0, blue_disqualified INTEGER NOT NULL DEFAULT 0, swarm_threshold INTEGER NOT NULL DEFAULT 16, pollinator_1_threshold INTEGER NOT NULL DEFAULT 4, pollinator_2_threshold INTEGER NOT NULL DEFAULT 7);
+CREATE TABLE IF NOT EXISTS videos (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), path TEXT NOT NULL, duration_s REAL, fps REAL, width INTEGER, height INTEGER, event_code TEXT, match_number TEXT, official_red INTEGER, official_blue INTEGER, red_disqualified INTEGER NOT NULL DEFAULT 0, blue_disqualified INTEGER NOT NULL DEFAULT 0, swarm_threshold INTEGER NOT NULL DEFAULT 16, pollinator_1_threshold INTEGER NOT NULL DEFAULT 4, pollinator_2_threshold INTEGER NOT NULL DEFAULT 7, scoreboard_ocr_json TEXT);
 CREATE TABLE IF NOT EXISTS calibrations (video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE, corners_json TEXT NOT NULL, zones_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS robots (id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE, team_number INTEGER NOT NULL, alliance TEXT NOT NULL CHECK(alliance IN ('red','blue')), color_hint TEXT, seed_x INTEGER, seed_y INTEGER);
 CREATE TABLE IF NOT EXISTS tracks (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, frame INTEGER NOT NULL, t_s REAL NOT NULL, x_ft REAL NOT NULL, y_ft REAL NOT NULL, conf REAL NOT NULL, UNIQUE(robot_id, frame));
@@ -29,10 +29,13 @@ class ProjectDatabase:
         self.connection.executescript(SCHEMA)
         video_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(videos)")}
         for column in ("official_red", "official_blue", "red_disqualified", "blue_disqualified",
-                       "swarm_threshold", "pollinator_1_threshold", "pollinator_2_threshold"):
+                       "swarm_threshold", "pollinator_1_threshold", "pollinator_2_threshold", "scoreboard_ocr_json"):
             if column not in video_columns:
-                default = " NOT NULL DEFAULT 0" if column.endswith("disqualified") else " NOT NULL DEFAULT 16" if column == "swarm_threshold" else " NOT NULL DEFAULT 4" if column == "pollinator_1_threshold" else " NOT NULL DEFAULT 7" if column == "pollinator_2_threshold" else ""
-                self.connection.execute(f"ALTER TABLE videos ADD COLUMN {column} INTEGER{default}")
+                if column == "scoreboard_ocr_json":
+                    self.connection.execute("ALTER TABLE videos ADD COLUMN scoreboard_ocr_json TEXT")
+                else:
+                    default = " NOT NULL DEFAULT 0" if column.endswith("disqualified") else " NOT NULL DEFAULT 16" if column == "swarm_threshold" else " NOT NULL DEFAULT 4" if column == "pollinator_1_threshold" else " NOT NULL DEFAULT 7" if column == "pollinator_2_threshold" else ""
+                    self.connection.execute(f"ALTER TABLE videos ADD COLUMN {column} INTEGER{default}")
         robot_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(robots)")}
         for column in ("seed_x", "seed_y"):
             if column not in robot_columns:
@@ -144,6 +147,11 @@ class ProjectDatabase:
         disqualified = disqualified or set()
         self.connection.execute("UPDATE videos SET official_red=?,official_blue=?,red_disqualified=?,blue_disqualified=?,swarm_threshold=?,pollinator_1_threshold=?,pollinator_2_threshold=? WHERE id=?",
                                 (red, blue, int("red" in disqualified), int("blue" in disqualified), swarm_threshold, pollinator_1_threshold, pollinator_2_threshold, video_id))
+        self.connection.commit()
+
+    def set_scoreboard_ocr(self, video_id: int, result: dict) -> None:
+        self.connection.execute("UPDATE videos SET scoreboard_ocr_json=? WHERE id=?",
+                                (json.dumps(result), video_id))
         self.connection.commit()
 
     def add_clip(self, event_id: int, path: Path, start_t_s: float, end_t_s: float) -> None:
