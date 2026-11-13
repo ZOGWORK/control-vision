@@ -7,7 +7,7 @@ from unittest.mock import patch
 from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
 from control_vision.pipeline.tracking import _match_initial_seeds
 from control_vision.pipeline.ingest import probe_video
-from control_vision.pipeline.manual_tracking import _save_best_photos
+from control_vision.pipeline.manual_tracking import _photo_crop_bounds, _save_best_photos
 from control_vision.pipeline.zones import zone_at
 from control_vision.game.scoreboard import calculate_scoreboard
 from control_vision.storage.database import ProjectDatabase, SCHEMA
@@ -174,6 +174,11 @@ class VideoIngestTests(unittest.TestCase):
 
 
 class PreviewPhotoTests(unittest.TestCase):
+    def test_default_tracking_patch_yields_exportable_photo_geometry(self):
+        x0, y0, x1, y1 = _photo_crop_bounds((720, 1280, 3), 600, 510, 112, 88)
+        self.assertGreaterEqual(x1 - x0, 200)
+        self.assertGreaterEqual(y1 - y0, 200)
+
     def test_only_full_size_crops_are_written(self):
         import logging
         import numpy as np

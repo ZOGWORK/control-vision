@@ -173,8 +173,7 @@ def track_seeded_video(video_path: Path, corners: list[list[float]],
                     continue
                 rows.append((rid, frame_index, t_s, x_ft, y_ft, confidence))
                 crop_x, crop_y = anchors[rid]
-                x0, y0 = max(0, round(crop_x - patch_width / 2)), max(0, round(crop_y - patch_height))
-                x1, y1 = min(frame.shape[1], round(crop_x + patch_width / 2)), min(frame.shape[0], round(crop_y + 3))
+                x0, y0, x1, y1 = _photo_crop_bounds(frame.shape, crop_x, crop_y, patch_width, patch_height)
                 if x1 > x0 and y1 > y0:
                     quality_area = (x1 - x0) * (y1 - y0) * confidence
                     if rid not in best_photos or quality_area > best_photos[rid][0]:
@@ -205,3 +204,12 @@ def _save_best_photos(best_photos, photos_dir, logger):
         if cv2.imwrite(str(path), crop):
             photo_rows.append((rid, path, t_s))
     return photo_rows
+
+
+def _photo_crop_bounds(shape, x, y, patch_width, patch_height):
+    # The tracking patch stays tight; the evidence photo needs enough source
+    # pixels to meet the same 200x200 export gate as YOLO detections.
+    width = max(220, patch_width)
+    height = max(220, patch_height)
+    return (max(0, round(x - width / 2)), max(0, round(y - height)),
+            min(shape[1], round(x + width / 2)), min(shape[0], round(y + 3)))
