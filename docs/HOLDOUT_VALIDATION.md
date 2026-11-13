@@ -60,7 +60,10 @@ the real file must contain every team at every sampled frame):
   ],
   "official_scores": {"red": 102, "blue": 94},
   "calibration_landmarks": [
-    {"x_ft": 3, "y_ft": 3, "pixel_x": 420, "pixel_y": 480}
+    {"x_ft": 3, "y_ft": 3, "pixel_x": 420, "pixel_y": 480},
+    {"x_ft": 9, "y_ft": 3, "pixel_x": 760, "pixel_y": 485},
+    {"x_ft": 3, "y_ft": 9, "pixel_x": 415, "pixel_y": 830},
+    {"x_ft": 9, "y_ft": 9, "pixel_x": 755, "pixel_y": 835}
   ]
 }
 ```
@@ -78,7 +81,11 @@ counts visible labeled observations with a prediction within 1.5 feet, using
 one-to-one matching per frame. ID switches count changes in the matched
 predicted team for a real robot. A separate identity-correct fraction catches
 robots that are assigned the wrong team for the whole match, even when the ID
-switch count is zero. Calibration reprojection error uses independent
+switch count is zero. The report also lists identity-aware completeness for
+each robot, counting only observations with the correct team identity. The
+tracking gate requires at least 95% for every robot, so one poorly tracked
+team cannot be hidden by strong results from the others. Calibration
+reprojection error uses independent
 landmarks in pixels.
 
 The aggregate checks the build brief's targets: mean ID switches ≤ 2 per

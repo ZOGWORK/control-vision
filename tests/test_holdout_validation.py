@@ -94,6 +94,28 @@ class HoldoutValidationTests(unittest.TestCase):
             self.assertEqual(case["tracking"]["identity_correct_fraction"], .5)
             self.assertEqual(case["tracking"]["id_switches"], 2)
 
+    def test_consistently_swapped_robots_cannot_pass_tracking_target(self):
+        with tempfile.TemporaryDirectory() as folder:
+            case_path, _, red, blue = self.make_case(Path(folder))
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            db.replace_tracks([(red, 0, 0.0, 10, 10, .9), (blue, 0, 0.0, 2, 2, .9),
+                               (red, 2, 0.5, 10.2, 10, .9), (blue, 2, 0.5, 2.2, 2, .9)])
+            db.close()
+            case = evaluate_case(case_path)
+            self.assertEqual(case["tracking"]["completeness"], 1)
+            self.assertEqual(case["tracking"]["id_switches"], 0)
+            self.assertEqual(case["tracking"]["identity_aware_completeness"], 0)
+            for robot in case["tracking"]["per_robot"].values():
+                self.assertEqual(robot["identity_aware_completeness"], 0)
+            distinct = []
+            for index in range(5):
+                report = deepcopy(case)
+                report["match_label"] = f"swapped Q{index + 1}"
+                report["video_id"] = index + 1
+                report["video_path"] = f"swapped-Q{index + 1}.mp4"
+                distinct.append(report)
+            self.assertFalse(aggregate(distinct)["summary"]["phase_1_pass"])
+
     def test_incomplete_truth_cannot_claim_coverage(self):
         with tempfile.TemporaryDirectory() as folder:
             case_path, _, _, _ = self.make_case(Path(folder))

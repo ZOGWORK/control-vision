@@ -200,16 +200,23 @@ def evaluate_case(case_file: Path) -> dict:
             raise ValueError("The truth sample_fps does not match the saved track sampling stride.")
         by_frame_predicted[int(row["frame"])].append(row)
     visible_count = matched_count = identity_correct = id_switches = 0
+    visible_by_team = defaultdict(int)
+    matched_by_team = defaultdict(int)
+    correct_by_team = defaultdict(int)
     previous_identity: dict[int, int] = {}
     for frame in sorted(by_frame_truth):
         actual, predicted = by_frame_truth[frame], by_frame_predicted[frame]
         visible_count += len(actual)
+        for robot in actual:
+            visible_by_team[int(robot["team_number"])] += 1
         for actual_index, predicted_index, _ in _best_pairs(
             actual, predicted, MAX_ASSOCIATION_DISTANCE_FT
         ):
             matched_count += 1
             team = int(actual[actual_index]["team_number"])
             assigned = int(predicted[predicted_index]["team_number"])
+            matched_by_team[team] += 1
+            correct_by_team[team] += int(team == assigned)
             identity_correct += int(team == assigned)
             if team in previous_identity and previous_identity[team] != assigned:
                 id_switches += 1
@@ -286,8 +293,18 @@ def evaluate_case(case_file: Path) -> dict:
         "tracking_mode": video["tracking_mode"],
         "sample_fps": float(truth["sample_fps"]), "sampled_frame_count": len(expected) // len(team_numbers),
         "tracking": {"visible_observations": visible_count, "matched_observations": matched_count,
+                     "correct_identity_observations": identity_correct,
                      "completeness": _fraction(matched_count, visible_count),
                      "identity_correct_fraction": _fraction(identity_correct, matched_count),
+                     "identity_aware_completeness": _fraction(identity_correct, visible_count),
+                     "per_robot": {str(team): {
+                         "visible_observations": visible_by_team[team],
+                         "matched_observations": matched_by_team[team],
+                         "correct_identity_observations": correct_by_team[team],
+                         "completeness": _fraction(matched_by_team[team], visible_by_team[team]),
+                         "identity_aware_completeness": _fraction(
+                             correct_by_team[team], visible_by_team[team]),
+                     } for team in sorted(team_numbers)},
                      "id_switches": id_switches,
                      "max_reprojection_error_px": max(reprojection_errors)},
         "cycles": {"differences_by_team": cycle_differences,
@@ -320,6 +337,9 @@ def aggregate(cases: list[dict]) -> dict:
         raise ValueError("Holdout match labels must be unique.")
     visible = sum(case["tracking"]["visible_observations"] for case in cases)
     matched = sum(case["tracking"]["matched_observations"] for case in cases)
+    identity_correct = sum(case["tracking"]["correct_identity_observations"] for case in cases)
+    per_robot_completeness = [metrics["identity_aware_completeness"]
+                              for case in cases for metrics in case["tracking"]["per_robot"].values()]
     scored = sum(case["scoring"]["confirmed_scored_events"] for case in cases)
     attributed = sum(case["scoring"]["correct_robot_attribution"] for case in cases)
     active = sum(case["highlights"]["active_events"] for case in cases)
@@ -330,6 +350,8 @@ def aggregate(cases: list[dict]) -> dict:
         "preview_mode_used": any(case["tracking_mode"] == "seeded_optical_flow" for case in cases),
         "mean_id_switches_per_match": sum(case["tracking"]["id_switches"] for case in cases) / len(cases),
         "track_completeness": _fraction(matched, visible),
+        "identity_aware_completeness": _fraction(identity_correct, visible),
+        "minimum_per_robot_identity_aware_completeness": min(per_robot_completeness),
         "max_reprojection_error_px": max(case["tracking"]["max_reprojection_error_px"] for case in cases),
         "cycle_within_one_match_fraction": _fraction(sum(case["cycles"]["within_one_for_all_teams"]
                                                        for case in cases), len(cases)),
@@ -340,6 +362,7 @@ def aggregate(cases: list[dict]) -> dict:
     }
     summary["phase_1_pass"] = (summary["mean_id_switches_per_match"] <= 2
                                and summary["track_completeness"] >= 0.95
+                               and summary["minimum_per_robot_identity_aware_completeness"] >= 0.95
                                and summary["max_reprojection_error_px"] < 5)
     summary["phase_2_pass"] = summary["cycle_within_one_match_fraction"] >= 0.90
     summary["phase_3_pass"] = active > 0 and summary["clip_coverage"] == 1.0
