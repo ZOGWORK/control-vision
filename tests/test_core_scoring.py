@@ -15,12 +15,14 @@ class CoreScoringTests(unittest.TestCase):
                        {"id": 2, "team_number": 2002, "alliance": "blue"}]
 
     def test_pending_review_cannot_claim_a_winner(self):
-        events = [{"robot_id": 1, "status": "confirmed", "points": 5, "event_type": "nectar_floor"},
-                  {"robot_id": 2, "status": "flagged", "points": 10, "event_type": "nectar_floor"}]
-        board = calculate_scoreboard(events, self.robots)
-        self.assertFalse(board["match_resolved"])
-        self.assertEqual(board["alliance_points"], {"red": 5, "blue": 0})
-        self.assertEqual(board["ranking_points"]["red"]["WIN_TIE"], 0)
+        for status in ("flagged", "pending", "unknown"):
+            with self.subTest(status=status):
+                events = [{"robot_id": 1, "status": "confirmed", "points": 5, "event_type": "nectar_floor"},
+                          {"robot_id": 2, "status": status, "points": 10, "event_type": "nectar_floor"}]
+                board = calculate_scoreboard(events, self.robots)
+                self.assertFalse(board["match_resolved"])
+                self.assertEqual(board["alliance_points"], {"red": 5, "blue": 0})
+                self.assertEqual(board["ranking_points"]["red"]["WIN_TIE"], 0)
 
     def test_empty_completed_review_queue_resolves_zero_zero_tie(self):
         board = calculate_scoreboard([], self.robots)

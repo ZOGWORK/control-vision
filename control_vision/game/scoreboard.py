@@ -22,7 +22,7 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
     the robot's alliance. Disqualification is entered by the human reviewer.
     """
     disqualified = disqualified or set()
-    match_resolved = not any(event["status"] == "flagged" for event in events)
+    match_resolved = all(event["status"] in {"confirmed", "rejected"} for event in events)
     robot_by_id = {int(robot["id"]): robot for robot in robots}
     alliance_scores = {"red": 0, "blue": 0}
     team_points: dict[int, int] = defaultdict(int)
