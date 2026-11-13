@@ -12,6 +12,14 @@ from control_vision.pipeline.homography import matrix_from_corners, project_poin
 from control_vision.pipeline.zones import point_in_polygon
 
 
+def _new_roi_candidate(x: float, y: float, t_s: float,
+                       recent: list[tuple[float, float, float]]) -> bool:
+    """Avoid counting a briefly lost and reacquired goal element twice."""
+    recent[:] = [item for item in recent if t_s - item[2] <= 2.0]
+    return all((x - old_x) ** 2 + (y - old_y) ** 2 > 35 ** 2
+               for old_x, old_y, _ in recent)
+
+
 def _match_initial_seeds(seed_points, detections, assigned_robot_ids, assigned_track_ids, max_distance):
     """One-to-one seed assignment with a hard distance gate; never guess late entrants."""
     remaining = [seed for seed in seed_points if seed[0] not in assigned_robot_ids]
@@ -108,6 +116,7 @@ def track_video(
     rows: list[tuple[int, int, float, float, float, float]] = []
     best_photos: dict[int, tuple[int, float, float, object]] = {}
     scoring_candidates: list[dict] = []
+    recent_roi_candidates: list[tuple[float, float, float]] = []
     sampled = 0
     frame_index = 0
     empty = 0
@@ -186,6 +195,8 @@ def track_video(
                     pending_roi_count, pending_roi_since = current_roi_count, t_s
                 elif pending_roi_since is not None and t_s - pending_roi_since >= 0.5:
                     for ball_x, ball_y, ball_conf in roi_balls[stable_roi_count:current_roi_count]:
+                        if not _new_roi_candidate(ball_x, ball_y, t_s, recent_roi_candidates):
+                            continue
                         if robot_positions:
                             robot_id = min(robot_positions, key=lambda pos: (pos[1] - ball_x) ** 2 + (pos[2] - ball_y) ** 2)[0]
                         else:
@@ -193,6 +204,7 @@ def track_video(
                         scoring_candidates.append({"robot_id": robot_id, "t_s": t_s, "points": 0,
                                                    "confidence": "high" if ball_conf >= 0.7 else "medium",
                                                    "status": "flagged", "source": "goal_roi", "event_type": "unclassified"})
+                        recent_roi_candidates.append((ball_x, ball_y, t_s))
                     stable_roi_count = current_roi_count
                     pending_roi_count, pending_roi_since = stable_roi_count, None
             elif goal_roi and current_roi_count < pending_roi_count:

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
-from control_vision.pipeline.tracking import _match_initial_seeds
+from control_vision.pipeline.tracking import _match_initial_seeds, _new_roi_candidate
 from control_vision.pipeline.ingest import probe_video
 from control_vision.pipeline.manual_tracking import _photo_crop_bounds, _save_best_photos
 from control_vision.pipeline.zones import zone_at
@@ -14,6 +14,12 @@ from control_vision.storage.database import ProjectDatabase, SCHEMA
 
 
 class SeedMatchingTests(unittest.TestCase):
+    def test_goal_element_reacquisition_does_not_repeat_candidate(self):
+        recent = [(100.0, 100.0, 1.0)]
+        self.assertFalse(_new_roi_candidate(105.0, 99.0, 2.0, recent))
+        self.assertTrue(_new_roi_candidate(180.0, 100.0, 2.0, recent))
+        self.assertTrue(_new_roi_candidate(100.0, 100.0, 4.0, recent))
+
     def test_assigns_one_to_one_by_minimum_total_distance(self):
         seeds = [(10, 100, 100), (20, 200, 100)]
         detections = [(1, 115, 100), (2, 180, 100)]
@@ -151,6 +157,22 @@ class ShutdownTests(unittest.TestCase):
 
 
 class VideoIngestTests(unittest.TestCase):
+    def test_unreadable_first_frame_is_not_saved_in_project(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from control_vision.app.main_window import MainWindow
+
+        database = SimpleNamespace(add_video=Mock())
+        window = SimpleNamespace(db=database, project_id=1)
+        capture = SimpleNamespace(read=lambda: (False, None), release=lambda: None)
+        with patch("control_vision.app.main_window.QFileDialog.getOpenFileName", return_value=("bad.mp4", "")), \
+             patch("control_vision.app.main_window.QInputDialog.getText", side_effect=[("EV", True), ("Q3", True)]), \
+             patch("control_vision.app.main_window.probe_video", return_value={"width": 1280, "height": 720, "fps": 30}), \
+             patch("control_vision.app.main_window.cv2.VideoCapture", return_value=capture), \
+             patch("control_vision.app.main_window.QMessageBox.critical"):
+            MainWindow.import_video(window)
+        database.add_video.assert_not_called()
+
     def test_nonnumeric_stream_duration_uses_readable_video_frame_count(self):
         class Capture:
             released = False

@@ -721,10 +721,10 @@ class MainWindow(QMainWindow):
             if not ok: return
             match_number, ok = QInputDialog.getText(self, "Match details", "Match number (optional, e.g. Q12)")
             if not ok: return
-            video_id = self.db.add_video(self.project_id, path, metadata, event_code.strip() or None, match_number.strip() or None)
             cap = cv2.VideoCapture(str(path)); ok, frame = cap.read(); cap.release()
             if not ok:
                 raise VideoError(f"Could not read the first frame from {path.name}.")
+            video_id = self.db.add_video(self.project_id, path, metadata, event_code.strip() or None, match_number.strip() or None)
         except Exception as exc:
             QMessageBox.critical(self, "Video import failed", str(exc)); return
         if self.capture: self.capture.release()
