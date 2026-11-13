@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shutil
 from datetime import date
 from pathlib import Path
@@ -19,6 +20,68 @@ def dataset_hash(root: Path) -> str:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
     return digest.hexdigest()
+
+
+def _dataset_root(data: Path, config: dict) -> Path:
+    configured = Path(config.get("path", "."))
+    if configured.is_absolute():
+        return configured
+    # The example data.yaml uses a path relative to the launch directory.
+    # Also accept a path relative to the YAML for portable datasets.
+    from_cwd = configured.resolve()
+    from_yaml = (data.resolve().parent / configured).resolve()
+    return from_cwd if from_cwd.is_dir() else from_yaml
+
+
+def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
+    """Reject broken YOLO labels and exact train/val leakage before training."""
+    root = _dataset_root(data, config)
+    seen_hashes: dict[str, str] = {}
+    train_robot_count = 0
+    for split in ("train", "val"):
+        image_ref = config.get(split)
+        if not isinstance(image_ref, str):
+            raise ValueError(f"{split} must name an images directory in data.yaml")
+        images_dir = Path(image_ref)
+        if not images_dir.is_absolute():
+            images_dir = root / images_dir
+        if not images_dir.is_dir() or images_dir.parent.name != "images":
+            raise ValueError(f"{split} images directory is missing or outside images/: {images_dir}")
+        labels_dir = images_dir.parent.parent / "labels" / images_dir.name
+        images = sorted(path for path in images_dir.iterdir()
+                        if path.suffix.lower() in {".jpg", ".jpeg", ".png"})
+        if not images:
+            raise ValueError(f"{split} has no images in {images_dir}")
+        for image in images:
+            label = labels_dir / f"{image.stem}.txt"
+            if not label.is_file():
+                raise ValueError(f"Missing YOLO label file for {split} image {image.name}: {label}")
+            if cv2.imread(str(image)) is None:
+                raise ValueError(f"Unreadable {split} image: {image}")
+            image_hash = hashlib.sha256(image.read_bytes()).hexdigest()
+            previous = seen_hashes.get(image_hash)
+            if previous is not None and previous != split:
+                raise ValueError(f"Identical image appears in train and val: {image.name}")
+            seen_hashes[image_hash] = split
+            for line_number, line in enumerate(label.read_text(encoding="utf-8").splitlines(), 1):
+                values = line.split()
+                if len(values) != 5:
+                    raise ValueError(f"{label}:{line_number}: expected class x_center y_center width height")
+                try:
+                    class_id = int(values[0])
+                    x, y, width, height = map(float, values[1:])
+                except ValueError as exc:
+                    raise ValueError(f"{label}:{line_number}: invalid class or box number") from exc
+                if not (0 <= class_id < class_count and all(math.isfinite(v) for v in (x, y, width, height))
+                        and 0 <= x <= 1 and 0 <= y <= 1 and 0 < width <= 1 and 0 < height <= 1
+                        and x - width / 2 >= -1e-6 and x + width / 2 <= 1 + 1e-6
+                        and y - height / 2 >= -1e-6 and y + height / 2 <= 1 + 1e-6):
+                    raise ValueError(f"{label}:{line_number}: class or normalized box is out of range")
+                if split == "train" and class_id == 0:
+                    train_robot_count += 1
+    if train_robot_count == 0:
+        raise ValueError("Training split has no labeled robots (class 0)")
+    return root
 
 
 def main():
@@ -43,6 +106,15 @@ def main():
     names_list = [names[index] if isinstance(names, dict) else names[index] for index in range(len(names))]
     if names_list not in (["robot"], ["robot", "pollen", "nectar"]):
         parser.error("Supported classes are ['robot'] or ['robot','pollen','nectar'] in that order; alliance color is an attribute, not a class.")
+    models_dir = Path("models")
+    onnx_path = models_dir / f"yolo11n-biobuzz-v{args.version}.onnx"
+    metadata_path = models_dir / f"yolo11n-biobuzz-v{args.version}.json"
+    if onnx_path.exists() or metadata_path.exists():
+        parser.error(f"Refusing to overwrite existing model version {args.version}.")
+    try:
+        data_root = validate_dataset(args.data, config, len(names_list))
+    except ValueError as exc:
+        parser.error(str(exc))
     model = YOLO(str(args.base_weights))
     run = model.train(data=str(args.data), epochs=args.epochs, batch=args.batch, imgsz=args.imgsz,
                       lr0=0.01, patience=20, device=args.device, project="runs/training", name=f"biobuzz-{args.version}")
@@ -50,11 +122,7 @@ def main():
     metrics = run.results_dict if hasattr(run, "results_dict") else run if isinstance(run, dict) else {}
     best_pt = Path(getattr(trainer, "best", Path(trainer.save_dir) / "weights" / "best.pt"))
     if not best_pt.is_file(): raise SystemExit(f"Training completed without a best checkpoint at {best_pt}")
-    models_dir = Path("models"); models_dir.mkdir(exist_ok=True)
-    onnx_path = models_dir / f"yolo11n-biobuzz-v{args.version}.onnx"
-    metadata_path = models_dir / f"yolo11n-biobuzz-v{args.version}.json"
-    if onnx_path.exists() or metadata_path.exists():
-        raise SystemExit(f"Refusing to overwrite existing model version {args.version}.")
+    models_dir.mkdir(exist_ok=True)
     trained = YOLO(str(best_pt))
     exported = Path(trained.export(format="onnx", imgsz=args.imgsz, opset=12, simplify=False))
     shutil.copy2(exported, onnx_path)
@@ -67,7 +135,6 @@ def main():
     except Exception as exc:
         onnx_path.unlink(missing_ok=True)
         raise SystemExit(f"ONNX Runtime smoke check failed: {exc}") from exc
-    data_root = args.data.resolve().parent
     record = {"version": args.version, "date": date.today().isoformat(), "dataset_sha256": dataset_hash(data_root),
               "classes": names_list, "base_weights": str(args.base_weights), "training_config": {"epochs": args.epochs, "batch": args.batch,
               "imgsz": args.imgsz, "lr0": 0.01, "patience": 20, "device": args.device}, "validation_metrics": metrics,
