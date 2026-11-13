@@ -24,14 +24,15 @@ This is the scope ledger for the build brief. It separates implemented product b
 - ReID accepts a compatible user-supplied model; no OSNet architecture checkpoint has been bundled or validated.
 - OC-SORT fallback and StrongSORT AFLink + GSI offline tracklet stitching are not implemented. Current tracking is BoT-SORT only.
 - OCR reconciliation with zone/element evidence is not implemented. OCR proposes official scoreboard totals only; all point-event attribution remains human-reviewed. On the sampled Salk Q3 clip it returned 156–93 from 2 readable frames of 12, so the UI confidence is capped and this is not a general accuracy claim.
-- The seeded optical-flow mode is an experimental movement preview, not a full-match identity detector. A real Q3 smoke run retained 212 points from two seeds across a 170-second clip, with one seed represented in only 11 sampled points. Do not use these tracks as scoring evidence.
+- The seeded optical-flow mode is an experimental movement preview, not a full-match identity detector. A real Salk Q3 smoke run retained 201 points for one seed across a 170-second clip and produced one valid robot photo. Do not use these tracks as scoring evidence.
+- The bundled Ultralytics runtime and YOLO11 models are offered under AGPL-3.0 or an Enterprise license. Before distributing a release from this private repository, the project needs a documented license decision or a compatible replacement runtime and model. See [Ultralytics licensing](https://docs.ultralytics.com/help/contributing/#open-sourcing-your-yolo-project-under-agpl-30).
 - Automatic scoring for HIVE, FLOWER ownership/bottom NECTAR, GARDEN, robot parking/LEAVE and referee calls is not implemented. ROI changes are only review candidates; visual and referee evidence must be interpreted by a human.
 - Model training and acceptance targets cannot be completed without suitable labeled BIOBUZZ data, fixed-camera footage screening, and held-out matches with hand-counted cycles / official results. No accuracy, speed, or holdout acceptance claim is made.
 - The app includes a BIOBUZZ TU09 rule reference and manual-derived point/RP logic, but does not replace event referees, Robot Inspectors, the official scoring system, or later manual/team updates.
 
 ## Verification needed before release
 
-Use the brief's holdout matches only for verification, never for training. Measure ID switches, track completeness, calibration reprojection error, cycle error, clip coverage, score error, attribution accuracy, startup/import/results latency, and processing time on the named target hardware. The target laptop is not identified in the repo, so performance thresholds remain targets rather than results.
+Use the brief's holdout matches only for verification, never for training. Measure ID switches, track completeness, calibration reprojection error, cycle error, clip coverage, score error, attribution accuracy, startup/import/results latency, and processing time on the target hardware. The Windows laptop used for the Salk Q3 optical-flow workflow completed the 170-second, 2 fps preview smoke in 84.76 seconds. This does not measure the required 8 fps YOLO processing budget, so performance thresholds remain targets rather than results.
 
 ## Rule sources
 

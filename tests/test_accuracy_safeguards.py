@@ -485,6 +485,33 @@ class DatabaseMigrationTests(unittest.TestCase):
             db.close()
 
 
+class ReviewSelectionTests(unittest.TestCase):
+    def test_unassigned_event_resets_previous_robot_selection(self):
+        import os
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication, QTableWidgetItem
+        from control_vision.app.main_window import MainWindow
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        try:
+            window.review_robot.addItem("Unassigned", None)
+            window.review_robot.addItem("1234 (red)", 1)
+            window.review_robot.setCurrentIndex(1)
+            window.events = [{"id": 7, "robot_id": None, "event_type": "unclassified",
+                              "points": 0, "confidence": "low", "scoring_alliance": None}]
+            window.review_table.setRowCount(1)
+            item = QTableWidgetItem("7")
+            item.setData(Qt.ItemDataRole.UserRole, 7)
+            window.review_table.setItem(0, 0, item)
+            window.load_review_selection(0, 0, -1, -1)
+            self.assertEqual(window.review_robot.currentIndex(), 0)
+            self.assertIsNone(window.review_robot.currentData())
+        finally:
+            window.close()
+
+
 class ShutdownTests(unittest.TestCase):
     def test_active_analysis_blocks_project_and_video_switches(self):
         from types import SimpleNamespace
