@@ -47,7 +47,7 @@ def main():
     run = model.train(data=str(args.data), epochs=args.epochs, batch=args.batch, imgsz=args.imgsz,
                       lr0=0.01, patience=20, device=args.device, project="runs/training", name=f"biobuzz-{args.version}")
     trainer = model.trainer
-    metrics = getattr(trainer, "metrics", {})
+    metrics = run.results_dict if hasattr(run, "results_dict") else run if isinstance(run, dict) else {}
     best_pt = Path(getattr(trainer, "best", Path(trainer.save_dir) / "weights" / "best.pt"))
     if not best_pt.is_file(): raise SystemExit(f"Training completed without a best checkpoint at {best_pt}")
     models_dir = Path("models"); models_dir.mkdir(exist_ok=True)
