@@ -8,6 +8,35 @@ import cv2
 import numpy as np
 
 from control_vision.training.train_yolo import publish_model_artifacts, reserve_model_version, validate_dataset
+from control_vision.training.extract_frames import extract
+
+
+class FrameExtractionTests(unittest.TestCase):
+    def test_zero_limit_is_rejected_before_opening_video(self):
+        with patch("control_vision.training.extract_frames.cv2.VideoCapture") as capture:
+            with self.assertRaisesRegex(ValueError, "--max-frames"):
+                extract(Path("match.mp4"), Path("unused"), max_frames=0)
+            capture.assert_not_called()
+
+    def test_early_decode_failure_reports_video_and_releases_capture(self):
+        class TruncatedCapture:
+            released = False
+            reads = 0
+
+            def isOpened(self): return True
+            def get(self, prop):
+                return {cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_COUNT: 10}[prop]
+            def read(self):
+                self.reads += 1
+                return (self.reads <= 2, np.zeros((8, 8, 3), dtype=np.uint8))
+            def release(self): self.released = True
+
+        capture = TruncatedCapture()
+        with tempfile.TemporaryDirectory() as folder, \
+             patch("control_vision.training.extract_frames.cv2.VideoCapture", return_value=capture):
+            with self.assertRaisesRegex(RuntimeError, "match.mp4"):
+                extract(Path("match.mp4"), Path(folder))
+        self.assertTrue(capture.released)
 
 
 class TrainingDatasetTests(unittest.TestCase):
