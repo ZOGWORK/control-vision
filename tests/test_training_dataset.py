@@ -1,13 +1,15 @@
 import tempfile
 import unittest
 import os
+import csv
 from pathlib import Path
 from unittest.mock import patch
 
 import cv2
 import numpy as np
 
-from control_vision.training.train_yolo import publish_model_artifacts, reserve_model_version, validate_dataset
+from control_vision.training.train_yolo import (publish_model_artifacts, reserve_model_version,
+                                                training_split_provenance, validate_dataset)
 from control_vision.training.extract_frames import extract
 
 
@@ -70,6 +72,29 @@ class TrainingDatasetTests(unittest.TestCase):
     def test_valid_data_and_empty_negative_label(self):
         (self.root / "labels" / "val" / "two.txt").write_text("", encoding="utf-8")
         self.assertEqual(validate_dataset(self.data, self.config, 1), self.root)
+
+    def test_training_requires_match_manifest_unless_exploratory(self):
+        with self.assertRaisesRegex(ValueError, "split manifest"):
+            training_split_provenance(self.root, self.config)
+        self.assertEqual(training_split_provenance(self.root, self.config, exploratory=True),
+                         {"mode": "exploratory_unverified", "manifest_sha256": None})
+
+        with (self.root / "split_manifest.csv").open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=["image", "split", "source_match", "source", "rights"])
+            writer.writeheader()
+            for split, name, match in (("train", "one", "event-a:Q1"), ("val", "two", "event-b:Q2")):
+                writer.writerow({"image": f"images/{split}/{name}.jpg", "split": split,
+                                 "source_match": match, "source": "local match video", "rights": "owned"})
+        audit = training_split_provenance(self.root, self.config)
+        self.assertEqual(audit["mode"], "match_audited")
+        self.assertEqual(audit["matches"], 2)
+        self.assertEqual(len(audit["manifest_sha256"]), 64)
+        self.assertEqual(training_split_provenance(self.root, self.config, exploratory=True), audit)
+
+    def test_manifest_mode_rejects_nonstandard_training_directories(self):
+        config = {**self.config, "val": "images/train"}
+        with self.assertRaisesRegex(ValueError, "val must use images/val"):
+            training_split_provenance(self.root, config)
 
     def test_portable_yaml_relative_dataset_path(self):
         self.config["path"] = "."
