@@ -106,3 +106,53 @@ def classify_match_time(t_s: float, periods: dict) -> tuple[str, float]:
     if t_s < auto + transition + teleop:
         return "TELEOP", auto + transition + teleop - t_s
     return "POST-MATCH", 0.0
+
+
+def calculate_playoff_scoreboard(events, robots, *, disqualified: set[str] | None = None,
+                                 first_disqualified: str | None = None,
+                                 simultaneous_disqualification: bool = False,
+                                 match_final: bool = False) -> dict:
+    """Score a playoff match without ranking points (BIOBUZZ T705).
+
+    A human reviewer enters the chronological first DQ, or explicitly marks
+    simultaneous DQs. Without that ruling, a double-DQ winner is unresolved.
+    ``match_final`` allows a reviewed 0-0 match with no event rows to tie.
+    """
+    disqualified = set(disqualified or ())
+    if disqualified - {"red", "blue"}:
+        raise ValueError("Unknown playoff alliance DQ")
+    if first_disqualified is not None and (len(disqualified) != 2 or first_disqualified not in disqualified):
+        raise ValueError("First disqualified alliance requires both alliance DQs")
+    if simultaneous_disqualification and (len(disqualified) != 2 or first_disqualified is not None):
+        raise ValueError("Simultaneous DQ requires both alliances and no first DQ")
+
+    events = list(events)
+    reviewed = all(event["status"] in {"confirmed", "rejected"} for event in events)
+    board = calculate_scoreboard(events, robots, disqualified=disqualified)
+    for alliance in ("red", "blue"):
+        for key in ("SWARM", "POLLINATOR_1", "POLLINATOR_2", "WIN_TIE", "total"):
+            board["ranking_points"][alliance][key] = 0
+    board["team_ranking_points"] = {robot_id: 0 for robot_id in board["team_ranking_points"]}
+
+    winner = None
+    tie = False
+    resolved = False
+    if len(disqualified) == 2:
+        if simultaneous_disqualification:
+            tie = resolved = True
+        elif first_disqualified is not None:
+            winner = "blue" if first_disqualified == "red" else "red"
+            resolved = True
+    elif len(disqualified) == 1:
+        winner = "blue" if "red" in disqualified else "red"
+        resolved = True
+    elif match_final and reviewed:
+        red, blue = board["alliance_points"]["red"], board["alliance_points"]["blue"]
+        tie = red == blue
+        winner = "red" if red > blue else "blue" if blue > red else None
+        resolved = True
+    # An official DQ can determine the winner while evidence reviews remain
+    # pending. Keep review completion separate from the playoff outcome.
+    board["match_resolved"] = board["match_resolved"] or (match_final and reviewed)
+    board["playoff_outcome"] = {"resolved": resolved, "winner": winner, "tie": tie}
+    return board
