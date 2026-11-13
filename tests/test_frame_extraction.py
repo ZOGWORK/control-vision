@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import math
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,16 @@ from control_vision.training.extract_frames import extract
 
 
 class FrameExtractionTests(unittest.TestCase):
+    def test_nonfinite_fps_releases_capture(self):
+        for fps in (math.nan, math.inf):
+            with self.subTest(fps=fps), patch("control_vision.training.extract_frames.cv2.VideoCapture") as video:
+                capture = video.return_value
+                capture.isOpened.return_value = True
+                capture.get.return_value = fps
+                with self.assertRaisesRegex(RuntimeError, "Invalid FPS"):
+                    extract(Path("match.mp4"), Path("unused"))
+                capture.release.assert_called_once()
+
     def test_zero_limit_is_rejected_before_video_open(self):
         with patch("control_vision.training.extract_frames.cv2.VideoCapture") as video:
             with self.assertRaisesRegex(ValueError, "--max-frames"):
