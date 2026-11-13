@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from control_vision.game.scoreboard import calculate_scoreboard
+from control_vision.pipeline.cycles import count_zone_cycles
 from control_vision.scout.exports import export_scout_json
 from control_vision.storage.database import ProjectDatabase
 
@@ -89,6 +90,20 @@ class CoreScoringTests(unittest.TestCase):
             self.assertEqual(payload["alliance_results"]["red"]["points_video"], 0)
             self.assertEqual(payload["teams"][0]["points_video"], 0)
             self.assertEqual(payload["official_alliance_scores"], {"red": 100, "blue": 90})
+
+    def test_biobuzz_zone_types_produce_reviewable_cycles(self):
+        for scoring_type in ("garden", "flower_scoring_volume", "hive"):
+            with self.subTest(scoring_type=scoring_type):
+                zones = {
+                    "load": {"type": "loading_zone", "points": [[0, 0], [2, 0], [2, 2], [0, 2]]},
+                    "goal": {"type": scoring_type, "points": [[8, 8], [10, 8], [10, 10], [8, 10]]},
+                }
+                rows = [(1, 0, 0.0, 1.0, 1.0, 0.9), (1, 1, 1.0, 4.0, 4.0, 0.9),
+                        (1, 2, 2.0, 9.0, 9.0, 0.9)]
+                cycles, events = count_zone_cycles(rows, zones)
+                self.assertEqual(len(cycles), 1)
+                self.assertEqual(events[0]["status"], "flagged")
+                self.assertEqual(events[0]["points"], 0)
 
 
 if __name__ == "__main__":

@@ -9,8 +9,12 @@ def count_zone_cycles(track_rows: list[tuple], zones: dict, debounce_s: float = 
     for row in track_rows:
         by_robot.setdefault(int(row[0]), []).append(row)
     cycles, events = [], []
-    pickup_names = {name for name, zone in zones.items() if zone.get("type") == "pickup"}
-    scoring_names = {name for name, zone in zones.items() if zone.get("type") == "scoring"}
+    # Generic practice zones and BIOBUZZ user-drawn zones both produce
+    # provisional trips. A trip is review evidence, never automatic points.
+    pickup_names = {name for name, zone in zones.items()
+                    if zone.get("type") in {"pickup", "loading_zone"}}
+    scoring_names = {name for name, zone in zones.items()
+                     if zone.get("type") in {"scoring", "garden", "flower_scoring_volume", "hive"}}
     for robot_id, rows in by_robot.items():
         rows.sort(key=lambda row: float(row[2]))
         state = "EMPTY"
