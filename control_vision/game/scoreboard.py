@@ -44,7 +44,9 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
             swarm_points[alliance] += points
         if event_type in {"hive_tip_auto", "hive_tip_teleop"}:
             hive_tips[alliance] += 1
-        if robot and robot["alliance"] == alliance:
+        # Robot attribution describes the observed actor; the recipient
+        # alliance can differ for alliance-scoped achievements and fouls.
+        if robot:
             team_points[int(robot_id)] += points
 
     for alliance in disqualified:
