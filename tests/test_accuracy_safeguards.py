@@ -2,7 +2,9 @@ import unittest
 import sqlite3
 import tempfile
 import logging
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
@@ -38,6 +40,29 @@ class WorkerDispatchTests(unittest.TestCase):
 
 
 class SeedMatchingTests(unittest.TestCase):
+    def test_failed_model_initialization_releases_video(self):
+        class Capture:
+            released = False
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else 90
+            def release(self): self.released = True
+
+        capture = Capture()
+        def fail_model(*args, **kwargs):
+            raise RuntimeError("bad model")
+        with tempfile.TemporaryDirectory() as directory:
+            model_path = Path(directory) / "robot.onnx"
+            model_path.write_bytes(b"placeholder")
+            with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=capture), \
+                 patch.dict(sys.modules, {"ultralytics": SimpleNamespace(YOLO=fail_model)}):
+                with self.assertRaisesRegex(RuntimeError, "bad model"):
+                    track_video(Path("match.mp4"), model_path, [[0, 0], [1, 0], [1, 1], [0, 1]],
+                                [(1, 0, 0)], 8.0, lambda: False, lambda *_: None,
+                                logging.getLogger("model-init-test"))
+        self.assertTrue(capture.released)
+
     def test_repeated_model_inference_errors_fail_before_replacing_results(self):
         import numpy as np
         from types import SimpleNamespace

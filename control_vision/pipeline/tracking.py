@@ -148,8 +148,14 @@ def track_video(
             raise RuntimeError(f"Could not configure the local ReID model: {exc}") from exc
     else:
         logger.warning("BoT-SORT appearance ReID is disabled; using motion and overlap association only.")
-    model = YOLO(str(model_path), task="detect")
-    matrix = matrix_from_corners(corners)
+    try:
+        model = YOLO(str(model_path), task="detect")
+        matrix = matrix_from_corners(corners)
+    except Exception:
+        cap.release()
+        if tracker_override:
+            Path(tracker_override.name).unlink(missing_ok=True)
+        raise
     seed_to_track: dict[int, int] = {}
     identities_seeded = False
     seed_assignment_deadline_s = 3.0
