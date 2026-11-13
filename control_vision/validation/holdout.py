@@ -110,6 +110,8 @@ def _validate_truth(truth: dict) -> None:
         raise ValueError("Visible truth positions must be finite and inside the 12-foot field.")
     if any(row.get("count") is None for row in truth["cycles"]):
         raise ValueError("Every team needs a reviewed hand-counted cycle total.")
+    if any(type(row["count"]) is not int or row["count"] < 0 for row in truth["cycles"]):
+        raise ValueError("Hand-counted cycle totals must be nonnegative whole numbers.")
     if len(truth["cycles"]) != len({int(row["team_number"]) for row in truth["cycles"]}):
         raise ValueError("Truth cycle counts may list each team only once.")
     if any(truth["official_scores"][color] is None for color in ("red", "blue")):
@@ -287,6 +289,27 @@ def evaluate_case(case_file: Path) -> dict:
         attribution_correct += int(expected_team is not None and event["team_number"] is not None
                                    and int(event["team_number"]) == int(expected_team))
 
+    truth_clips_present = truth_clips_cover_window = 0
+    used_events: set[int] = set()
+    for actual in truth_scored:
+        matches = [(abs(float(event["t_s"]) - float(actual["t_s"])), event)
+                   for event in active_events if int(event["id"]) not in used_events
+                   and abs(float(event["t_s"]) - float(actual["t_s"])) <= EVENT_TIME_TOLERANCE_S
+                   and ("event_type" not in actual or event["event_type"] == actual["event_type"])]
+        if not matches:
+            continue
+        event = min(matches, key=lambda pair: pair[0])[1]
+        used_events.add(int(event["id"]))
+        expected_start = max(0.0, float(actual["t_s"]) - 3.0)
+        expected_end = min(float(video["duration_s"]), float(actual["t_s"]) + 3.0)
+        candidates = [clip for clip in clip_by_event[int(event["id"])]
+                      if _clip_usable(db_path.parent / clip["path"],
+                                      expected_end - expected_start)]
+        truth_clips_present += int(bool(candidates))
+        truth_clips_cover_window += int(any(
+            float(clip["start_t_s"]) <= expected_start + 0.15
+            and float(clip["end_t_s"]) >= expected_end - 0.15 for clip in candidates))
+
     return {
         "match_label": truth["match_label"], "video_id": video_id,
         "video_path": str(video_path.resolve()), "project_db": str(db_path.resolve()),
@@ -310,7 +333,10 @@ def evaluate_case(case_file: Path) -> dict:
         "cycles": {"differences_by_team": cycle_differences,
                    "within_one_for_all_teams": all(abs(value) <= 1 for value in cycle_differences.values())},
         "highlights": {"active_events": len(active_events), "clips_present": clip_present,
-                       "clips_cover_three_seconds_each_side": clip_window_correct},
+                       "clips_cover_three_seconds_each_side": clip_window_correct,
+                       "truth_events": len(truth_scored),
+                       "truth_events_with_clips": truth_clips_present,
+                       "truth_clips_cover_three_seconds_each_side": truth_clips_cover_window},
         "scoring": {"official": official, "video": video_points,
                     "official_total": official_total, "video_total": video_total,
                     "total_error_fraction": score_error_fraction,
@@ -344,6 +370,9 @@ def aggregate(cases: list[dict]) -> dict:
     attributed = sum(case["scoring"]["correct_robot_attribution"] for case in cases)
     active = sum(case["highlights"]["active_events"] for case in cases)
     clips = sum(case["highlights"]["clips_cover_three_seconds_each_side"] for case in cases)
+    truth_events = sum(case["highlights"]["truth_events"] for case in cases)
+    truth_clips = sum(case["highlights"]["truth_clips_cover_three_seconds_each_side"]
+                      for case in cases)
     summary = {
         "match_count": len(cases),
         "match_list": [case["match_label"] for case in cases],
@@ -356,6 +385,7 @@ def aggregate(cases: list[dict]) -> dict:
         "cycle_within_one_match_fraction": _fraction(sum(case["cycles"]["within_one_for_all_teams"]
                                                        for case in cases), len(cases)),
         "clip_coverage": _fraction(clips, active),
+        "truth_event_clip_coverage": _fraction(truth_clips, truth_events),
         "score_within_ten_percent_match_fraction": _fraction(sum(case["scoring"]["within_ten_percent"]
                                                                for case in cases), len(cases)),
         "robot_attribution_fraction": _fraction(attributed, scored),
@@ -365,7 +395,9 @@ def aggregate(cases: list[dict]) -> dict:
                                and summary["minimum_per_robot_identity_aware_completeness"] >= 0.95
                                and summary["max_reprojection_error_px"] < 5)
     summary["phase_2_pass"] = summary["cycle_within_one_match_fraction"] >= 0.90
-    summary["phase_3_pass"] = active > 0 and summary["clip_coverage"] == 1.0
+    summary["phase_3_pass"] = (active > 0 and truth_events > 0
+                               and summary["clip_coverage"] == 1.0
+                               and summary["truth_event_clip_coverage"] == 1.0)
     summary["phase_4_pass"] = (summary["score_within_ten_percent_match_fraction"] >= 0.80
                                and scored > 0 and summary["robot_attribution_fraction"] >= 0.80)
     summary["brief_targets_met"] = (len(cases) >= 5 and not summary["preview_mode_used"]

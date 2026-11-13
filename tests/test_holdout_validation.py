@@ -130,6 +130,28 @@ class HoldoutValidationTests(unittest.TestCase):
             self.assertEqual(report["summary"]["minimum_per_robot_identity_aware_completeness"], 0)
             self.assertFalse(report["summary"]["phase_1_pass"])
 
+    def test_missing_truth_scoring_event_fails_clip_coverage(self):
+        with tempfile.TemporaryDirectory() as folder:
+            case_path, _, _, _ = self.make_case(Path(folder))
+            truth = json.loads(case_path.read_text(encoding="utf-8"))
+            truth["scoring_events"].append({
+                "t_s": 0.75, "team_number": 5678, "event_type": "flower_element"})
+            case_path.write_text(json.dumps(truth), encoding="utf-8")
+            case = evaluate_case(case_path)
+            self.assertEqual(case["highlights"]["clips_cover_three_seconds_each_side"], 1)
+            self.assertEqual(case["highlights"]["truth_events"], 2)
+            self.assertEqual(case["highlights"]["truth_clips_cover_three_seconds_each_side"], 1)
+            self.assertFalse(aggregate([case])["summary"]["phase_3_pass"])
+
+    def test_negative_hand_counted_cycles_are_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            case_path, _, _, _ = self.make_case(Path(folder))
+            truth = json.loads(case_path.read_text(encoding="utf-8"))
+            truth["cycles"][0]["count"] = -1
+            case_path.write_text(json.dumps(truth), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "nonnegative whole numbers"):
+                evaluate_case(case_path)
+
     def test_incomplete_truth_cannot_claim_coverage(self):
         with tempfile.TemporaryDirectory() as folder:
             case_path, _, _, _ = self.make_case(Path(folder))

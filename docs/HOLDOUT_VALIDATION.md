@@ -92,7 +92,8 @@ The aggregate checks the build brief's targets: mean ID switches ≤ 2 per
 match, track completeness ≥ 95%, maximum calibration error < 5 px, every
 team's cycle count within ±1 in ≥ 90% of matches, every non-rejected scoring
 event covered by a decodable clip from 3 seconds before through 3 seconds
-after (within video bounds), combined video score within 10% of official total
+after (within video bounds), every human-labeled scoring event matched to a
+decodable clip covering that same window, combined video score within 10% of official total
 in ≥ 80% of matches,
 and correct robot attribution on ≥ 80% of confirmed scored events. A match
 with pending flagged evidence fails its score check. `brief_targets_met` also
