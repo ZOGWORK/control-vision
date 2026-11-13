@@ -18,7 +18,7 @@ def smoke_test() -> None:
                  "docs/THIRD_PARTY_NOTICES.md",
                  "control_vision/config/scoring_biobuzz.json"]
     if getattr(sys, "frozen", False):
-        resources += ["SOURCE.txt", "FFMPEG_LICENSE.txt", "FFMPEG_BUILD.txt"]
+        resources += ["SOURCE.txt", "FFMPEG_LICENSE.txt", "FFMPEG_BUILD.txt", "FFMPEG_SOURCE.txt"]
     for relative in resources:
         if not (root / relative).is_file():
             raise RuntimeError(f"Missing packaged resource: {relative}")

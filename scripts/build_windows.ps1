@@ -6,7 +6,7 @@ try {
               elseif (Test-Path -LiteralPath (Join-Path $repoRoot ".venv\Scripts\python.exe")) {
                   Join-Path $repoRoot ".venv\Scripts\python.exe"
               } else { "python" }
-    $changes = @(git status --porcelain --untracked-files=no)
+    $changes = @(git status --porcelain --untracked-files=normal)
     if ($LASTEXITCODE -ne 0 -or $changes.Count -ne 0) {
         throw "Commit tracked changes before packaging so SOURCE.txt identifies the exact source."
     }
@@ -31,15 +31,45 @@ weights and match videos are external to the application bundle.
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $ffmpeg)) {
         throw "The pinned imageio-ffmpeg executable was not found."
     }
+    $wrapperVersion = & $python -c "import importlib.metadata; print(importlib.metadata.version('imageio-ffmpeg'))"
+    if ($LASTEXITCODE -ne 0 -or $wrapperVersion -ne "0.6.0") {
+        throw "Unexpected imageio-ffmpeg package version; update binary provenance before packaging."
+    }
     & $ffmpeg -L | Set-Content -LiteralPath (Join-Path $releaseDir "FFMPEG_LICENSE.txt") -Encoding utf8
     if ($LASTEXITCODE -ne 0) { throw "Could not read bundled FFmpeg license." }
     & $ffmpeg -version | Set-Content -LiteralPath (Join-Path $releaseDir "FFMPEG_BUILD.txt") -Encoding utf8
     if ($LASTEXITCODE -ne 0) { throw "Could not identify bundled FFmpeg build." }
+    $ffmpegVersion = (Get-Content -LiteralPath (Join-Path $releaseDir "FFMPEG_BUILD.txt") -TotalCount 1)
+    if ($ffmpegVersion -notmatch '^ffmpeg version 7\.1-essentials_build-www\.gyan\.dev') {
+        throw "Unexpected FFmpeg build; update the documented binary source and license before packaging."
+    }
+    $ffmpegHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffmpeg).Hash.ToLowerInvariant()
+    @"
+Bundled FFmpeg binary provenance
+Wrapper package: imageio-ffmpeg $wrapperVersion (requirements.txt)
+Binary: $ffmpegVersion
+SHA-256: $ffmpegHash
+Provider release: https://github.com/GyanD/codexffmpeg/releases/tag/7.1
+FFmpeg source commit identified by that release: https://github.com/FFmpeg/FFmpeg/tree/b08d7969c5
+Build configuration: FFMPEG_BUILD.txt in this folder
+License: FFMPEG_LICENSE.txt and licenses/GPL-3.0.txt in this folder
 
-    & $python -m PyInstaller --clean --noconfirm control_vision.spec
+The release maintainer must separately ensure corresponding source for the
+FFmpeg build and its linked libraries is provided with any public binary.
+"@ | Set-Content -LiteralPath (Join-Path $releaseDir "FFMPEG_SOURCE.txt") -Encoding utf8
+
+    & $python -m PyInstaller --noconfirm control_vision.spec
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed." }
     $exe = Join-Path $repoRoot "dist\ControlVision\ControlVision.exe"
     if (-not (Test-Path -LiteralPath $exe)) { throw "PyInstaller did not produce ControlVision.exe." }
+    $packageDir = Split-Path -Parent $exe
+    Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $packageDir
+    Copy-Item -LiteralPath (Join-Path $repoRoot "licenses\GPL-3.0.txt") -Destination $packageDir
+    Copy-Item -LiteralPath (Join-Path $repoRoot "docs\THIRD_PARTY_NOTICES.md") -Destination $packageDir
+    Copy-Item -LiteralPath (Join-Path $releaseDir "SOURCE.txt") -Destination $packageDir
+    Copy-Item -LiteralPath (Join-Path $releaseDir "FFMPEG_LICENSE.txt") -Destination $packageDir
+    Copy-Item -LiteralPath (Join-Path $releaseDir "FFMPEG_BUILD.txt") -Destination $packageDir
+    Copy-Item -LiteralPath (Join-Path $releaseDir "FFMPEG_SOURCE.txt") -Destination $packageDir
     $previousQtPlatform = $env:QT_QPA_PLATFORM
     $env:QT_QPA_PLATFORM = "offscreen"
     try {
