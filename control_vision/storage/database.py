@@ -183,9 +183,20 @@ class ProjectDatabase:
         return int(cursor.lastrowid)
 
     def review_event(self, event_id: int, status: str, points: int, robot_id: int | None = None, event_type: str = "unclassified", confidence: str = "low", scoring_alliance: str | None = None) -> None:
-        self.connection.execute("UPDATE scoring_events SET status=?,points=?,robot_id=?,event_type=?,confidence=?,scoring_alliance=? WHERE id=?",
-                                (status, points, robot_id, event_type, confidence, scoring_alliance, event_id))
-        self.connection.commit()
+        with self.connection:
+            event = self.connection.execute("SELECT video_id FROM scoring_events WHERE id=?", (event_id,)).fetchone()
+            if event is None:
+                raise ValueError(f"Unknown scoring event {event_id}")
+            video_id = event["video_id"]
+            if robot_id is not None:
+                robot = self.connection.execute("SELECT video_id FROM robots WHERE id=?", (robot_id,)).fetchone()
+                if robot is None:
+                    raise ValueError(f"Unknown robot {robot_id}")
+                if video_id is not None and robot["video_id"] != video_id:
+                    raise ValueError("Scoring event cannot be assigned to a robot from another video")
+                video_id = robot["video_id"]
+            self.connection.execute("UPDATE scoring_events SET status=?,points=?,robot_id=?,video_id=?,event_type=?,confidence=?,scoring_alliance=? WHERE id=?",
+                                    (status, points, robot_id, video_id, event_type, confidence, scoring_alliance, event_id))
 
     def set_official_scores(self, video_id: int, red: int | None, blue: int | None,
                             disqualified: set[str] | None = None, swarm_threshold: int = 16,

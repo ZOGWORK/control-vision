@@ -30,7 +30,8 @@ def export_scout_json(path: Path, video: dict, robots, tracks, cycles, events, c
     disqualified = {alliance for alliance, key in (("red", "red_disqualified"), ("blue", "blue_disqualified")) if video.get(key)}
     board = calculate_scoreboard(events, robots, int(video.get("swarm_threshold", 16)),
                                  int(video.get("pollinator_1_threshold", 4)), int(video.get("pollinator_2_threshold", 7)), disqualified)
-    official_scores = official_scores or {"red": None, "blue": None}
+    if official_scores is None:
+        official_scores = {"red": video.get("official_red"), "blue": video.get("official_blue")}
     try:
         scoreboard_ocr = json.loads(video.get("scoreboard_ocr_json") or "null")
     except (TypeError, json.JSONDecodeError):
