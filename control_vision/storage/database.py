@@ -121,26 +121,37 @@ class ProjectDatabase:
         ).fetchall()
 
     def replace_analysis(self, robot_ids: list[int], cycles: list[dict], events: list[dict]) -> list[int]:
+        if not robot_ids:
+            if cycles or events:
+                raise ValueError("Analysis results need at least one target robot")
+            return []
         event_ids = []
         with self.connection:
-            if robot_ids:
-                placeholders = ",".join("?" for _ in robot_ids)
-                self.connection.execute(
-                    f"DELETE FROM scoring_events WHERE robot_id IN ({placeholders}) "
-                    "AND source IN ('zone_crossing','goal_roi') AND status='flagged' "
-                    "AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.scoring_event_id=scoring_events.id)",
-                    robot_ids,
-                )
-                video_ids = {row[0] for row in self.connection.execute(
-                    f"SELECT DISTINCT video_id FROM robots WHERE id IN ({placeholders})", robot_ids)}
-                for video_id in video_ids:
-                    self.connection.execute(
-                        "DELETE FROM scoring_events WHERE video_id=? AND origin_robot_id=0 "
-                        "AND source IN ('zone_crossing','goal_roi') AND status='flagged' "
-                        "AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.scoring_event_id=scoring_events.id)",
-                        (video_id,),
-                    )
-                self.connection.execute(f"DELETE FROM cycles WHERE robot_id IN ({placeholders})", robot_ids)
+            placeholders = ",".join("?" for _ in robot_ids)
+            rows = self.connection.execute(
+                f"SELECT id,video_id FROM robots WHERE id IN ({placeholders})", robot_ids).fetchall()
+            target_ids = set(robot_ids)
+            video_ids = {row["video_id"] for row in rows}
+            if len(rows) != len(target_ids) or len(video_ids) != 1:
+                raise ValueError("Analysis target robots must exist in one video")
+            if any(int(c["robot_id"]) not in target_ids for c in cycles):
+                raise ValueError("A cycle belongs to a robot outside this analysis")
+            if any(event.get("robot_id") is not None and int(event["robot_id"]) not in target_ids for event in events):
+                raise ValueError("A generated event belongs to a robot outside this analysis")
+            video_id = next(iter(video_ids))
+            self.connection.execute(
+                f"DELETE FROM scoring_events WHERE robot_id IN ({placeholders}) "
+                "AND source IN ('zone_crossing','goal_roi') AND status='flagged' "
+                "AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.scoring_event_id=scoring_events.id)",
+                robot_ids,
+            )
+            self.connection.execute(
+                "DELETE FROM scoring_events WHERE video_id=? AND origin_robot_id=0 "
+                "AND source IN ('zone_crossing','goal_roi') AND status='flagged' "
+                "AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.scoring_event_id=scoring_events.id)",
+                (video_id,),
+            )
+            self.connection.execute(f"DELETE FROM cycles WHERE robot_id IN ({placeholders})", robot_ids)
             self.connection.executemany(
                 "INSERT INTO cycles(robot_id,start_t_s,end_t_s,pickup_zone,scoring_zone,confidence) VALUES (?,?,?,?,?,?)",
                 [(c["robot_id"],c["start_t_s"],c["end_t_s"],c["pickup_zone"],c["scoring_zone"],c.get("confidence","medium")) for c in cycles],
@@ -148,11 +159,6 @@ class ProjectDatabase:
             for event in events:
                 source = event.get("source", "zone_crossing")
                 candidate_robot_id = event.get("robot_id")
-                context_robot_id = candidate_robot_id if candidate_robot_id is not None else (robot_ids[0] if robot_ids else None)
-                video_row = self.connection.execute("SELECT video_id FROM robots WHERE id=?", (context_robot_id,)).fetchone()
-                if video_row is None:
-                    raise ValueError("A generated event needs a robot or video context.")
-                video_id = video_row[0]
                 origin_robot_id = candidate_robot_id if candidate_robot_id is not None else 0
                 retained = self.connection.execute(
                     "SELECT id FROM scoring_events WHERE video_id=? AND origin_robot_id=? AND source=? AND ABS(t_s-?)<=0.5 LIMIT 1",

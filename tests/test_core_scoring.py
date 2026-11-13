@@ -75,6 +75,22 @@ class CoreScoringTests(unittest.TestCase):
             self.assertEqual(len(db.events_for_video(second_video)), 0)
             db.close()
 
+    def test_generated_events_cannot_cross_analysis_videos(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = ProjectDatabase(Path(directory) / "event.db")
+            project = db.add_project("event")
+            metadata = {"duration_s": 150.0, "fps": 30.0, "width": 1280, "height": 720}
+            first_video = db.add_video(project, Path("first.mp4"), metadata)
+            second_video = db.add_video(project, Path("second.mp4"), metadata)
+            first_robot = db.add_robot(first_video, 1001, "red", 50, 60)
+            second_robot = db.add_robot(second_video, 2002, "blue", 70, 80)
+            candidate = {"robot_id": second_robot, "t_s": 42.0, "source": "goal_roi"}
+            with self.assertRaisesRegex(ValueError, "outside this analysis"):
+                db.replace_analysis([first_robot], [], [candidate])
+            self.assertEqual(db.events_for_video(first_video), [])
+            self.assertEqual(db.events_for_video(second_video), [])
+            db.close()
+
     def test_review_keeps_robot_unless_explicitly_unassigned(self):
         with tempfile.TemporaryDirectory() as directory:
             db = ProjectDatabase(Path(directory) / "event.db")
