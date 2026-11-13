@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS calibrations (video_id INTEGER PRIMARY KEY REFERENCES
 CREATE TABLE IF NOT EXISTS robots (id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE, team_number INTEGER NOT NULL, alliance TEXT NOT NULL CHECK(alliance IN ('red','blue')), color_hint TEXT, seed_x INTEGER, seed_y INTEGER);
 CREATE TABLE IF NOT EXISTS tracks (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, frame INTEGER NOT NULL, t_s REAL NOT NULL, x_ft REAL NOT NULL, y_ft REAL NOT NULL, conf REAL NOT NULL, UNIQUE(robot_id, frame));
 CREATE TABLE IF NOT EXISTS cycles (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, start_t_s REAL NOT NULL, end_t_s REAL NOT NULL, pickup_zone TEXT, scoring_zone TEXT);
-CREATE TABLE IF NOT EXISTS scoring_events (id INTEGER PRIMARY KEY, robot_id INTEGER REFERENCES robots(id) ON DELETE SET NULL, video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE, t_s REAL NOT NULL, points INTEGER NOT NULL DEFAULT 0, confidence TEXT NOT NULL DEFAULT 'low', status TEXT NOT NULL DEFAULT 'flagged', source TEXT NOT NULL DEFAULT 'zone_crossing', event_type TEXT NOT NULL DEFAULT 'unclassified', scoring_alliance TEXT CHECK(scoring_alliance IN ('red','blue')));
+CREATE TABLE IF NOT EXISTS scoring_events (id INTEGER PRIMARY KEY, robot_id INTEGER REFERENCES robots(id) ON DELETE SET NULL, video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE, origin_robot_id INTEGER, t_s REAL NOT NULL, points INTEGER NOT NULL DEFAULT 0, confidence TEXT NOT NULL DEFAULT 'low', status TEXT NOT NULL DEFAULT 'flagged', source TEXT NOT NULL DEFAULT 'zone_crossing', event_type TEXT NOT NULL DEFAULT 'unclassified', scoring_alliance TEXT CHECK(scoring_alliance IN ('red','blue')));
 CREATE TABLE IF NOT EXISTS clips (id INTEGER PRIMARY KEY, scoring_event_id INTEGER REFERENCES scoring_events(id) ON DELETE CASCADE, path TEXT NOT NULL, start_t_s REAL NOT NULL, end_t_s REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, path TEXT NOT NULL, t_s REAL NOT NULL);
 """
@@ -53,6 +53,8 @@ class ProjectDatabase:
         if "video_id" not in event_columns:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE")
             self.connection.execute("UPDATE scoring_events SET video_id=(SELECT video_id FROM robots WHERE robots.id=scoring_events.robot_id) WHERE robot_id IS NOT NULL")
+        if "origin_robot_id" not in event_columns:
+            self.connection.execute("ALTER TABLE scoring_events ADD COLUMN origin_robot_id INTEGER")
         self.connection.commit()
 
     def add_project(self, name: str) -> int:
@@ -132,15 +134,25 @@ class ProjectDatabase:
             )
             for event in events:
                 source = event.get("source", "zone_crossing")
+                video_id = self.connection.execute("SELECT video_id FROM robots WHERE id=?", (event["robot_id"],)).fetchone()[0]
                 retained = self.connection.execute(
-                    "SELECT id FROM scoring_events WHERE robot_id=? AND source=? AND ABS(t_s-?)<=0.5 LIMIT 1",
-                    (event["robot_id"], source, event["t_s"]),
+                    "SELECT id FROM scoring_events WHERE video_id=? AND origin_robot_id=? AND source=? AND ABS(t_s-?)<=0.5 LIMIT 1",
+                    (video_id, event["robot_id"], source, event["t_s"]),
                 ).fetchone()
+                if not retained:
+                    # Legacy reviewed events predate origin_robot_id. An exact,
+                    # unique timestamp match preserves them after reassignment.
+                    legacy = self.connection.execute(
+                        "SELECT id FROM scoring_events WHERE video_id=? AND origin_robot_id IS NULL "
+                        "AND source=? AND status IN ('confirmed','rejected') AND ABS(t_s-?)<0.001 LIMIT 2",
+                        (video_id, source, event["t_s"]),
+                    ).fetchall()
+                    retained = legacy[0] if len(legacy) == 1 else None
                 if retained:
                     continue
                 cursor = self.connection.execute(
-                    "INSERT INTO scoring_events(robot_id,video_id,t_s,points,confidence,status,source,event_type) VALUES (?,?,?,?,?,?,?,?)",
-                    (event["robot_id"], self.connection.execute("SELECT video_id FROM robots WHERE id=?", (event["robot_id"],)).fetchone()[0], event["t_s"],event.get("points",0),event.get("confidence","low"),event.get("status","flagged"),source,event.get("event_type","unclassified")),
+                    "INSERT INTO scoring_events(robot_id,video_id,origin_robot_id,t_s,points,confidence,status,source,event_type) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (event["robot_id"], video_id, event["robot_id"], event["t_s"],event.get("points",0),event.get("confidence","low"),event.get("status","flagged"),source,event.get("event_type","unclassified")),
                 )
                 event_ids.append(int(cursor.lastrowid))
         return event_ids

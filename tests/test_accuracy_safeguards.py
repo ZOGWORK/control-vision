@@ -122,7 +122,8 @@ class DatabaseMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "old-project.sqlite"
             old_schema = SCHEMA.replace(
-                ", scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo'", "")
+                ", scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo'", "").replace(
+                ", origin_robot_id INTEGER", "")
             connection = sqlite3.connect(path)
             connection.executescript(old_schema)
             connection.close()
@@ -153,6 +154,27 @@ class DatabaseMigrationTests(unittest.TestCase):
             matching = [row for row in db.events_for_video(video_id) if row["source"] == "zone_crossing"]
             self.assertEqual(len(matching), 1)
             self.assertEqual(matching[0]["status"], "confirmed")
+            db.close()
+
+    def test_reprocessing_keeps_reassigned_event_without_collapsing_another_robot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            project_id = db.add_project("reassignment")
+            video_id = db.add_video(project_id, Path("match.mp4"),
+                                    {"duration_s": 120, "fps": 30, "width": 1280, "height": 720})
+            red_id = db.add_robot(video_id, 1234, "red", 10, 10)
+            blue_id = db.add_robot(video_id, 5678, "blue", 20, 20)
+            red_candidate = {"robot_id": red_id, "t_s": 12.0, "source": "zone_crossing"}
+            blue_candidate = {"robot_id": blue_id, "t_s": 12.0, "source": "zone_crossing"}
+            event_id = db.replace_analysis([red_id, blue_id], [], [red_candidate])[0]
+            db.review_event(event_id, "confirmed", 2, blue_id, "flower_element", "high", "blue")
+            inserted = db.replace_analysis([red_id, blue_id], [], [red_candidate, blue_candidate])
+            self.assertEqual(len(inserted), 1)
+            rows = [row for row in db.events_for_video(video_id) if row["source"] == "zone_crossing"]
+            self.assertEqual(len(rows), 2)
+            reviewed = next(row for row in rows if row["id"] == event_id)
+            self.assertEqual((reviewed["robot_id"], reviewed["origin_robot_id"], reviewed["status"]),
+                             (blue_id, red_id, "confirmed"))
             db.close()
 
 
