@@ -29,6 +29,7 @@ class CoreScoringTests(unittest.TestCase):
         self.assertTrue(board["match_resolved"])
         self.assertEqual(board["ranking_points"]["red"]["WIN_TIE"], 1)
         self.assertEqual(board["ranking_points"]["blue"]["WIN_TIE"], 1)
+        self.assertEqual(board["team_points"], {1: 0, 2: 0})
 
     def test_alliance_disqualification_awards_opponent_win_at_zero_points(self):
         board = calculate_scoreboard([], self.robots, disqualified={"red"})

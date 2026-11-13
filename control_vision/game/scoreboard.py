@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
-
-
 def _optional_field(row, name: str):
     """Read an optional field from dicts and sqlite3.Row objects."""
     try:
@@ -27,7 +24,7 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
     match_resolved = all(event["status"] in {"confirmed", "rejected"} for event in events)
     robot_by_id = {int(robot["id"]): robot for robot in robots}
     alliance_scores = {"red": 0, "blue": 0}
-    team_points: dict[int, int] = defaultdict(int)
+    team_points: dict[int, int] = {int(robot["id"]): 0 for robot in robots}
     swarm_points = {"red": 0, "blue": 0}
     hive_tips = {"red": 0, "blue": 0}
 
