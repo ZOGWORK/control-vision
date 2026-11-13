@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import logging
+import math
 from pathlib import Path
 from typing import Callable
 
@@ -94,34 +96,40 @@ def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list
         from rapidocr_onnxruntime import RapidOCR
     except ImportError as exc:
         raise RuntimeError("Local RapidOCR models are not installed. Reinstall the app with the pinned requirements.") from exc
+    if not math.isfinite(sample_fps) or sample_fps <= 0 or not math.isfinite(tail_seconds) or tail_seconds <= 0:
+        raise ValueError("OCR sample rate and tail window must be positive and finite.")
     cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not read video file {video_path.name}.")
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if fps <= 0 or frame_count <= 0:
-        cap.release()
-        raise RuntimeError(f"Could not read video timing from {video_path.name}.")
-    duration = frame_count / fps
-    stride = max(1, round(fps / max(0.1, sample_fps)))
-    start_t = max(0.0, duration - tail_seconds)
-    start_frame = int(start_t * fps)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    engine = RapidOCR()
-    red_samples, blue_samples = [], []
-    frame_index = start_frame
-    target_count = max(1, (frame_count - start_frame) // stride)
     try:
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not read video file {video_path.name}.")
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not math.isfinite(fps) or fps <= 0 or frame_count <= 0:
+            raise RuntimeError(f"Could not read video timing from {video_path.name}.")
+        duration = frame_count / fps
+        stride = max(1, round(fps / sample_fps))
+        start_t = max(0.0, duration - tail_seconds)
+        start_frame = int(start_t * fps)
+        engine = RapidOCR()
+        red_samples, blue_samples = [], []
+        frame_index = start_frame
+        target_count = max(1, (frame_count - start_frame) // stride)
         while frame_index < frame_count:
             if cancel and cancel():
                 raise InterruptedError("Scoreboard OCR was cancelled.")
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ok, frame = cap.read()
-            if not ok:
-                break
-            t_s = frame_index / fps
-            red_value, red_conf, red_text = _read_digits(engine, frame, red_roi)
-            blue_value, blue_conf, blue_text = _read_digits(engine, frame, blue_roi)
+            try:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                t_s = frame_index / fps
+                red_value, red_conf, red_text = _read_digits(engine, frame, red_roi)
+                blue_value, blue_conf, blue_text = _read_digits(engine, frame, blue_roi)
+            except Exception:
+                logging.getLogger(__name__).warning("Skipped unreadable scoreboard frame %s in %s",
+                                                    frame_index, video_path.name, exc_info=True)
+                frame_index += stride
+                continue
             red_samples.append({"t_s": round(t_s, 3), "value": red_value, "confidence": round(red_conf, 4), "text": red_text})
             blue_samples.append({"t_s": round(t_s, 3), "value": blue_value, "confidence": round(blue_conf, 4), "text": blue_text})
             if progress:
