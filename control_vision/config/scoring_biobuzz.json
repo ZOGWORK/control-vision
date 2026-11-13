@@ -2,7 +2,7 @@
   "season": "BIOBUZZ 2026-27",
   "manual_version": "TU09",
   "manual_url": "https://ftc-resources.firstinspires.org/ftc/archive/2027/game/cm-html/BIOBUZZ%20Competition%20Manual%20-%20TU09.htm",
-  "match_periods_s": {"auto": 30, "transition": 8, "teleop": 120, "total": 150, "flower_scoring_unlock_at_remaining_s": 60},
+  "match_periods_s": {"auto": 30, "transition": 8, "teleop": 120, "gameplay_total": 150, "elapsed_total": 158, "flower_scoring_unlock_at_teleop_remaining_s": 60},
   "review_event_types": [
     {"id": "leave_auto", "label": "Leave (AUTO)", "points": 3, "alliance_scoped": false},
     {"id": "park_auto", "label": "Park (AUTO)", "points": 5, "alliance_scoped": false},

@@ -11,8 +11,8 @@ You upload a video of an FTC match and it tells you what happened — per robot,
 
 ## The two main features
 
-- **Practice analyzer** — detect and track every robot for the full match, show top-down trails, speed, and time in each zone, count cycles per robot, and auto-clip highlights around scoring moments.
-- **Match scoring from video** — score a full match from video alone and attribute points to the correct robot, cross-checked against official scores.
+- **Practice analyzer** — track seeded robots, show top-down trails, speed and time in user-drawn zones, derive zone-trip cycle candidates, and create reviewable highlight clips.
+- **Match scoring workflow** — review candidate events, assign event types and points, confirm robot attribution, and compare confirmed video points with official alliance scores. Automatic achievement inference is not implemented yet.
 
 ## How it works
 
@@ -20,7 +20,7 @@ You upload a video of an FTC match and it tells you what happened — per robot,
 - Tracking: BoT-SORT motion tracking. OSNet ReID and tracklet stitching are not wired yet.
 - Field mapping: one homography per video (click the 4 field corners once) to a top-down 12×12 ft field.
 - Cycles: user-drawn pickup-to-scoring zone trips, medium confidence until ball detection is available.
-- Scoring: zone trips create flagged, zero-point candidates. A human must review clips and enter points.
+- Scoring: zone trips create flagged, zero-point candidates. Optional scoring-element detections can suggest count changes inside a user-drawn ROI. A human must review the video and enter points.
 - Runs fully offline on your own machine. No API calls. No cloud GPU.
 
 ## Docs
