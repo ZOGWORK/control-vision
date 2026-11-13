@@ -29,7 +29,7 @@ def extract(video: Path, output: Path, every_seconds: float = 2.0, max_frames: i
         while True:
             ok, frame = cap.read()
             if not ok:
-                if math.isfinite(expected_frames) and expected_frames > 0 and frame_index < round(expected_frames) - 1:
+                if math.isfinite(expected_frames) and expected_frames > 0 and frame_index < round(expected_frames):
                     raise RuntimeError(f"Video ended before its declared frame count: {video}")
                 break
             if frame_index % interval == 0:

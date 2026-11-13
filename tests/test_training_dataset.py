@@ -23,20 +23,25 @@ class FrameExtractionTests(unittest.TestCase):
             released = False
             reads = 0
 
+            def __init__(self, valid_frames):
+                self.valid_frames = valid_frames
+
             def isOpened(self): return True
             def get(self, prop):
                 return {cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_COUNT: 10}[prop]
             def read(self):
                 self.reads += 1
-                return (self.reads <= 2, np.zeros((8, 8, 3), dtype=np.uint8))
+                return (self.reads <= self.valid_frames, np.zeros((8, 8, 3), dtype=np.uint8))
             def release(self): self.released = True
 
-        capture = TruncatedCapture()
-        with tempfile.TemporaryDirectory() as folder, \
-             patch("control_vision.training.extract_frames.cv2.VideoCapture", return_value=capture):
-            with self.assertRaisesRegex(RuntimeError, "match.mp4"):
-                extract(Path("match.mp4"), Path(folder))
-        self.assertTrue(capture.released)
+        for valid_frames in (2, 9):
+            with self.subTest(valid_frames=valid_frames):
+                capture = TruncatedCapture(valid_frames)
+                with tempfile.TemporaryDirectory() as folder, \
+                     patch("control_vision.training.extract_frames.cv2.VideoCapture", return_value=capture):
+                    with self.assertRaisesRegex(RuntimeError, "match.mp4"):
+                        extract(Path("match.mp4"), Path(folder))
+                self.assertTrue(capture.released)
 
 
 class TrainingDatasetTests(unittest.TestCase):
