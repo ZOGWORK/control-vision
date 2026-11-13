@@ -327,6 +327,19 @@ class ScoreConsensusTests(unittest.TestCase):
                 [{"t_s": float(i), "value": 100, "confidence": .99} for i in range(8, 12)])
         self.assertEqual(_consensus(rows)["value"], 100)
 
+    def test_ocr_does_not_lower_score_after_later_misreads(self):
+        samples = [{"t_s": float(index), "value": value, "confidence": .9}
+                   for index, value in enumerate((100, 90, 90))]
+        result = _consensus(samples)
+        self.assertEqual(result["value"], 100)
+        self.assertTrue(result["later_lower_reading"])
+        self.assertAlmostEqual(result["agreement"], 1 / 3, places=4)
+        self.assertLess(result["confidence"], .4)
+        later = _consensus(samples + [{"t_s": 3.0, "value": 90, "confidence": .9}])
+        self.assertEqual(later["value"], 100)
+        self.assertEqual(later["confidence"], 0)
+        self.assertTrue(later["uncorroborated_prior_high"])
+
     def test_disqualification_does_not_resolve_flagged_evidence(self):
         result = calculate_scoreboard(
             [{"status": "flagged", "robot_id": None}] + [

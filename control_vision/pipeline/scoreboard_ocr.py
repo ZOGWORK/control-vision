@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 from pathlib import Path
 from typing import Callable
 
@@ -63,25 +62,23 @@ def _consensus(samples: list[dict]) -> dict:
     valid = [item for item in samples if item["value"] is not None]
     if not valid:
         return {"value": None, "confidence": 0.0, "agreement": 0.0, "samples": len(samples)}
-    # Favor the most recent stable reading so early-match scores cannot
-    # outvote the final scoreboard when the score changed late in the clip.
+    # Scores are monotonic during ordinary match play. Keep the largest
+    # observed reading as a proposal, but lower its confidence when the final
+    # samples do not corroborate it; a reviewer must accept it explicitly.
     recent = valid[-3:]
-    counts = Counter(item["value"] for item in recent)
-    max_count = max(counts.values())
-    winners = {value for value, count in counts.items() if count == max_count}
-    winner_rows = [item for item in recent if item["value"] in winners]
-    # Resolve ties toward the most recent reading, which is appropriate for a
-    # scoreboard whose score only increases during play.
-    winner = max(winner_rows, key=lambda item: (item["t_s"], item["confidence"]))["value"]
+    winner = max(item["value"] for item in valid)
     chosen = [item for item in recent if item["value"] == winner]
     agreement = len(chosen) / len(recent)
-    recognition = sum(item["confidence"] for item in chosen) / len(chosen)
+    evidence = chosen or [next(item for item in reversed(valid) if item["value"] == winner)]
+    recognition = sum(item["confidence"] for item in evidence) / len(evidence)
     # Recognition confidence is not the same as temporal evidence. Cap the
     # displayed confidence until at least three frames corroborate the score.
     confidence = recognition * agreement * min(1.0, len(recent) / 3.0)
     return {"value": int(winner), "confidence": round(confidence, 4),
             "recognition_confidence": round(recognition, 4),
-            "agreement": round(agreement, 4), "samples": len(valid)}
+            "agreement": round(agreement, 4), "samples": len(valid),
+            "uncorroborated_prior_high": not chosen,
+            "later_lower_reading": valid[-1]["value"] < winner}
 
 
 def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list[list[float]],
