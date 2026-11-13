@@ -29,8 +29,12 @@ class BiobuzzRulesTests(unittest.TestCase):
                 self.assertFalse(result["match_resolved"])
                 self.assertEqual(result["ranking_points"]["red"]["WIN_TIE"], 0)
 
-    def test_empty_final_queue_ties_and_disqualification_clears_points(self):
-        tie = calculate_scoreboard([], self.robots)
+    def test_empty_queue_has_no_outcome_but_reviewed_zero_zero_ties(self):
+        empty = calculate_scoreboard([], self.robots)
+        self.assertFalse(empty["match_resolved"])
+        self.assertEqual(empty["ranking_points"]["red"]["WIN_TIE"], 0)
+        tie = calculate_scoreboard([{"status": "rejected", "robot_id": None,
+                                     "points": 0}], self.robots)
         self.assertEqual(tie["ranking_points"]["red"]["WIN_TIE"], 1)
         self.assertEqual(tie["ranking_points"]["blue"]["WIN_TIE"], 1)
         self.assertEqual(tie["team_points"], {1: 0, 2: 0})
