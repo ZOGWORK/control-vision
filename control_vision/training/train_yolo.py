@@ -62,12 +62,12 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
         if not images_dir.is_dir() or images_dir.parent.name != "images":
             raise ValueError(f"{split} images directory is missing or outside images/: {images_dir}")
         labels_dir = images_dir.parent.parent / "labels" / images_dir.name
-        images = sorted(path for path in images_dir.iterdir()
-                        if path.suffix.lower() in IMAGE_SUFFIXES)
+        images = sorted(path for path in images_dir.rglob("*")
+                        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
         if not images:
             raise ValueError(f"{split} has no images in {images_dir}")
         for image in images:
-            label = labels_dir / f"{image.stem}.txt"
+            label = labels_dir / image.relative_to(images_dir).with_suffix(".txt")
             if not label.is_file():
                 raise ValueError(f"Missing YOLO label file for {split} image {image.name}: {label}")
             if cv2.imread(str(image)) is None:

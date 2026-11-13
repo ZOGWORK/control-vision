@@ -64,6 +64,17 @@ class TrainingDatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing YOLO label"):
             validate_dataset(self.data, self.config, 1)
 
+    def test_nested_images_are_validated_with_matching_nested_labels(self):
+        image = self.root / "images" / "train" / "round1" / "third.jpg"
+        image.parent.mkdir()
+        image.write_bytes(self._image(150))
+        with self.assertRaisesRegex(ValueError, "Missing YOLO label"):
+            validate_dataset(self.data, self.config, 1)
+        label = self.root / "labels" / "train" / "round1" / "third.txt"
+        label.parent.mkdir()
+        label.write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+        self.assertEqual(validate_dataset(self.data, self.config, 1), self.root)
+
     def test_invalid_class_and_out_of_frame_box_are_rejected(self):
         for bad_label in ("1 0.5 0.5 0.3 0.3\n", "0 0.9 0.5 0.4 0.3\n", "0 nan 0.5 0.3 0.3\n"):
             with self.subTest(bad_label=bad_label):
