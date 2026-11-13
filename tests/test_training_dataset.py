@@ -35,6 +35,10 @@ class TrainingDatasetTests(unittest.TestCase):
         (self.root / "labels" / "val" / "two.txt").write_text("", encoding="utf-8")
         self.assertEqual(validate_dataset(self.data, self.config, 1), self.root)
 
+    def test_portable_yaml_relative_dataset_path(self):
+        self.config["path"] = "."
+        self.assertEqual(validate_dataset(self.data, self.config, 1), self.root)
+
     def test_exact_image_leakage_is_rejected(self):
         self._sample("val", "two", self._image(30), "0 0.4 0.4 0.2 0.2\n")
         with self.assertRaisesRegex(ValueError, "train and val"):

@@ -23,14 +23,20 @@ def dataset_hash(root: Path) -> str:
 
 
 def _dataset_root(data: Path, config: dict) -> Path:
-    configured = Path(config.get("path", "."))
+    configured_value = config.get("path", ".")
+    if not isinstance(configured_value, str):
+        raise ValueError("path must name a dataset directory in data.yaml")
+    configured = Path(configured_value)
     if configured.is_absolute():
         return configured
     # The example data.yaml uses a path relative to the launch directory.
     # Also accept a path relative to the YAML for portable datasets.
     from_cwd = configured.resolve()
     from_yaml = (data.resolve().parent / configured).resolve()
-    return from_cwd if from_cwd.is_dir() else from_yaml
+    train_ref = config.get("train", "")
+    if isinstance(train_ref, str) and (from_cwd / train_ref).is_dir():
+        return from_cwd
+    return from_yaml
 
 
 def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
