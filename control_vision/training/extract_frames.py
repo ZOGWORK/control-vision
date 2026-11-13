@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 
 import cv2
@@ -15,13 +16,14 @@ def extract(video: Path, output: Path, every_seconds: float = 2.0, max_frames: i
         cap.release(); raise RuntimeError(f"Invalid FPS in {video}")
     interval = max(1, round(fps * every_seconds))
     output.mkdir(parents=True, exist_ok=True)
+    video_key = hashlib.sha256(str(video.resolve()).encode("utf-8")).hexdigest()[:10]
     frame_index = 0
     written = 0
     while True:
         ok, frame = cap.read()
         if not ok: break
         if frame_index % interval == 0:
-            target = output / f"{video.stem}-{frame_index:09d}.jpg"
+            target = output / f"{video.stem}-{video_key}-{frame_index:09d}.jpg"
             if not cv2.imwrite(str(target), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
                 raise RuntimeError(f"Could not write {target}")
             written += 1

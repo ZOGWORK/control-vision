@@ -19,7 +19,7 @@ def point_in_polygon(x: float, y: float, polygon: list[list[float]]) -> bool:
 
 def zone_at(x: float, y: float, zones: dict) -> str | None:
     for name, zone in zones.items():
-        if zone.get("type") == "goal_roi":
+        if zone.get("type", "").endswith("_roi"):
             continue
         if point_in_polygon(x, y, zone.get("points", [])):
             return name

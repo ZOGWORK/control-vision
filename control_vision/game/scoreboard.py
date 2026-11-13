@@ -15,7 +15,7 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
     """
     disqualified = disqualified or set()
     match_resolved = (any(event["status"] == "confirmed" for event in events)
-                      and not any(event["status"] == "flagged" for event in events)) or bool(disqualified)
+                      and not any(event["status"] == "flagged" for event in events))
     robot_by_id = {int(robot["id"]): robot for robot in robots}
     alliance_scores = {"red": 0, "blue": 0}
     team_points: dict[int, int] = defaultdict(int)
@@ -49,10 +49,10 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
         swarm = int(swarm_points[alliance] >= swarm_threshold)
         p1 = int(hive_tips[alliance] >= pollinator_1_threshold)
         p2 = int(hive_tips[alliance] >= pollinator_2_threshold)
-        if alliance in disqualified:
-            swarm = p1 = p2 = 0
+        if not match_resolved:
             outcome = 0
-        elif not match_resolved:
+        elif alliance in disqualified:
+            swarm = p1 = p2 = 0
             outcome = 0
         elif alliance_scores[alliance] > alliance_scores["blue" if alliance == "red" else "red"]:
             outcome = 3

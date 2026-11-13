@@ -7,6 +7,8 @@ from unittest.mock import patch
 from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
 from control_vision.pipeline.tracking import _match_initial_seeds
 from control_vision.pipeline.ingest import probe_video
+from control_vision.pipeline.zones import zone_at
+from control_vision.game.scoreboard import calculate_scoreboard
 from control_vision.storage.database import ProjectDatabase, SCHEMA
 
 
@@ -38,6 +40,21 @@ class ScoreConsensusTests(unittest.TestCase):
         ])
         self.assertEqual(result["value"], 90)
         self.assertAlmostEqual(result["agreement"], 2 / 3, places=3)
+
+    def test_recent_final_score_wins_over_early_majority(self):
+        rows = ([{"t_s": float(i), "value": 90, "confidence": .99} for i in range(8)] +
+                [{"t_s": float(i), "value": 100, "confidence": .99} for i in range(8, 12)])
+        self.assertEqual(_consensus(rows)["value"], 100)
+
+    def test_disqualification_does_not_resolve_flagged_evidence(self):
+        result = calculate_scoreboard(
+            [{"status": "flagged", "robot_id": None}], [], disqualified={"red"})
+        self.assertFalse(result["match_resolved"])
+        self.assertEqual(result["ranking_points"]["blue"]["WIN_TIE"], 0)
+
+    def test_image_space_rois_are_not_field_zones(self):
+        self.assertIsNone(zone_at(500, 650, {
+            "scoreboard_red_roi": {"type": "scoreboard_red_roi", "points": [[450, 600], [600, 600], [600, 700], [450, 700]]}}))
 
     def test_polygon_roi_masks_pixels_outside_its_shape(self):
         import numpy as np
@@ -74,6 +91,12 @@ class DatabaseMigrationTests(unittest.TestCase):
             db.set_tracking_mode(video_id, "seeded_optical_flow")
             self.assertEqual(db.connection.execute(
                 "SELECT tracking_mode FROM videos WHERE id=?", (video_id,)).fetchone()[0], "seeded_optical_flow")
+            robot_id = db.add_robot(video_id, 1234, "red", 10, 10)
+            manual_event = db.add_scoring_event(robot_id, 5.0)
+            db.review_event(manual_event, "confirmed", 3, None, "park_auto", "high", "red")
+            self.assertEqual(len(db.events_for_video(video_id)), 1)
+            db.replace_analysis([robot_id], [], [])
+            self.assertEqual(len(db.events_for_video(video_id)), 1)
             db.close()
 
 

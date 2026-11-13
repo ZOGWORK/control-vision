@@ -112,11 +112,11 @@ class FieldMap(QWidget):
         painter.drawRect(rect)
         # The official field surface is six 24-inch tiles across, not a 3x3 grid.
         for i in range(1, 6):
-            x, y = rect.left() + rect.width() * i / 3, rect.top() + rect.height() * i / 3
+            x, y = rect.left() + rect.width() * i / 6, rect.top() + rect.height() * i / 6
             painter.drawLine(int(x), rect.top(), int(x), rect.bottom())
             painter.drawLine(rect.left(), int(y), rect.right(), int(y))
         for name, zone in self.zones.items():
-            if zone.get("type") == "goal_roi": continue
+            if zone.get("type", "").endswith("_roi"): continue
             points = zone.get("points", [])
             if len(points) < 3: continue
             polygon = QPolygonF([QPointF(rect.left() + x / 12 * rect.width(), rect.bottom() - y / 12 * rect.height()) for x, y in points])
@@ -1171,7 +1171,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No events", "Process the video and review candidate events first."); return
         ffmpeg = self.ffmpeg_path_edit.text().strip() or None
         folder = self.project_dir() / "clips"; folder.mkdir(exist_ok=True)
-        existing = {row["scoring_event_id"] for row in self.db.connection.execute("SELECT c.scoring_event_id FROM clips c JOIN scoring_events e ON e.id=c.scoring_event_id JOIN robots r ON r.id=e.robot_id WHERE r.video_id=?", (self.video_id,))}
+        existing = {row["scoring_event_id"] for row in self.db.connection.execute("SELECT c.scoring_event_id FROM clips c JOIN scoring_events e ON e.id=c.scoring_event_id WHERE e.video_id=?", (self.video_id,))}
         made, errors = 0, []
         for event in self.events:
             if event["status"] == "rejected" or event["id"] in existing: continue

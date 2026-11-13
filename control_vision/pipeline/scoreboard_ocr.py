@@ -63,19 +63,22 @@ def _consensus(samples: list[dict]) -> dict:
     valid = [item for item in samples if item["value"] is not None]
     if not valid:
         return {"value": None, "confidence": 0.0, "agreement": 0.0, "samples": len(samples)}
-    counts = Counter(item["value"] for item in valid)
+    # Favor the most recent stable reading so early-match scores cannot
+    # outvote the final scoreboard when the score changed late in the clip.
+    recent = valid[-3:]
+    counts = Counter(item["value"] for item in recent)
     max_count = max(counts.values())
     winners = {value for value, count in counts.items() if count == max_count}
-    winner_rows = [item for item in valid if item["value"] in winners]
+    winner_rows = [item for item in recent if item["value"] in winners]
     # Resolve ties toward the most recent reading, which is appropriate for a
     # scoreboard whose score only increases during play.
     winner = max(winner_rows, key=lambda item: (item["t_s"], item["confidence"]))["value"]
-    chosen = [item for item in valid if item["value"] == winner]
-    agreement = len(chosen) / len(valid)
+    chosen = [item for item in recent if item["value"] == winner]
+    agreement = len(chosen) / len(recent)
     recognition = sum(item["confidence"] for item in chosen) / len(chosen)
     # Recognition confidence is not the same as temporal evidence. Cap the
     # displayed confidence until at least three frames corroborate the score.
-    confidence = recognition * agreement * min(1.0, len(valid) / 3.0)
+    confidence = recognition * agreement * min(1.0, len(recent) / 3.0)
     return {"value": int(winner), "confidence": round(confidence, 4),
             "recognition_confidence": round(recognition, 4),
             "agreement": round(agreement, 4), "samples": len(valid)}
@@ -93,7 +96,7 @@ def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list
     try:
         from rapidocr_onnxruntime import RapidOCR
     except ImportError as exc:
-        raise RuntimeError("Local PaddleOCR models are not installed. Reinstall the app with the pinned requirements.") from exc
+        raise RuntimeError("Local RapidOCR models are not installed. Reinstall the app with the pinned requirements.") from exc
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not read video file {video_path.name}.")

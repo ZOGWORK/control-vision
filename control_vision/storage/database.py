@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS calibrations (video_id INTEGER PRIMARY KEY REFERENCES
 CREATE TABLE IF NOT EXISTS robots (id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE, team_number INTEGER NOT NULL, alliance TEXT NOT NULL CHECK(alliance IN ('red','blue')), color_hint TEXT, seed_x INTEGER, seed_y INTEGER);
 CREATE TABLE IF NOT EXISTS tracks (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, frame INTEGER NOT NULL, t_s REAL NOT NULL, x_ft REAL NOT NULL, y_ft REAL NOT NULL, conf REAL NOT NULL, UNIQUE(robot_id, frame));
 CREATE TABLE IF NOT EXISTS cycles (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, start_t_s REAL NOT NULL, end_t_s REAL NOT NULL, pickup_zone TEXT, scoring_zone TEXT);
-CREATE TABLE IF NOT EXISTS scoring_events (id INTEGER PRIMARY KEY, robot_id INTEGER REFERENCES robots(id) ON DELETE SET NULL, t_s REAL NOT NULL, points INTEGER NOT NULL DEFAULT 0, confidence TEXT NOT NULL DEFAULT 'low', status TEXT NOT NULL DEFAULT 'flagged', source TEXT NOT NULL DEFAULT 'zone_crossing', event_type TEXT NOT NULL DEFAULT 'unclassified', scoring_alliance TEXT CHECK(scoring_alliance IN ('red','blue')));
+CREATE TABLE IF NOT EXISTS scoring_events (id INTEGER PRIMARY KEY, robot_id INTEGER REFERENCES robots(id) ON DELETE SET NULL, video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE, t_s REAL NOT NULL, points INTEGER NOT NULL DEFAULT 0, confidence TEXT NOT NULL DEFAULT 'low', status TEXT NOT NULL DEFAULT 'flagged', source TEXT NOT NULL DEFAULT 'zone_crossing', event_type TEXT NOT NULL DEFAULT 'unclassified', scoring_alliance TEXT CHECK(scoring_alliance IN ('red','blue')));
 CREATE TABLE IF NOT EXISTS clips (id INTEGER PRIMARY KEY, scoring_event_id INTEGER REFERENCES scoring_events(id) ON DELETE CASCADE, path TEXT NOT NULL, start_t_s REAL NOT NULL, end_t_s REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, path TEXT NOT NULL, t_s REAL NOT NULL);
 """
@@ -50,6 +50,9 @@ class ProjectDatabase:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'unclassified'")
         if "scoring_alliance" not in event_columns:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN scoring_alliance TEXT")
+        if "video_id" not in event_columns:
+            self.connection.execute("ALTER TABLE scoring_events ADD COLUMN video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE")
+            self.connection.execute("UPDATE scoring_events SET video_id=(SELECT video_id FROM robots WHERE robots.id=scoring_events.robot_id) WHERE robot_id IS NOT NULL")
         self.connection.commit()
 
     def add_project(self, name: str) -> int:
@@ -107,8 +110,8 @@ class ProjectDatabase:
 
     def events_for_video(self, video_id: int):
         return self.connection.execute(
-            "SELECT e.*,r.team_number,r.alliance,COALESCE(e.scoring_alliance,r.alliance) AS event_alliance FROM scoring_events e LEFT JOIN robots r ON r.id=e.robot_id WHERE r.video_id=? ORDER BY e.t_s",
-            (video_id,),
+            "SELECT e.*,r.team_number,r.alliance,COALESCE(e.scoring_alliance,r.alliance) AS event_alliance FROM scoring_events e LEFT JOIN robots r ON r.id=e.robot_id WHERE e.video_id=? OR r.video_id=? ORDER BY e.t_s",
+            (video_id, video_id),
         ).fetchall()
 
     def replace_analysis(self, robot_ids: list[int], cycles: list[dict], events: list[dict]) -> list[int]:
@@ -116,7 +119,7 @@ class ProjectDatabase:
         with self.connection:
             if robot_ids:
                 placeholders = ",".join("?" for _ in robot_ids)
-                self.connection.execute(f"DELETE FROM scoring_events WHERE robot_id IN ({placeholders})", robot_ids)
+                self.connection.execute(f"DELETE FROM scoring_events WHERE robot_id IN ({placeholders}) AND source='zone_crossing'", robot_ids)
                 self.connection.execute(f"DELETE FROM cycles WHERE robot_id IN ({placeholders})", robot_ids)
             self.connection.executemany(
                 "INSERT INTO cycles(robot_id,start_t_s,end_t_s,pickup_zone,scoring_zone,confidence) VALUES (?,?,?,?,?,?)",
@@ -124,16 +127,16 @@ class ProjectDatabase:
             )
             for event in events:
                 cursor = self.connection.execute(
-                    "INSERT INTO scoring_events(robot_id,t_s,points,confidence,status,source,event_type) VALUES (?,?,?,?,?,?,?)",
-                    (event["robot_id"],event["t_s"],event.get("points",0),event.get("confidence","low"),event.get("status","flagged"),event.get("source","zone_crossing"),event.get("event_type","unclassified")),
+                    "INSERT INTO scoring_events(robot_id,video_id,t_s,points,confidence,status,source,event_type) VALUES (?,?, ?,?,?,?,?,?)",
+                    (event["robot_id"], self.connection.execute("SELECT video_id FROM robots WHERE id=?", (event["robot_id"],)).fetchone()[0], event["t_s"],event.get("points",0),event.get("confidence","low"),event.get("status","flagged"),event.get("source","zone_crossing"),event.get("event_type","unclassified")),
                 )
                 event_ids.append(int(cursor.lastrowid))
         return event_ids
 
     def add_scoring_event(self, robot_id: int, t_s: float, source: str = "manual") -> int:
         cursor = self.connection.execute(
-            "INSERT INTO scoring_events(robot_id,t_s,points,confidence,status,source,event_type) VALUES (?,?,0,'low','flagged',?,'unclassified')",
-            (robot_id, t_s, source),
+            "INSERT INTO scoring_events(robot_id,video_id,t_s,points,confidence,status,source,event_type) VALUES (?,?,?,0,'low','flagged',?,'unclassified')",
+            (robot_id, self.connection.execute("SELECT video_id FROM robots WHERE id=?", (robot_id,)).fetchone()[0] if robot_id is not None else None, t_s, source),
         )
         self.connection.commit()
         return int(cursor.lastrowid)
@@ -169,7 +172,7 @@ class ProjectDatabase:
 
     def clips_for_video(self, video_id: int):
         return self.connection.execute(
-            "SELECT c.*,e.t_s,e.robot_id,e.points,e.status,e.confidence,r.team_number FROM clips c JOIN scoring_events e ON e.id=c.scoring_event_id JOIN robots r ON r.id=e.robot_id WHERE r.video_id=? ORDER BY e.t_s",
+            "SELECT c.*,e.t_s,e.robot_id,e.points,e.status,e.confidence,r.team_number FROM clips c JOIN scoring_events e ON e.id=c.scoring_event_id LEFT JOIN robots r ON r.id=e.robot_id WHERE e.video_id=? ORDER BY e.t_s",
             (video_id,),
         ).fetchall()
 
@@ -183,7 +186,8 @@ class ProjectDatabase:
             if robot_ids:
                 placeholders = ",".join("?" for _ in robot_ids)
                 self.connection.execute(f"DELETE FROM photos WHERE robot_id IN ({placeholders})", robot_ids)
-            self.connection.executemany("INSERT INTO photos(robot_id,path,t_s) VALUES (?,?,?)", photos)
+            self.connection.executemany("INSERT INTO photos(robot_id,path,t_s) VALUES (?,?,?)",
+                                        [(robot_id, str(path), t_s) for robot_id, path, t_s in photos])
 
     def photos_for_video(self, video_id: int):
         return self.connection.execute(

@@ -43,10 +43,12 @@ def main():
     names_list = [names[index] if isinstance(names, dict) else names[index] for index in range(len(names))]
     if names_list not in (["robot"], ["robot", "pollen", "nectar"]):
         parser.error("Supported classes are ['robot'] or ['robot','pollen','nectar'] in that order; alliance color is an attribute, not a class.")
-    run = YOLO(str(args.base_weights)).train(data=str(args.data), epochs=args.epochs, batch=args.batch, imgsz=args.imgsz,
-                                             lr0=0.01, patience=20, device=args.device, project="runs/training", name=f"biobuzz-{args.version}")
-    metrics = run.metrics.results_dict if hasattr(run, "metrics") else {}
-    best_pt = Path(run.save_dir) / "weights" / "best.pt"
+    model = YOLO(str(args.base_weights))
+    run = model.train(data=str(args.data), epochs=args.epochs, batch=args.batch, imgsz=args.imgsz,
+                      lr0=0.01, patience=20, device=args.device, project="runs/training", name=f"biobuzz-{args.version}")
+    trainer = model.trainer
+    metrics = getattr(trainer, "metrics", {})
+    best_pt = Path(getattr(trainer, "best", Path(trainer.save_dir) / "weights" / "best.pt"))
     if not best_pt.is_file(): raise SystemExit(f"Training completed without a best checkpoint at {best_pt}")
     models_dir = Path("models"); models_dir.mkdir(exist_ok=True)
     onnx_path = models_dir / f"yolo11n-biobuzz-v{args.version}.onnx"
