@@ -33,6 +33,7 @@ class BiobuzzRulesTests(unittest.TestCase):
         tie = calculate_scoreboard([], self.robots)
         self.assertEqual(tie["ranking_points"]["red"]["WIN_TIE"], 1)
         self.assertEqual(tie["ranking_points"]["blue"]["WIN_TIE"], 1)
+        self.assertEqual(tie["team_points"], {1: 0, 2: 0})
         event = [{"robot_id": 1, "status": "confirmed", "points": 20, "event_type": "park_teleop"}]
         dq = calculate_scoreboard(event, self.robots, disqualified={"red"})
         self.assertEqual(dq["alliance_points"], {"red": 0, "blue": 0})
