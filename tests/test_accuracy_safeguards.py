@@ -623,6 +623,38 @@ class ShutdownTests(unittest.TestCase):
 
 
 class VideoIngestTests(unittest.TestCase):
+    def test_imported_video_has_no_reviewable_results(self):
+        import os
+        import numpy as np
+        from PySide6.QtWidgets import QApplication
+        from control_vision.app.main_window import MainWindow
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as folder:
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            project_id = db.add_project("import")
+            window = MainWindow()
+            window.db, window.project_id = db, project_id
+            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+            class Capture:
+                def read(self): return True, frame
+                def release(self): pass
+
+            try:
+                with patch("control_vision.app.main_window.QFileDialog.getOpenFileName", return_value=("match.mp4", "")), \
+                     patch("control_vision.app.main_window.QInputDialog.getText", side_effect=[("EV", True), ("Q3", True)]), \
+                     patch("control_vision.app.main_window.probe_video", return_value={"duration_s": 120, "width": 1280, "height": 720, "fps": 30}), \
+                     patch("control_vision.app.main_window.cv2.VideoCapture", return_value=Capture()):
+                    window.import_video()
+                self.assertIsNotNone(window.video_id)
+                self.assertFalse(window.tabs.isTabEnabled(2))
+                self.assertFalse(window.tabs.isTabEnabled(6))
+            finally:
+                window.close()
+                db.close()
+
     def test_unreadable_first_frame_is_not_saved_in_project(self):
         from types import SimpleNamespace
         from unittest.mock import Mock

@@ -2,35 +2,47 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 from pathlib import Path
 
 import cv2
 
 
 def extract(video: Path, output: Path, every_seconds: float = 2.0, max_frames: int | None = None) -> int:
+    if not math.isfinite(every_seconds) or every_seconds <= 0:
+        raise ValueError("--every-seconds must be positive and finite")
+    if max_frames is not None and max_frames <= 0:
+        raise ValueError("--max-frames must be positive")
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot read {video}")
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0:
         cap.release(); raise RuntimeError(f"Invalid FPS in {video}")
-    interval = max(1, round(fps * every_seconds))
-    output.mkdir(parents=True, exist_ok=True)
-    video_key = hashlib.sha256(str(video.resolve()).encode("utf-8")).hexdigest()[:10]
-    frame_index = 0
-    written = 0
-    while True:
-        ok, frame = cap.read()
-        if not ok: break
-        if frame_index % interval == 0:
-            target = output / f"{video.stem}-{video_key}-{frame_index:09d}.jpg"
-            if not cv2.imwrite(str(target), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
-                raise RuntimeError(f"Could not write {target}")
-            written += 1
-            if max_frames and written >= max_frames: break
-        frame_index += 1
-    cap.release()
-    return written
+    try:
+        interval = max(1, round(fps * every_seconds))
+        expected_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        output.mkdir(parents=True, exist_ok=True)
+        video_key = hashlib.sha256(str(video.resolve()).encode("utf-8")).hexdigest()[:10]
+        frame_index = 0
+        written = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                if math.isfinite(expected_frames) and expected_frames > 0 and frame_index < round(expected_frames):
+                    raise RuntimeError(f"Video ended before its declared frame count: {video}")
+                break
+            if frame_index % interval == 0:
+                target = output / f"{video.stem}-{video_key}-{frame_index:09d}.jpg"
+                if not cv2.imwrite(str(target), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+                    raise RuntimeError(f"Could not write {target}")
+                written += 1
+                if max_frames is not None and written >= max_frames:
+                    break
+            frame_index += 1
+        return written
+    finally:
+        cap.release()
 
 
 def main():

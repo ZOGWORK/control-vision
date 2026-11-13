@@ -45,7 +45,7 @@ For standard events, each eligible team on an alliance receives:
 - **Win (3):** the alliance has more match points than its opponent.
 - **Tie (1):** match points are equal.
 
-Regional and FIRST Championship thresholds are published in later Team Updates; Premier Events may set their own thresholds. Control Vision exposes threshold overrides and defaults to the all-other-events thresholds. A disqualified alliance earns zero match and ranking points in Qualification; Playoff treatment differs (its alliance receives zero match points), so the app marks this as a human-entered official condition rather than guessing from video.
+Regional and FIRST Championship thresholds are published in later Team Updates; Premier Events may set their own thresholds. Control Vision exposes threshold overrides and defaults to the all-other-events thresholds. In Qualification, disqualification applies only to the disqualified team, which receives zero match and ranking points; its alliance partner is unaffected (T601). In Playoffs, a team disqualification applies to its entire alliance, which receives zero match points. The current alliance-DQ control represents the Playoff case only; team-level Qualification disqualification still needs a separate implementation.
 
 ## Game-rule reference (Section 11)
 

@@ -403,7 +403,7 @@ class MainWindow(QMainWindow):
         export_layout.addLayout(ocr_row); export_layout.addWidget(self.scoreboard_ocr_status)
         self.score_compare = QLabel("Video totals include confirmed events only."); export_layout.addWidget(self.score_compare)
         rp_row = QHBoxLayout()
-        self.disq_red = QCheckBox("Red disqualified"); self.disq_blue = QCheckBox("Blue disqualified")
+        self.disq_red = QCheckBox("Red alliance DQ (playoff)"); self.disq_blue = QCheckBox("Blue alliance DQ (playoff)")
         self.swarm_threshold = QSpinBox(); self.swarm_threshold.setRange(0, 999); self.swarm_threshold.setValue(16)
         self.pollinator_1_threshold = QSpinBox(); self.pollinator_1_threshold.setRange(0, 99); self.pollinator_1_threshold.setValue(4)
         self.pollinator_2_threshold = QSpinBox(); self.pollinator_2_threshold.setRange(0, 99); self.pollinator_2_threshold.setValue(7)
@@ -716,7 +716,7 @@ class MainWindow(QMainWindow):
         self.review_table.setRowCount(0)
         self.scoring_table.setRowCount(0)
         self.clip_list.clear()
-        self._set_results_enabled(True)
+        self._set_results_enabled(False)
         self.progress_label.setText("Project opened. Load or import a match video to begin.")
         self.slider.setValue(0)
         self.refresh_result_tables()
@@ -748,8 +748,10 @@ class MainWindow(QMainWindow):
             "SELECT analysis_status FROM videos WHERE id=?", (self.video_id,)).fetchone()
         if row and row["analysis_status"] == "ready":
             return True
-        QMessageBox.warning(self, "Analysis unavailable",
-                            "The last analysis did not finish. Process this video successfully before reviewing or exporting results.")
+        message = ("Process this video before reviewing or exporting results."
+                   if row and row["analysis_status"] == "unprocessed"
+                   else "The last analysis did not finish. Process this video successfully before reviewing or exporting results.")
+        QMessageBox.warning(self, "Analysis unavailable", message)
         return False
 
     def import_video(self):
@@ -794,7 +796,7 @@ class MainWindow(QMainWindow):
         self.canvas.roi_points = []
         self.canvas.named_rois = {}
         self.field_map.zones = {}; self.field_map.tracks = {}; self.field_map.update()
-        self._set_results_enabled(True)
+        self._set_results_enabled(False)
         self.duration = float(metadata["duration_s"])
         self.capture = cv2.VideoCapture(str(path))
         self.canvas.show_frame(frame)
@@ -882,7 +884,11 @@ class MainWindow(QMainWindow):
         self.field_map.tracks = self.tracks; self.field_map.current_time = 0; self.field_map.update()
         self.refresh_result_tables()
         if not results_available:
-            self.progress_label.setText("The last analysis did not finish. Saved results are hidden until this video is processed successfully.")
+            self.progress_label.setText(
+                "This video has not been processed. Set up the field and run analysis to create results."
+                if video["analysis_status"] == "unprocessed"
+                else "The last analysis did not finish. Saved results are hidden until this video is processed successfully."
+            )
 
     def select_corner(self):
         if self.video_path is None: return

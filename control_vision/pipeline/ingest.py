@@ -33,7 +33,10 @@ def probe_video(path: Path) -> dict[str, float | int]:
                     cap = cv2.VideoCapture(str(path))
                     duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps
                     cap.release()
-                return {"duration_s": duration, "fps": fps, "width": int(stream["width"]), "height": int(stream["height"])}
+                width, height = int(stream["width"]), int(stream["height"])
+                if fps <= 0 or width <= 0 or height <= 0 or duration is None or duration <= 0:
+                    raise VideoError(f"Could not read video metadata for {path.name}.")
+                return {"duration_s": duration, "fps": fps, "width": width, "height": height}
             except (KeyError, IndexError, TypeError, ValueError, ZeroDivisionError) as exc:
                 raise VideoError(f"Could not read video metadata for {path.name}.") from exc
     cap = cv2.VideoCapture(str(path))

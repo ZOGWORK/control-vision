@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Callable
 
@@ -76,14 +77,19 @@ def track_seeded_video(video_path: Path, corners: list[list[float]],
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not read video file {video_path.name}.")
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if fps <= 0 or total_frames <= 0:
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not math.isfinite(fps) or fps <= 0 or total_frames <= 0:
+            raise RuntimeError(f"Could not read frame rate or frame count from {video_path.name}.")
+        if not math.isfinite(sample_fps) or sample_fps <= 0:
+            raise ValueError("Sample frame rate must be positive and finite.")
+        stride = max(1, round(fps / sample_fps))
+        sampled_total = max(1, total_frames // stride)
+        matrix = matrix_from_corners(corners)
+    except Exception:
         cap.release()
-        raise RuntimeError(f"Could not read frame rate or frame count from {video_path.name}.")
-    stride = max(1, round(fps / sample_fps))
-    sampled_total = max(1, total_frames // stride)
-    matrix = matrix_from_corners(corners)
+        raise
     robot_ids = [int(item[0]) for item in seed_points]
     anchors = {int(rid): (float(x), float(y)) for rid, x, y in seed_points}
     seed_anchors = anchors.copy()
