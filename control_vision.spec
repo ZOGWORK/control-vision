@@ -22,6 +22,11 @@ a = Analysis(
     noarchive=False,
     optimize=1,
 )
+# PyInstaller's generic ctypes scan can pick up ICU 78 from the host's Poppler
+# distribution. This Qt wheel uses the Windows ICU ABI available on supported
+# Windows hosts; bundling that unrelated ICU causes QtCore error 127 at import.
+a.binaries = [entry for entry in a.binaries
+              if Path(entry[0]).name.casefold() not in {"icuuc.dll", "icudt78.dll"}]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="ControlVision", console=False)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="ControlVision")
