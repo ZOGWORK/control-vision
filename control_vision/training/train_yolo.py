@@ -14,6 +14,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from control_vision.training.split_manifest import validate_split_manifest
+
 
 # Ultralytics 8.4.210 data.utils.IMG_FORMATS; decoding is checked below on
 # the actual training machine before an image enters a dataset hash or split.
@@ -106,6 +108,21 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
     return root
 
 
+def training_split_provenance(root: Path, config: dict, exploratory: bool = False) -> dict:
+    """Require match-level split provenance for a normal training run."""
+    if exploratory:
+        return {"mode": "exploratory_unverified", "manifest_sha256": None}
+    for split in ("train", "val"):
+        configured = Path(config[split])
+        if not configured.is_absolute():
+            configured = root / configured
+        if configured.resolve() != (root / "images" / split).resolve():
+            raise ValueError(f"{split} must use images/{split} for split-manifest validation")
+    audit = validate_split_manifest(root)
+    return {"mode": "match_audited", "manifest_sha256": audit["manifest_sha256"],
+            "matches": audit["matches"], "images": audit["images"]}
+
+
 @contextmanager
 def reserve_model_version(models_dir: Path, version: str):
     """Reserve a version across processes and refuse existing model artifacts."""
@@ -157,6 +174,8 @@ def main():
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--exploratory-without-manifest", action="store_true",
+                        help="Allow a local exploratory run without match provenance; mark its metadata unverified")
     args = parser.parse_args()
     if not args.data.is_file() or not args.base_weights.is_file():
         parser.error("Both --data and --base-weights must refer to existing local files.")
@@ -172,6 +191,7 @@ def main():
         parser.error("Supported classes are ['robot'] or ['robot','pollen','nectar'] in that order; alliance color is an attribute, not a class.")
     try:
         data_root = validate_dataset(args.data, config, len(names_list))
+        split_provenance = training_split_provenance(data_root, config, args.exploratory_without_manifest)
     except ValueError as exc:
         parser.error(str(exc))
     try:
@@ -202,7 +222,8 @@ def main():
             record = {"version": args.version, "date": date.today().isoformat(), "dataset_sha256": dataset_hash(data_root),
                       "classes": names_list, "base_weights": str(args.base_weights), "training_config": {"epochs": args.epochs, "batch": args.batch,
                       "imgsz": args.imgsz, "lr0": 0.01, "patience": 20, "device": args.device}, "validation_metrics": metrics,
-                      "onnx": onnx_path.name, "onnxruntime": "smoke_checked"}
+                      "onnx": onnx_path.name, "onnxruntime": "smoke_checked",
+                      "split_provenance": split_provenance}
             publish_model_artifacts(exported, onnx_path, metadata_path, record)
             print(f"Saved {onnx_path} and {metadata_path}")
     except ValueError as exc:
