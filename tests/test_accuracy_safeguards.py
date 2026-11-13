@@ -49,9 +49,13 @@ class ScoreConsensusTests(unittest.TestCase):
 
     def test_disqualification_does_not_resolve_flagged_evidence(self):
         result = calculate_scoreboard(
-            [{"status": "flagged", "robot_id": None}], [], disqualified={"red"})
+            [{"status": "flagged", "robot_id": None}] + [
+                {"status": "confirmed", "robot_id": None, "event_alliance": "red",
+                 "points": 2, "event_type": "hive_tip_teleop"} for _ in range(7)
+            ], [], disqualified={"red"})
         self.assertFalse(result["match_resolved"])
         self.assertEqual(result["ranking_points"]["blue"]["WIN_TIE"], 0)
+        self.assertEqual(result["ranking_points"]["red"]["total"], 0)
 
     def test_image_space_rois_are_not_field_zones(self):
         self.assertIsNone(zone_at(500, 650, {

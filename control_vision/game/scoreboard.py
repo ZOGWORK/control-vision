@@ -49,10 +49,10 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
         swarm = int(swarm_points[alliance] >= swarm_threshold)
         p1 = int(hive_tips[alliance] >= pollinator_1_threshold)
         p2 = int(hive_tips[alliance] >= pollinator_2_threshold)
-        if not match_resolved:
-            outcome = 0
-        elif alliance in disqualified:
+        if alliance in disqualified:
             swarm = p1 = p2 = 0
+            outcome = 0
+        elif not match_resolved:
             outcome = 0
         elif alliance_scores[alliance] > alliance_scores["blue" if alliance == "red" else "red"]:
             outcome = 3
