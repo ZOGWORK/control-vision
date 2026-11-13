@@ -22,6 +22,7 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
     and zeroes only the affected team's match points and ranking points.
     ``team_points`` attributes observed actions to robots; ``team_match_points``
     is the official alliance match score credited to each eligible team.
+    Ranking-point fields in this function are for qualification displays only.
     """
     events = list(events)
     robots = list(robots)
