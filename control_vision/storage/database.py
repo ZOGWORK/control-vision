@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS clips (id INTEGER PRIMARY KEY, scoring_event_id INTEG
 CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, path TEXT NOT NULL, t_s REAL NOT NULL);
 """
 
+_UNCHANGED = object()
+
 
 class ProjectDatabase:
     def __init__(self, path: Path):
@@ -182,12 +184,14 @@ class ProjectDatabase:
         self.connection.commit()
         return int(cursor.lastrowid)
 
-    def review_event(self, event_id: int, status: str, points: int, robot_id: int | None = None, event_type: str = "unclassified", confidence: str = "low", scoring_alliance: str | None = None) -> None:
+    def review_event(self, event_id: int, status: str, points: int, robot_id: int | None | object = _UNCHANGED, event_type: str = "unclassified", confidence: str = "low", scoring_alliance: str | None = None) -> None:
         with self.connection:
-            event = self.connection.execute("SELECT video_id FROM scoring_events WHERE id=?", (event_id,)).fetchone()
+            event = self.connection.execute("SELECT video_id,robot_id FROM scoring_events WHERE id=?", (event_id,)).fetchone()
             if event is None:
                 raise ValueError(f"Unknown scoring event {event_id}")
             video_id = event["video_id"]
+            if robot_id is _UNCHANGED:
+                robot_id = event["robot_id"]
             if robot_id is not None:
                 robot = self.connection.execute("SELECT video_id FROM robots WHERE id=?", (robot_id,)).fetchone()
                 if robot is None:

@@ -63,6 +63,20 @@ class CoreScoringTests(unittest.TestCase):
             self.assertEqual(len(db.events_for_video(second_video)), 0)
             db.close()
 
+    def test_review_keeps_robot_unless_explicitly_unassigned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = ProjectDatabase(Path(directory) / "event.db")
+            project = db.add_project("event")
+            video = db.add_video(project, Path("match.mp4"),
+                                 {"duration_s": 150.0, "fps": 30.0, "width": 1280, "height": 720})
+            robot = db.add_robot(video, 1001, "red", 50, 60)
+            event = db.add_scoring_event(robot, 42.0)
+            db.review_event(event, "confirmed", 5)
+            self.assertEqual(db.events_for_video(video)[0]["robot_id"], robot)
+            db.review_event(event, "flagged", 0, None)
+            self.assertIsNone(db.events_for_video(video)[0]["robot_id"])
+            db.close()
+
     def test_scout_export_uses_reviewed_disqualification_aware_points(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "scout.json"
