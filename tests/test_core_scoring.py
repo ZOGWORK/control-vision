@@ -30,6 +30,12 @@ class CoreScoringTests(unittest.TestCase):
         self.assertEqual(board["ranking_points"]["red"]["WIN_TIE"], 1)
         self.assertEqual(board["ranking_points"]["blue"]["WIN_TIE"], 1)
 
+    def test_alliance_disqualification_awards_opponent_win_at_zero_points(self):
+        board = calculate_scoreboard([], self.robots, disqualified={"red"})
+        self.assertEqual(board["alliance_points"], {"red": 0, "blue": 0})
+        self.assertEqual(board["ranking_points"]["red"]["WIN_TIE"], 0)
+        self.assertEqual(board["ranking_points"]["blue"]["WIN_TIE"], 3)
+
     def test_legacy_confirmed_event_without_type_still_scores(self):
         board = calculate_scoreboard([{"robot_id": 1, "status": "confirmed", "points": 5}], self.robots)
         self.assertEqual(board["alliance_points"]["red"], 5)
