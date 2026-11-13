@@ -39,6 +39,13 @@ class BiobuzzRulesTests(unittest.TestCase):
         self.assertEqual(dq["team_points"][1], 0)
         self.assertEqual(dq["ranking_points"]["red"]["total"], 0)
 
+    def test_reviewed_alliance_overrides_stale_inferred_alliance(self):
+        event = [{"robot_id": 1, "status": "confirmed", "points": 5,
+                  "event_alliance": "red", "scoring_alliance": "blue"}]
+        result = calculate_scoreboard(event, self.robots)
+        self.assertEqual(result["alliance_points"], {"red": 0, "blue": 5})
+        self.assertEqual(result["ranking_points"]["blue"]["WIN_TIE"], 3)
+
     def test_period_boundaries(self):
         periods = {"auto": 30, "transition": 8, "teleop": 120}
         self.assertEqual(classify_match_time(0, periods), ("AUTO", 30))
