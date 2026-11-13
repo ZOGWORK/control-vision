@@ -39,6 +39,19 @@ class SeedMatchingTests(unittest.TestCase):
 
 
 class ScoreConsensusTests(unittest.TestCase):
+    def test_scoreboard_accepts_sqlite_rows_with_optional_alliance(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        try:
+            event = connection.execute(
+                "SELECT 'confirmed' AS status, NULL AS robot_id, 'red' AS scoring_alliance, "
+                "2 AS points, 'hive_tip_teleop' AS event_type"
+            ).fetchone()
+            result = calculate_scoreboard([event], [])
+            self.assertEqual(result["alliance_points"]["red"], 2)
+        finally:
+            connection.close()
+
     def test_prefers_consistent_final_score_over_one_ocr_outlier(self):
         result = _consensus([
             {"t_s": 1.0, "value": 90, "confidence": 0.99},

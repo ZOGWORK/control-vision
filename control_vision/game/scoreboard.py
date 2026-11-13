@@ -3,6 +3,14 @@ from __future__ import annotations
 from collections import defaultdict
 
 
+def _optional_field(row, name: str):
+    """Read an optional field from dicts and sqlite3.Row objects."""
+    try:
+        return row[name]
+    except (KeyError, IndexError):
+        return None
+
+
 def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
                          pollinator_1_threshold: int = 4,
                          pollinator_2_threshold: int = 7,
@@ -27,7 +35,8 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
             continue
         robot_id = event["robot_id"]
         robot = robot_by_id.get(int(robot_id)) if robot_id is not None else None
-        alliance = event.get("event_alliance") or event.get("scoring_alliance") or (robot["alliance"] if robot else None)
+        alliance = (_optional_field(event, "event_alliance") or _optional_field(event, "scoring_alliance")
+                    or (robot["alliance"] if robot else None))
         if alliance not in alliance_scores:
             continue
         points = int(event["points"])
