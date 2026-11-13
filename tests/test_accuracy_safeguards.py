@@ -239,6 +239,48 @@ class SeedMatchingTests(unittest.TestCase):
         self.assertAlmostEqual(events[0]["t_s"], 0.5)
         self.assertGreaterEqual(events[1]["t_s"], 1.0)
 
+    def test_moving_roi_element_does_not_create_second_candidate(self):
+        import numpy as np
+        from types import SimpleNamespace
+
+        class Capture:
+            reads = 0
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else 35
+            def read(self):
+                self.reads += 1
+                return (True, np.zeros((100, 100, 3), dtype=np.uint8)) if self.reads <= 35 else (False, None)
+            def release(self): pass
+
+        for track_id in (10, None):
+            with self.subTest(track_id=track_id):
+                frame_index = 0
+                def detect(*args, **kwargs):
+                    nonlocal frame_index
+                    robot = SimpleNamespace(cls=[0], xyxy=np.array([[10, 10, 30, 50]]),
+                                            conf=[0.95], id=[1])
+                    x = 45 if frame_index < 16 else 90
+                    ball = SimpleNamespace(cls=[1], xyxy=np.array([[x - 5, 40, x + 5, 50]]),
+                                           conf=[0.9], id=[track_id] if track_id is not None else None)
+                    frame_index += 1
+                    return [SimpleNamespace(boxes=[robot, ball])]
+
+                with tempfile.TemporaryDirectory() as folder:
+                    model_path = Path(folder) / "robot.onnx"
+                    model_path.touch()
+                    with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=Capture()), \
+                         patch("ultralytics.YOLO", return_value=SimpleNamespace(track=detect)):
+                        _, _, events = track_video(
+                            Path("match.mp4"), model_path,
+                            [[0, 0], [100, 0], [100, 100], [0, 100]], [(1, 20, 50)],
+                            30.0, lambda: False, lambda *_: None,
+                            logging.getLogger("roi-motion-test"),
+                            goal_roi=[[0, 0], [100, 0], [100, 100], [0, 100]],
+                        )
+                self.assertEqual(len(events), 1)
+
     def test_assigns_one_to_one_by_minimum_total_distance(self):
         seeds = [(10, 100, 100), (20, 200, 100)]
         detections = [(1, 115, 100), (2, 180, 100)]
@@ -294,6 +336,15 @@ class ScoreConsensusTests(unittest.TestCase):
         self.assertFalse(result["match_resolved"])
         self.assertEqual(result["ranking_points"]["blue"]["WIN_TIE"], 0)
         self.assertEqual(result["ranking_points"]["red"]["total"], 0)
+
+    def test_disqualified_robots_have_no_exported_video_points(self):
+        robots = [{"id": 1, "team_number": 1234, "alliance": "red"},
+                  {"id": 2, "team_number": 5678, "alliance": "blue"}]
+        events = [{"status": "confirmed", "robot_id": robot_id, "points": 5,
+                   "event_type": "hive_tip_teleop"} for robot_id in (1, 2)]
+        result = calculate_scoreboard(events, robots, disqualified={"red"})
+        self.assertEqual(result["alliance_points"], {"red": 0, "blue": 5})
+        self.assertEqual(result["team_points"], {1: 0, 2: 5})
 
     def test_image_space_rois_are_not_field_zones(self):
         self.assertIsNone(zone_at(500, 650, {

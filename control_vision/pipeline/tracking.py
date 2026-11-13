@@ -20,7 +20,8 @@ def _new_roi_candidate(x: float, y: float, t_s: float,
                for old_x, old_y, _ in recent)
 
 
-def _unmatched_roi_detections(detections, known_positions, max_distance: float = 35.0):
+def _unmatched_roi_detections(detections, known_positions, known_track_ids=None,
+                              max_distance: float = 35.0):
     """Return ROI detections that cannot be spatially matched to known elements.
 
     Detector output ordering is not stable across frames. Greedy nearest-neighbor
@@ -28,15 +29,22 @@ def _unmatched_roi_detections(detections, known_positions, max_distance: float =
     elements and prevents an existing element at a different list index from being
     reported as newly arrived.
     """
+    known_track_ids = known_track_ids or set()
+    matched_detections = {
+        index for index, detection in enumerate(detections)
+        if len(detection) > 3 and detection[3] >= 0 and detection[3] in known_track_ids
+    }
     pairs = []
     for detection_index, detection in enumerate(detections):
+        if detection_index in matched_detections:
+            continue
         x, y = detection[:2]
         for known_index, (known_x, known_y) in enumerate(known_positions):
             distance_sq = (x - known_x) ** 2 + (y - known_y) ** 2
             if distance_sq <= max_distance ** 2:
                 pairs.append((distance_sq, detection_index, known_index))
     pairs.sort()
-    matched_detections, matched_known = set(), set()
+    matched_known = set()
     for _, detection_index, known_index in pairs:
         if detection_index not in matched_detections and known_index not in matched_known:
             matched_detections.add(detection_index)
@@ -156,6 +164,7 @@ def track_video(
     consecutive_inference_failures = 0
     stable_roi_count = 0
     stable_roi_positions: list[tuple[float, float]] = []
+    stable_roi_track_ids: set[int] = set()
     pending_roi_count = 0
     pending_roi_since: float | None = None
     try:
@@ -195,7 +204,8 @@ def track_video(
                         tid = int(box.id[0]) if box.id is not None else -1
                         detections.append((tid, center_x, y2, conf, (x1, y1, x2, y2)))
                     elif class_id in (1, 2) and goal_roi and point_in_polygon(center_x, center_y, goal_roi):
-                        roi_balls.append((center_x, center_y, conf))
+                        track_id = int(box.id[0]) if box.id is not None else -1
+                        roi_balls.append((center_x, center_y, conf, track_id))
             if sampled < 30 and not detections:
                 empty += 1
             if sampled == 29 and empty == 30:
@@ -232,13 +242,20 @@ def track_video(
                 if previous is None or (area, conf) > (previous[0], previous[1]):
                     best_photos[robot_id] = (area, conf, t_s, crop)
             current_roi_count = len(roi_balls)
-            current_roi_positions = [(x, y) for x, y, _ in roi_balls]
-            new_roi_balls = _unmatched_roi_detections(roi_balls, stable_roi_positions)
+            current_roi_positions = [(ball[0], ball[1]) for ball in roi_balls]
+            current_roi_track_ids = {ball[3] for ball in roi_balls if ball[3] >= 0}
+            new_roi_balls = _unmatched_roi_detections(
+                roi_balls, stable_roi_positions, stable_roi_track_ids)
+            if (current_roi_count == stable_roi_count and not current_roi_track_ids
+                    and not stable_roi_track_ids):
+                # Without tracker IDs, a same-count replacement is
+                # indistinguishable from motion. Avoid inventing a goal event.
+                new_roi_balls = []
             if goal_roi and new_roi_balls:
                 if len(new_roi_balls) != pending_roi_count:
                     pending_roi_count, pending_roi_since = len(new_roi_balls), t_s
                 elif pending_roi_since is not None and t_s - pending_roi_since >= 0.5:
-                    for ball_x, ball_y, ball_conf in new_roi_balls:
+                    for ball_x, ball_y, ball_conf, _ in new_roi_balls:
                         if not _new_roi_candidate(ball_x, ball_y, t_s, recent_roi_candidates):
                             continue
                         robot_id = _nearest_robot_id(robot_positions, ball_x, ball_y,
@@ -249,6 +266,7 @@ def track_video(
                         recent_roi_candidates.append((ball_x, ball_y, t_s))
                     stable_roi_count = current_roi_count
                     stable_roi_positions = current_roi_positions
+                    stable_roi_track_ids = current_roi_track_ids
                     pending_roi_count, pending_roi_since = 0, None
             elif goal_roi:
                 if current_roi_count < stable_roi_count:
@@ -256,6 +274,12 @@ def track_video(
                     # the next arrival; they do not erase candidate history.
                     stable_roi_count = current_roi_count
                     stable_roi_positions = current_roi_positions
+                    stable_roi_track_ids = current_roi_track_ids
+                elif not new_roi_balls:
+                    # Keep spatial fallback tracks current for models without
+                    # persistent element IDs, so ordinary motion is not a birth.
+                    stable_roi_positions = current_roi_positions
+                    stable_roi_track_ids = current_roi_track_ids
                 pending_roi_count, pending_roi_since = 0, None
             sampled += 1
             progress("Detect and track", min(100.0, 100 * sampled / sampled_total), f"Processed {sampled:,} sampled frames")

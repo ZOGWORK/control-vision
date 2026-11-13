@@ -52,6 +52,9 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
     for alliance in disqualified:
         if alliance in alliance_scores:
             alliance_scores[alliance] = 0
+            for robot in robots:
+                if robot["alliance"] == alliance:
+                    team_points[int(robot["id"])] = 0
 
     ranking_points = {"red": {}, "blue": {}}
     for alliance in ("red", "blue"):
