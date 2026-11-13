@@ -37,12 +37,14 @@ def _dataset_root(data: Path, config: dict) -> Path:
         raise ValueError("path must name a dataset directory in data.yaml")
     configured = Path(configured_value)
     if configured.is_absolute():
-        return configured
+        return configured.resolve()
+    train_ref = config.get("train", "")
+    if isinstance(train_ref, str) and Path(train_ref).is_absolute():
+        return Path(train_ref).resolve().parent.parent
     # The example data.yaml uses a path relative to the launch directory.
     # Also accept a path relative to the YAML for portable datasets.
     from_cwd = configured.resolve()
     from_yaml = (data.resolve().parent / configured).resolve()
-    train_ref = config.get("train", "")
     cwd_has_train = isinstance(train_ref, str) and (from_cwd / train_ref).is_dir()
     yaml_has_train = isinstance(train_ref, str) and (from_yaml / train_ref).is_dir()
     if cwd_has_train and yaml_has_train and from_cwd != from_yaml:
@@ -64,7 +66,8 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
         images_dir = Path(image_ref)
         if not images_dir.is_absolute():
             images_dir = root / images_dir
-        if not images_dir.is_dir() or images_dir.parent.name != "images":
+        images_dir = images_dir.resolve()
+        if not images_dir.is_dir() or images_dir.parent.name != "images" or images_dir.parent.parent != root:
             raise ValueError(f"{split} images directory is missing or outside images/: {images_dir}")
         labels_dir = images_dir.parent.parent / "labels" / images_dir.name
         images = sorted(path for path in images_dir.rglob("*")
@@ -126,6 +129,25 @@ def reserve_model_version(models_dir: Path, version: str):
         lock_path.unlink(missing_ok=True)
 
 
+def publish_model_artifacts(exported: Path, onnx_path: Path, metadata_path: Path, record: dict) -> None:
+    """Create both release files exclusively and remove either if publishing fails."""
+    created_onnx = created_metadata = False
+    try:
+        with onnx_path.open("xb") as target:
+            created_onnx = True
+            with exported.open("rb") as source:
+                shutil.copyfileobj(source, target)
+        with metadata_path.open("x", encoding="utf-8") as stream:
+            created_metadata = True
+            json.dump(record, stream, indent=2)
+    except BaseException:
+        if created_metadata:
+            metadata_path.unlink(missing_ok=True)
+        if created_onnx:
+            onnx_path.unlink(missing_ok=True)
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train locally from a hand-labeled BIOBUZZ dataset and export versioned ONNX weights.")
     parser.add_argument("--data", type=Path, required=True, help="YOLO data.yaml with train/val splits")
@@ -169,23 +191,19 @@ def main():
             if not best_pt.is_file(): raise SystemExit(f"Training completed without a best checkpoint at {best_pt}")
             trained = YOLO(str(best_pt))
             exported = Path(trained.export(format="onnx", imgsz=args.imgsz, opset=12, simplify=False))
-            with exported.open("rb") as source, onnx_path.open("xb") as target:
-                shutil.copyfileobj(source, target)
             try:
                 import onnxruntime as ort
-                session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+                session = ort.InferenceSession(str(exported), providers=["CPUExecutionProvider"])
                 input_info = session.get_inputs()[0]
                 blank = np.zeros((1, 3, args.imgsz, args.imgsz), dtype=np.float32)
                 session.run(None, {input_info.name: blank})
             except Exception as exc:
-                onnx_path.unlink(missing_ok=True)
                 raise SystemExit(f"ONNX Runtime smoke check failed: {exc}") from exc
             record = {"version": args.version, "date": date.today().isoformat(), "dataset_sha256": dataset_hash(data_root),
                       "classes": names_list, "base_weights": str(args.base_weights), "training_config": {"epochs": args.epochs, "batch": args.batch,
                       "imgsz": args.imgsz, "lr0": 0.01, "patience": 20, "device": args.device}, "validation_metrics": metrics,
                       "onnx": onnx_path.name, "onnxruntime": "smoke_checked"}
-            with metadata_path.open("x", encoding="utf-8") as stream:
-                json.dump(record, stream, indent=2)
+            publish_model_artifacts(exported, onnx_path, metadata_path, record)
             print(f"Saved {onnx_path} and {metadata_path}")
     except ValueError as exc:
         parser.error(str(exc))

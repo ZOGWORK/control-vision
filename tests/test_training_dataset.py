@@ -2,11 +2,12 @@ import tempfile
 import unittest
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
-from control_vision.training.train_yolo import reserve_model_version, validate_dataset
+from control_vision.training.train_yolo import publish_model_artifacts, reserve_model_version, validate_dataset
 
 
 class TrainingDatasetTests(unittest.TestCase):
@@ -51,6 +52,11 @@ class TrainingDatasetTests(unittest.TestCase):
                 validate_dataset(self.data, self.config, 1)
         finally:
             os.chdir(previous)
+
+    def test_absolute_splits_do_not_trigger_relative_path_ambiguity(self):
+        self.config.update(path=".", train=str(self.root / "images" / "train"),
+                           val=str(self.root / "images" / "val"))
+        self.assertEqual(validate_dataset(self.data, self.config, 1), self.root)
 
     def test_exact_image_leakage_is_rejected(self):
         self._sample("val", "two", self._image(30), "0 0.4 0.4 0.2 0.2\n")
@@ -121,6 +127,24 @@ class TrainingDatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Model version"):
             with reserve_model_version(models, "../escape"):
                 pass
+
+    def test_partial_artifacts_are_removed_after_publish_failure(self):
+        models = self.root / "models"
+        exported = self.root / "trained.onnx"
+        exported.write_bytes(b"trained model")
+        with reserve_model_version(models, "1.0.0") as (onnx, metadata):
+            def fail_dump(record, stream, indent):
+                stream.write("{partial")
+                raise OSError("disk full")
+
+            with patch("control_vision.training.train_yolo.json.dump", side_effect=fail_dump):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    publish_model_artifacts(exported, onnx, metadata, {"version": "1.0.0"})
+            self.assertFalse(onnx.exists())
+            self.assertFalse(metadata.exists())
+        with reserve_model_version(models, "1.0.0") as (onnx, metadata):
+            publish_model_artifacts(exported, onnx, metadata, {"version": "1.0.0"})
+        self.assertEqual(onnx.read_bytes(), b"trained model")
 
 
 if __name__ == "__main__":
