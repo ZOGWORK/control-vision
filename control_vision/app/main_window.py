@@ -914,7 +914,8 @@ class MainWindow(QMainWindow):
         self.db.replace_tracks(track_rows, robot_ids)
         self.db.replace_photos(robot_ids, photos)
         self.photo_rows = photos
-        cycles, cycle_events = count_zone_cycles(track_rows, self.zones)
+        preview_only = self.tracking_mode.currentData() == "seeded_optical_flow"
+        cycles, cycle_events = ([], []) if preview_only else count_zone_cycles(track_rows, self.zones)
         self.db.replace_analysis(robot_ids, cycles, cycle_events + roi_events)
         self.cycles = self.db.cycles_for_video(self.video_id)
         self.events = self.db.events_for_video(self.video_id)
@@ -926,7 +927,7 @@ class MainWindow(QMainWindow):
         tracking_method = "seeded optical flow" if self.tracking_mode.currentData() == "seeded_optical_flow" else "YOLO tracking"
         self.log_view.addItem(f"{tracking_method} complete: {len(track_rows):,} mapped robot samples; {len(self.cycles)} zone-trip cycles; {len(photos)} robot photos")
         if self.tracking_mode.currentData() == "seeded_optical_flow":
-            self.log_view.addItem("Accuracy note: optical-flow points are a preview only. Verify identity and every position; do not use these estimates as confirmed scoring evidence.")
+            self.log_view.addItem("Accuracy note: optical-flow is a trail preview only. Cycle counts and movement statistics are omitted; verify every identity and position before any use as evidence.")
         self.progress_label.setText(f"Analysis complete. Samples: {len(track_rows):,}; cycle/event candidates: {len(self.events)}. Review points and statuses before reporting scores.")
         self.refresh_result_tables()
         self.process_btn.setEnabled(True)
@@ -947,7 +948,8 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value)); self.cycles_table.setItem(row_index, col, item)
             self.cycles_table.item(row_index, 0).setData(Qt.ItemDataRole.UserRole, cycle["start_t_s"])
         track_rows = [tuple(row) for row in self.db.tracks_for_video(self.video_id)]
-        stats = robot_statistics(track_rows, [dict(row) for row in self.cycles], self.zones)
+        preview_only = self.tracking_mode.currentData() == "seeded_optical_flow"
+        stats = {} if preview_only else robot_statistics(track_rows, [dict(row) for row in self.cycles], self.zones)
         points_by_robot = {}
         robot_alliances = {int(robot["id"]): robot["alliance"] for robot in robots}
         for event in self.events:
@@ -957,10 +959,13 @@ class MainWindow(QMainWindow):
                                      self.pollinator_2_threshold.value(), {a for a, cb in (("red", self.disq_red), ("blue", self.disq_blue)) if cb.isChecked()})
         self.stats_table.setRowCount(len(robots))
         for row_index, robot in enumerate(robots):
-            values = stats.get(robot["id"], {"cycles": 0, "cycle_time_avg_s": 0, "top_speed_ft_s": 0, "distance_ft": 0})
+            values = stats.get(robot["id"], {"cycles": "Preview only" if preview_only else 0,
+                                                "cycle_time_avg_s": None if preview_only else 0,
+                                                "top_speed_ft_s": None if preview_only else 0,
+                                                "distance_ft": None if preview_only else 0})
             zone_seconds = values.get("zone_time_s", {})
-            zone_summary = ", ".join(f"{name}: {seconds:.1f}" for name, seconds in zone_seconds.items())
-            display = [robot["team_number"], robot["alliance"], values["cycles"], f"{values['cycle_time_avg_s']:.2f}", f"{values['top_speed_ft_s']:.2f}", f"{values['distance_ft']:.2f}", zone_summary, points_by_robot.get(robot["id"], 0), board["team_ranking_points"].get(int(robot["id"]), 0)]
+            zone_summary = "Unavailable in preview mode" if preview_only else ", ".join(f"{name}: {seconds:.1f}" for name, seconds in zone_seconds.items())
+            display = [robot["team_number"], robot["alliance"], values["cycles"], "—" if preview_only else f"{values['cycle_time_avg_s']:.2f}", "—" if preview_only else f"{values['top_speed_ft_s']:.2f}", "—" if preview_only else f"{values['distance_ft']:.2f}", zone_summary, points_by_robot.get(robot["id"], 0), board["team_ranking_points"].get(int(robot["id"]), 0)]
             for col, value in enumerate(display): self.stats_table.setItem(row_index, col, QTableWidgetItem(str(value)))
         flagged = [event for event in self.events if event["status"] == "flagged"]
         self.review_table.setRowCount(len(flagged))

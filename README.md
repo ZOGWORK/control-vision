@@ -16,7 +16,7 @@ You upload a video of an FTC match and it tells you what happened — per robot,
 
 ## How it works
 
-- Detection: YOLO11n with locally supplied BIOBUZZ weights (none are bundled yet). Seeded optical flow is an experimental preview only, not accurate enough for scoring.
+- Detection: YOLO11n with locally supplied BIOBUZZ weights (none are bundled yet). Seeded optical flow is an experimental trail preview only; it does not report cycles or movement statistics.
 - Tracking: BoT-SORT, with optional user-supplied local ReID model. OC-SORT fallback and AFLink/GSI tracklet stitching are not implemented.
 - Field mapping: one homography per video (click the 4 field corners once) to a top-down 12×12 ft field.
 - Cycles: user-drawn pickup-to-scoring zone trips, medium confidence until ball detection is available.

@@ -11,7 +11,7 @@ Use Python 3.11 or newer, install the pinned packages in `requirements.txt`, and
 3. Choose a clear field frame and click the field corners clockwise, starting at the top-left. The points map to a 12 by 12 foot square. Reuse Calibration copies a previous video calibration and scales the corner pixels to the new resolution; visually confirm it before processing.
 4. On the top-down map, choose a zone type and Draw Zone. Click polygon vertices and double-click to finish. Use names that match the field manual. No default zone coordinates are supplied because the manual diagram was not included.
 5. Seed each visible robot by clicking near its floor contact point, then enter the team number and alliance. Up to four robots are supported.
-6. Set the tracking method, model path, confidence threshold, and sample rate under Settings, then press Process. YOLO is the intended detector when a validated local model is available. Seeded optical flow is a preview only. Cancel stops after the current frame. Logs go to `run_logs/`.
+6. Set the tracking method, model path, confidence threshold, and sample rate under Settings, then press Process. YOLO is the intended detector when a validated local model is available. Seeded optical flow shows experimental trails only and omits cycles and movement statistics. Cancel stops after the current frame. Logs go to `run_logs/`.
 7. To read the final on-video scoreboard, draw the red and blue scoreboard ROIs in Analysis, open Export, and run the OCR proposal. Review its values and readable-frame count before choosing Use OCR reading. This stores proposed official totals; it does not create per-robot scored events.
 
 ## Interpret results
