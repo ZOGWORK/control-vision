@@ -128,6 +128,7 @@ def track_video(
     sampled = 0
     frame_index = 0
     empty = 0
+    consecutive_inference_failures = 0
     stable_roi_count = 0
     pending_roi_count = 0
     pending_roi_since: float | None = None
@@ -144,12 +145,16 @@ def track_video(
             t_s = frame_index / fps
             try:
                 result = model.track(frame, persist=True, tracker=str(tracker_cfg), imgsz=640, conf=confidence_threshold, iou=0.5, verbose=False)[0]
-            except Exception:
+            except Exception as exc:
                 logger.exception("Detection failed on frame %d; skipped", frame_index)
+                consecutive_inference_failures += 1
+                if consecutive_inference_failures >= 3:
+                    raise RuntimeError("Robot model failed on three consecutive sampled frames. Check the model and runtime.") from exc
                 frame_index += 1
                 sampled += 1
                 progress("Detect and track", min(100.0, 100 * sampled / sampled_total), f"Skipped unreadable frame at {t_s:.1f}s")
                 continue
+            consecutive_inference_failures = 0
             boxes = result.boxes
             detections = []
             roi_balls = []
@@ -231,6 +236,8 @@ def track_video(
             Path(tracker_override.name).unlink(missing_ok=True)
     if sampled and sampled < 30 and empty == sampled:
         raise RuntimeError("No robots were detected in the first sampled frames. Check the video and robot model.")
+    if not rows:
+        raise RuntimeError("No usable robot tracks were produced. Check the video, calibration, model, and identity seeds.")
     grouped: dict[int, list[tuple]] = {}
     for row in rows:
         grouped.setdefault(row[0], []).append(row)

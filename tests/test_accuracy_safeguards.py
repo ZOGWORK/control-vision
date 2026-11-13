@@ -35,6 +35,74 @@ class WorkerDispatchTests(unittest.TestCase):
 
 
 class SeedMatchingTests(unittest.TestCase):
+    def test_repeated_model_inference_errors_fail_before_replacing_results(self):
+        import numpy as np
+        from types import SimpleNamespace
+
+        class Capture:
+            reads = 0
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else 35
+            def read(self):
+                self.reads += 1
+                return True, np.zeros((480, 640, 3), dtype=np.uint8)
+            def release(self): pass
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("incompatible runtime")
+
+        capture = Capture()
+        model = SimpleNamespace(track=fail)
+        logger = logging.getLogger("model-failure-test")
+        logger.propagate = False
+        logger.addHandler(logging.NullHandler())
+        with tempfile.TemporaryDirectory() as folder:
+            model_path = Path(folder) / "robot.onnx"
+            model_path.touch()
+            with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=capture), \
+                 patch("ultralytics.YOLO", return_value=model):
+                with self.assertRaisesRegex(RuntimeError, "three consecutive sampled frames"):
+                    track_video(Path("match.mp4"), model_path,
+                                [[0, 0], [100, 0], [100, 100], [0, 100]], [(1, 90, 90)],
+                                30.0, lambda: False, lambda *_: None, logger)
+        self.assertEqual(capture.reads, 3)
+
+    def test_one_inference_error_does_not_discard_later_robot_track(self):
+        import numpy as np
+        from types import SimpleNamespace
+
+        class Capture:
+            reads = 0
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else 2
+            def read(self):
+                self.reads += 1
+                return (True, np.zeros((480, 640, 3), dtype=np.uint8)) if self.reads <= 2 else (False, None)
+            def release(self): pass
+
+        box = SimpleNamespace(cls=[0], xyxy=np.array([[40, 40, 60, 90]]), conf=[.9], id=[1])
+        results = iter([RuntimeError("one bad frame"), [SimpleNamespace(boxes=[box])]])
+        def detect(*args, **kwargs):
+            result = next(results)
+            if isinstance(result, Exception): raise result
+            return result
+        logger = logging.getLogger("single-frame-failure-test")
+        logger.propagate = False
+        logger.addHandler(logging.NullHandler())
+        with tempfile.TemporaryDirectory() as folder:
+            model_path = Path(folder) / "robot.onnx"
+            model_path.touch()
+            with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=Capture()), \
+                 patch("ultralytics.YOLO", return_value=SimpleNamespace(track=detect)):
+                rows, _, _ = track_video(Path("match.mp4"), model_path,
+                                         [[0, 0], [100, 0], [100, 100], [0, 100]], [(1, 50, 90)],
+                                         30.0, lambda: False, lambda *_: None, logger)
+        self.assertEqual(len(rows), 1)
+
     def test_yolo_stops_after_thirty_empty_sampled_frames(self):
         import numpy as np
         from types import SimpleNamespace
@@ -92,11 +160,11 @@ class SeedMatchingTests(unittest.TestCase):
             model_path.touch()
             with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=Capture()), \
                  patch("ultralytics.YOLO", return_value=model):
-                rows, photos, events = track_video(
-                    Path("match.mp4"), model_path,
-                    [[0, 0], [100, 0], [100, 100], [0, 100]], [(1, 90, 90)],
-                    8.0, lambda: False, lambda *_: None, logging.getLogger("field-test"))
-        self.assertEqual((rows, photos, events), ([], [], []))
+                with self.assertRaisesRegex(RuntimeError, "No usable robot tracks"):
+                    track_video(Path("match.mp4"), model_path,
+                                [[0, 0], [100, 0], [100, 100], [0, 100]], [(1, 90, 90)],
+                                8.0, lambda: False, lambda *_: None,
+                                logging.getLogger("field-test"))
 
     def test_goal_element_reacquisition_does_not_repeat_candidate(self):
         recent = [(100.0, 100.0, 1.0)]
