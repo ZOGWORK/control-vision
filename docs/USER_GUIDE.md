@@ -12,7 +12,7 @@ Use Python 3.11 or newer, install the pinned packages in `requirements.txt`, and
 4. On the top-down map, choose a zone type and Draw Zone. Click polygon vertices and double-click to finish. Use names that match the field manual. No default zone coordinates are supplied because the manual diagram was not included.
 5. Seed each visible robot by clicking near its floor contact point, then enter the team number and alliance. Up to four robots are supported.
 6. Set the tracking method, model path, confidence threshold, and sample rate under Settings, then press Process. YOLO is the intended detector when a validated local model is available. Seeded optical flow shows experimental trails only and omits cycles and movement statistics. Cancel stops after the current frame. Logs go to `run_logs/`.
-7. To read the final on-video scoreboard, draw the red and blue scoreboard ROIs in Analysis, open Export, and run the OCR proposal. Review its values and readable-frame count before choosing Use OCR reading. This stores proposed official totals; it does not create per-robot scored events.
+7. To read the final on-video scoreboard, seek to a frame showing the final results screen, then draw tight red and blue score ROIs around those final score digits in Analysis. Broadcasts may move the score between the live overlay and the final screen. Open Export and run the OCR proposal. Review its values and readable-frame count before choosing Use OCR reading. This stores proposed official totals; it does not create per-robot scored events.
 
 ## Interpret results
 
@@ -26,4 +26,4 @@ Statistics CSV and Scout JSON exports use the reviewed database values. Official
 
 No trained weights, labeled dataset, or holdout videos ship with the source. The UI and code do not claim measured ID-switch, track-completeness, cycle-count, scoring, or CPU-performance results. Zone crossings and manually reviewed points are practical scaffolding; score-value inference from robot motion alone is not automatic.
 
-The Salk Q3 final-board OCR smoke check read Red 156 / Blue 93 at 158.483s and 159.483s, with 2 readable frames out of 12 sampled. This verifies that pipeline path on one fixed-camera video only; the app caps temporal confidence and requires review.
+On the Salk Q3 clip, ROIs copied from the live overlay proposed 156–93, which differs from the official 180–103 result. The final results screen moves the scores. ROIs drawn around the final screen's digits proposed 180–103 on the same last-12-second window, with 4 readable red frames and 2 readable blue frames. The red temporal confidence was 26% and the blue 54%; this single clip does not establish general OCR accuracy, and the proposal still requires review.
