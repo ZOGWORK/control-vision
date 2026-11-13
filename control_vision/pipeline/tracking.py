@@ -177,6 +177,9 @@ def track_video(
                 if robot_id is None:
                     continue
                 x_ft, y_ft = project_point(matrix, x, y)
+                if not (0 <= x_ft <= 12 and 0 <= y_ft <= 12):
+                    logger.info("Track %s outside calibrated field at %.2fs; skipped", robot_id, t_s)
+                    continue
                 rows.append((robot_id, frame_index, t_s, x_ft, y_ft, conf))
                 robot_positions.append((robot_id, x, y))
                 x1, y1, x2, y2 = bbox
