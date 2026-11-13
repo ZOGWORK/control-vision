@@ -1,8 +1,9 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
-from control_vision.storage.database import ProjectDatabase
+from control_vision.storage.database import ProjectDatabase, SCHEMA
 
 
 class ProjectDatabaseTests(unittest.TestCase):
@@ -74,6 +75,35 @@ class ProjectDatabaseTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual({event["origin_robot_id"] for event in events}, {self.red_robot, other_robot})
         self.assertEqual(next(event for event in events if event["id"] == reviewed_id)["status"], "confirmed")
+
+
+class LegacyMigrationTests(unittest.TestCase):
+    def test_existing_video_and_reviews_survive_schema_upgrade(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "legacy.sqlite"
+            old_schema = SCHEMA.replace(
+                ", scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo', analysis_status TEXT NOT NULL DEFAULT 'unprocessed'", ""
+            ).replace(", origin_robot_id INTEGER", "")
+            connection = sqlite3.connect(path)
+            connection.executescript(old_schema)
+            connection.execute("INSERT INTO projects(id,name) VALUES (1,'legacy')")
+            connection.execute("INSERT INTO videos(id,project_id,path) VALUES (1,1,'match.mp4')")
+            connection.execute("INSERT INTO robots(id,video_id,team_number,alliance) VALUES (1,1,1001,'red')")
+            connection.execute("INSERT INTO scoring_events(robot_id,video_id,t_s,status,points) VALUES (1,1,12,'confirmed',3)")
+            connection.commit()
+            connection.close()
+            db = ProjectDatabase(path)
+            try:
+                video = db.connection.execute("SELECT tracking_mode,analysis_status FROM videos WHERE id=1").fetchone()
+                self.assertEqual(tuple(video), ("yolo", "ready"))
+                self.assertEqual(db.events_for_video(1)[0]["points"], 3)
+                self.assertEqual(db.events_for_video(1)[0]["status"], "confirmed")
+                fresh = db.add_video(1, Path("new.mp4"), {"duration_s": 120, "fps": 30,
+                                                           "width": 1280, "height": 720})
+                self.assertEqual(db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (fresh,)).fetchone()[0],
+                                 "unprocessed")
+            finally:
+                db.close()
 
 
 if __name__ == "__main__":
