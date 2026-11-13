@@ -11,6 +11,42 @@ from control_vision.pipeline.manual_tracking import _photo_crop_bounds, _save_be
 
 
 class SeededPreviewTests(unittest.TestCase):
+    def test_seeded_robot_produces_field_samples_on_moving_frames(self):
+        frames = []
+        for offset in range(6):
+            frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            left = 140 + 3 * offset
+            cv2.rectangle(frame, (left, 200), (left + 80, 300), (0, 0, 200), -1)
+            for x in range(left + 8, left + 75, 16):
+                for y in range(210, 290, 16):
+                    cv2.rectangle(frame, (x, y), (x + 4, y + 4), (255, 255, 255), -1)
+            frames.append(frame)
+
+        class Capture:
+            index = 0
+            released = False
+            def isOpened(self): return True
+            def get(self, prop):
+                return {cv2.CAP_PROP_FPS: 5, cv2.CAP_PROP_FRAME_COUNT: len(frames)}[prop]
+            def read(self):
+                frame = frames[self.index]
+                self.index += 1
+                return True, frame
+            def release(self): self.released = True
+
+        capture = Capture()
+        with patch("control_vision.pipeline.manual_tracking.cv2.VideoCapture", return_value=capture):
+            rows, photos, events = track_seeded_video(
+                Path("match.mp4"), [[0, 0], [639, 0], [639, 479], [0, 479]],
+                [(1, 180, 300)], {1: "red"}, 5, lambda: False,
+                lambda *_: None, logging.getLogger("preview-motion-test"),
+            )
+        self.assertTrue(capture.released)
+        self.assertGreaterEqual(len(rows), 4)
+        self.assertTrue(all(row[0] == 1 and 0 <= row[3] <= 12 and 0 <= row[4] <= 12 for row in rows))
+        self.assertEqual(photos, [])
+        self.assertEqual(events, [])
+
     def test_invalid_calibration_releases_video(self):
         class Capture:
             released = False
