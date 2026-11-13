@@ -97,7 +97,52 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(len(db.events_for_video(video_id)), 1)
             db.replace_analysis([robot_id], [], [])
             self.assertEqual(len(db.events_for_video(video_id)), 1)
+            generated = {"robot_id": robot_id, "t_s": 8.0, "source": "goal_roi"}
+            db.replace_analysis([robot_id], [], [generated])
+            self.assertEqual(len(db.events_for_video(video_id)), 2)
+            db.replace_analysis([robot_id], [], [generated])
+            self.assertEqual(len(db.events_for_video(video_id)), 2)
+            reviewed = {"robot_id": robot_id, "t_s": 12.0, "source": "zone_crossing"}
+            generated_ids = db.replace_analysis([robot_id], [], [reviewed])
+            db.review_event(generated_ids[0], "confirmed", 2, robot_id, "flower_element", "high", "red")
+            db.replace_analysis([robot_id], [], [reviewed])
+            matching = [row for row in db.events_for_video(video_id) if row["source"] == "zone_crossing"]
+            self.assertEqual(len(matching), 1)
+            self.assertEqual(matching[0]["status"], "confirmed")
             db.close()
+
+
+class ShutdownTests(unittest.TestCase):
+    def test_close_waits_for_processing_before_database_close(self):
+        from types import SimpleNamespace
+        from control_vision.app.main_window import MainWindow
+
+        calls = []
+        class Signal:
+            def disconnect(self, slot):
+                calls.append("disconnect")
+        class Worker:
+            done = Signal()
+            failed = Signal()
+            def cancel(self):
+                calls.append("cancel")
+        class Thread:
+            def isRunning(self): return True
+            def quit(self): calls.append("quit")
+            def wait(self, timeout):
+                calls.append("wait")
+                return True
+        fake = SimpleNamespace(
+            _worker=Worker(), _thread=Thread(), _ocr_worker=None, _ocr_thread=None,
+            processing_done=lambda *_: None, processing_failed=lambda *_: None,
+            scoreboard_ocr_done=lambda *_: None, scoreboard_ocr_failed=lambda *_: None,
+            capture=SimpleNamespace(release=lambda: calls.append("release")),
+            db=SimpleNamespace(close=lambda: calls.append("db_close")),
+        )
+        event = SimpleNamespace(accept=lambda: calls.append("accept"), ignore=lambda: calls.append("ignore"))
+        MainWindow.closeEvent(fake, event)
+        self.assertLess(calls.index("wait"), calls.index("db_close"))
+        self.assertEqual(calls[-1], "accept")
 
 
 class VideoIngestTests(unittest.TestCase):

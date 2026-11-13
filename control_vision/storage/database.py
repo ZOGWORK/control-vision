@@ -119,16 +119,28 @@ class ProjectDatabase:
         with self.connection:
             if robot_ids:
                 placeholders = ",".join("?" for _ in robot_ids)
-                self.connection.execute(f"DELETE FROM scoring_events WHERE robot_id IN ({placeholders}) AND source='zone_crossing'", robot_ids)
+                self.connection.execute(
+                    f"DELETE FROM scoring_events WHERE robot_id IN ({placeholders}) "
+                    "AND source IN ('zone_crossing','goal_roi') AND status='flagged' "
+                    "AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.scoring_event_id=scoring_events.id)",
+                    robot_ids,
+                )
                 self.connection.execute(f"DELETE FROM cycles WHERE robot_id IN ({placeholders})", robot_ids)
             self.connection.executemany(
                 "INSERT INTO cycles(robot_id,start_t_s,end_t_s,pickup_zone,scoring_zone,confidence) VALUES (?,?,?,?,?,?)",
                 [(c["robot_id"],c["start_t_s"],c["end_t_s"],c["pickup_zone"],c["scoring_zone"],c.get("confidence","medium")) for c in cycles],
             )
             for event in events:
+                source = event.get("source", "zone_crossing")
+                retained = self.connection.execute(
+                    "SELECT id FROM scoring_events WHERE robot_id=? AND source=? AND ABS(t_s-?)<=0.5 LIMIT 1",
+                    (event["robot_id"], source, event["t_s"]),
+                ).fetchone()
+                if retained:
+                    continue
                 cursor = self.connection.execute(
-                    "INSERT INTO scoring_events(robot_id,video_id,t_s,points,confidence,status,source,event_type) VALUES (?,?, ?,?,?,?,?,?)",
-                    (event["robot_id"], self.connection.execute("SELECT video_id FROM robots WHERE id=?", (event["robot_id"],)).fetchone()[0], event["t_s"],event.get("points",0),event.get("confidence","low"),event.get("status","flagged"),event.get("source","zone_crossing"),event.get("event_type","unclassified")),
+                    "INSERT INTO scoring_events(robot_id,video_id,t_s,points,confidence,status,source,event_type) VALUES (?,?,?,?,?,?,?,?)",
+                    (event["robot_id"], self.connection.execute("SELECT video_id FROM robots WHERE id=?", (event["robot_id"],)).fetchone()[0], event["t_s"],event.get("points",0),event.get("confidence","low"),event.get("status","flagged"),source,event.get("event_type","unclassified")),
                 )
                 event_ids.append(int(cursor.lastrowid))
         return event_ids

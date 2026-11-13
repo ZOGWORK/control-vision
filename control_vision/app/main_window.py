@@ -1284,7 +1284,27 @@ class MainWindow(QMainWindow):
         if self.current_time >= self.duration: self.timer.stop()
 
     def closeEvent(self, event):
-        if self._worker: self._worker.cancel()
+        for worker, thread, done_slot, failed_slot in (
+            (self._worker, self._thread, self.processing_done, self.processing_failed),
+            (self._ocr_worker, self._ocr_thread, self.scoreboard_ocr_done, self.scoreboard_ocr_failed),
+        ):
+            if worker:
+                worker.cancel()
+                for signal, slot in ((worker.done, done_slot), (worker.failed, failed_slot)):
+                    try:
+                        signal.disconnect(slot)
+                    except (RuntimeError, TypeError):
+                        pass
+            try:
+                running = thread is not None and thread.isRunning()
+            except RuntimeError:  # Qt already deleted a finished thread.
+                running = False
+            if running:
+                thread.quit()
+                if not thread.wait(30000):
+                    self.statusBar().showMessage("Still cancelling processing; close again after it finishes.")
+                    event.ignore()
+                    return
         if self.capture: self.capture.release()
         if self.db: self.db.close()
         event.accept()
