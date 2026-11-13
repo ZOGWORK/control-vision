@@ -53,6 +53,29 @@ class BiobuzzRulesTests(unittest.TestCase):
         self.assertEqual(result["ranking_points"]["blue"]["WIN_TIE"], 3)
         self.assertEqual(result["team_points"][1], 5)
 
+    def test_qualification_dq_zeroes_only_that_teams_result(self):
+        robots = [{"id": 1, "alliance": "red"}, {"id": 2, "alliance": "red"},
+                  {"id": 3, "alliance": "blue"}]
+        events = [{"robot_id": 1, "status": "confirmed", "points": 16,
+                   "event_type": "park_teleop"},
+                  {"robot_id": 3, "status": "confirmed", "points": 5}]
+        result = calculate_scoreboard(events, robots,
+                                      qualification_disqualified_robot_ids={1})
+        self.assertEqual(result["alliance_points"], {"red": 16, "blue": 5})
+        self.assertEqual(result["team_match_points"], {1: 0, 2: 16, 3: 5})
+        self.assertEqual(result["team_points"], {1: 0, 2: 0, 3: 5})
+        self.assertEqual(result["ranking_points"]["red"]["total"], 4)
+        self.assertEqual(result["team_ranking_points"], {1: 0, 2: 4, 3: 0})
+        self.assertEqual(result["qualification_disqualified_robot_ids"], [1])
+
+    def test_qualification_dq_rejects_unknown_robot_and_mixed_match_mode(self):
+        with self.assertRaisesRegex(ValueError, "Unknown qualification DQ robot IDs"):
+            calculate_scoreboard([], self.robots,
+                                 qualification_disqualified_robot_ids={999})
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            calculate_scoreboard([], self.robots, disqualified={"red"},
+                                 qualification_disqualified_robot_ids={1})
+
     def test_one_shot_event_and_robot_iterators_score_once(self):
         events = iter([{"robot_id": 1, "status": "confirmed", "points": 5}])
         result = calculate_scoreboard(events, iter(self.robots))
