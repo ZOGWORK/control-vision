@@ -4,7 +4,9 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import shutil
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -90,6 +92,29 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
     return root
 
 
+@contextmanager
+def reserve_model_version(models_dir: Path, version: str):
+    """Reserve a version across processes and refuse existing model artifacts."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", version):
+        raise ValueError("Model version must contain only letters, digits, dots, underscores, or hyphens")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"yolo11n-biobuzz-v{version}"
+    lock_path = models_dir / f".{stem}.lock"
+    try:
+        with lock_path.open("x", encoding="utf-8") as lock:
+            lock.write("Training in progress; remove this file only after confirming no run is active.\n")
+    except FileExistsError as exc:
+        raise ValueError(f"Model version {version} is already being trained") from exc
+    try:
+        onnx_path = models_dir / f"{stem}.onnx"
+        metadata_path = models_dir / f"{stem}.json"
+        if onnx_path.exists() or metadata_path.exists():
+            raise ValueError(f"Refusing to overwrite existing model version {version}")
+        yield onnx_path, metadata_path
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train locally from a hand-labeled BIOBUZZ dataset and export versioned ONNX weights.")
     parser.add_argument("--data", type=Path, required=True, help="YOLO data.yaml with train/val splits")
@@ -112,41 +137,41 @@ def main():
     names_list = [names[index] if isinstance(names, dict) else names[index] for index in range(len(names))]
     if names_list not in (["robot"], ["robot", "pollen", "nectar"]):
         parser.error("Supported classes are ['robot'] or ['robot','pollen','nectar'] in that order; alliance color is an attribute, not a class.")
-    models_dir = Path("models")
-    onnx_path = models_dir / f"yolo11n-biobuzz-v{args.version}.onnx"
-    metadata_path = models_dir / f"yolo11n-biobuzz-v{args.version}.json"
-    if onnx_path.exists() or metadata_path.exists():
-        parser.error(f"Refusing to overwrite existing model version {args.version}.")
     try:
         data_root = validate_dataset(args.data, config, len(names_list))
     except ValueError as exc:
         parser.error(str(exc))
-    model = YOLO(str(args.base_weights))
-    run = model.train(data=str(args.data), epochs=args.epochs, batch=args.batch, imgsz=args.imgsz,
-                      lr0=0.01, patience=20, device=args.device, project="runs/training", name=f"biobuzz-{args.version}")
-    trainer = model.trainer
-    metrics = run.results_dict if hasattr(run, "results_dict") else run if isinstance(run, dict) else {}
-    best_pt = Path(getattr(trainer, "best", Path(trainer.save_dir) / "weights" / "best.pt"))
-    if not best_pt.is_file(): raise SystemExit(f"Training completed without a best checkpoint at {best_pt}")
-    models_dir.mkdir(exist_ok=True)
-    trained = YOLO(str(best_pt))
-    exported = Path(trained.export(format="onnx", imgsz=args.imgsz, opset=12, simplify=False))
-    shutil.copy2(exported, onnx_path)
     try:
-        import onnxruntime as ort
-        session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-        input_info = session.get_inputs()[0]
-        blank = np.zeros((1, 3, args.imgsz, args.imgsz), dtype=np.float32)
-        session.run(None, {input_info.name: blank})
-    except Exception as exc:
-        onnx_path.unlink(missing_ok=True)
-        raise SystemExit(f"ONNX Runtime smoke check failed: {exc}") from exc
-    record = {"version": args.version, "date": date.today().isoformat(), "dataset_sha256": dataset_hash(data_root),
-              "classes": names_list, "base_weights": str(args.base_weights), "training_config": {"epochs": args.epochs, "batch": args.batch,
-              "imgsz": args.imgsz, "lr0": 0.01, "patience": 20, "device": args.device}, "validation_metrics": metrics,
-              "onnx": onnx_path.name, "onnxruntime": "smoke_checked"}
-    metadata_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    print(f"Saved {onnx_path} and {metadata_path}")
+        with reserve_model_version(Path("models"), args.version) as (onnx_path, metadata_path):
+            model = YOLO(str(args.base_weights))
+            run = model.train(data=str(args.data), epochs=args.epochs, batch=args.batch, imgsz=args.imgsz,
+                              lr0=0.01, patience=20, device=args.device, project="runs/training", name=f"biobuzz-{args.version}")
+            trainer = model.trainer
+            metrics = run.results_dict if hasattr(run, "results_dict") else run if isinstance(run, dict) else {}
+            best_pt = Path(getattr(trainer, "best", Path(trainer.save_dir) / "weights" / "best.pt"))
+            if not best_pt.is_file(): raise SystemExit(f"Training completed without a best checkpoint at {best_pt}")
+            trained = YOLO(str(best_pt))
+            exported = Path(trained.export(format="onnx", imgsz=args.imgsz, opset=12, simplify=False))
+            with exported.open("rb") as source, onnx_path.open("xb") as target:
+                shutil.copyfileobj(source, target)
+            try:
+                import onnxruntime as ort
+                session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+                input_info = session.get_inputs()[0]
+                blank = np.zeros((1, 3, args.imgsz, args.imgsz), dtype=np.float32)
+                session.run(None, {input_info.name: blank})
+            except Exception as exc:
+                onnx_path.unlink(missing_ok=True)
+                raise SystemExit(f"ONNX Runtime smoke check failed: {exc}") from exc
+            record = {"version": args.version, "date": date.today().isoformat(), "dataset_sha256": dataset_hash(data_root),
+                      "classes": names_list, "base_weights": str(args.base_weights), "training_config": {"epochs": args.epochs, "batch": args.batch,
+                      "imgsz": args.imgsz, "lr0": 0.01, "patience": 20, "device": args.device}, "validation_metrics": metrics,
+                      "onnx": onnx_path.name, "onnxruntime": "smoke_checked"}
+            with metadata_path.open("x", encoding="utf-8") as stream:
+                json.dump(record, stream, indent=2)
+            print(f"Saved {onnx_path} and {metadata_path}")
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":

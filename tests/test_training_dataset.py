@@ -5,7 +5,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from control_vision.training.train_yolo import validate_dataset
+from control_vision.training.train_yolo import reserve_model_version, validate_dataset
 
 
 class TrainingDatasetTests(unittest.TestCase):
@@ -65,6 +65,28 @@ class TrainingDatasetTests(unittest.TestCase):
         (self.root / "labels" / "train" / "one.txt").write_text("", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "no labeled robots"):
             validate_dataset(self.data, self.config, 1)
+
+    def test_model_version_is_reserved_across_concurrent_runs(self):
+        models = self.root / "models"
+        with reserve_model_version(models, "1.0.0") as (onnx, metadata):
+            self.assertFalse(onnx.exists())
+            self.assertFalse(metadata.exists())
+            with self.assertRaisesRegex(ValueError, "already being trained"):
+                with reserve_model_version(models, "1.0.0"):
+                    pass
+        self.assertFalse((models / ".yolo11n-biobuzz-v1.0.0.lock").exists())
+
+    def test_existing_model_and_invalid_version_are_rejected(self):
+        models = self.root / "models"
+        models.mkdir()
+        (models / "yolo11n-biobuzz-v1.0.0.onnx").write_bytes(b"existing")
+        with self.assertRaisesRegex(ValueError, "Refusing to overwrite"):
+            with reserve_model_version(models, "1.0.0"):
+                pass
+        self.assertFalse((models / ".yolo11n-biobuzz-v1.0.0.lock").exists())
+        with self.assertRaisesRegex(ValueError, "Model version"):
+            with reserve_model_version(models, "../escape"):
+                pass
 
 
 if __name__ == "__main__":
