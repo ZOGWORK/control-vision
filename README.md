@@ -51,3 +51,9 @@ The current build includes the project hub, tracking workflow, user-drawn zones,
 
 - Every change via PR. Code review must give 5/5 before merge. Never merge below 5/5.
 - One feature per PR. Base main only. No stacked PRs.
+
+## License
+
+Control Vision source is licensed under the [GNU Affero General Public License v3.0](LICENSE). No Windows build is released from `main` yet. Any future release artifact must identify a commit containing its complete corresponding source.
+
+This project uses [Ultralytics YOLO](https://github.com/ultralytics/ultralytics), which is offered under AGPL-3.0 or an Enterprise license. Any released model weights must include their own provenance and licensing information.
