@@ -13,6 +13,9 @@ venv/
 data/
 videos/
 runs/
+datasets/
+build/
+dist/
 
 # OS / editor
 .DS_Store

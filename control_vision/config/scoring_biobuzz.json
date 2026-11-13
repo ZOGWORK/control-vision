@@ -1,0 +1,18 @@
+{
+  "season": "BIOBUZZ 2026-27",
+  "manual_version": "TU09",
+  "manual_url": "https://ftc-resources.firstinspires.org/ftc/archive/2027/game/cm-html/BIOBUZZ%20Competition%20Manual%20-%20TU09.htm",
+  "match_periods_s": {"auto": 30, "transition": 8, "teleop": 120, "total": 150, "flower_scoring_unlock_at_remaining_s": 60},
+  "review_event_types": [
+    {"id": "leave_auto", "label": "Leave (AUTO)", "points": 3, "alliance_scoped": false},
+    {"id": "park_auto", "label": "Park (AUTO)", "points": 5, "alliance_scoped": false},
+    {"id": "park_teleop", "label": "Park (TELEOP)", "points": 5, "alliance_scoped": false},
+    {"id": "hive_tip_auto", "label": "HIVE TIP (AUTO)", "points": 20, "alliance_scoped": true},
+    {"id": "hive_tip_teleop", "label": "HIVE TIP (TELEOP)", "points": 20, "alliance_scoped": true},
+    {"id": "cell_element_endgame", "label": "POLLEN/NECTAR remaining in upward CELL", "points": 2, "per_element": true, "alliance_scoped": true},
+    {"id": "flower_bottom_nectar", "label": "Bottom NECTAR bonus", "points": 5, "alliance_scoped": true},
+    {"id": "flower_owned_element", "label": "Element in owned FLOWER", "points": 2, "per_element": true, "alliance_scoped": true},
+    {"id": "garden_element", "label": "POLLEN/NECTAR in GARDEN", "points": 1, "per_element": true, "alliance_scoped": true}
+  ],
+  "review_note": "Point values follow Manual Section 10.5, Table 10-2 (TU09). Video detections do not infer these achievements or alliance ownership. A reviewer must select event type and count, confirm the clip, and may reassign a robot."
+}

@@ -1,0 +1,10 @@
+{
+  "season": "BIOBUZZ 2026-27",
+  "status": "user_drawn_required",
+  "manual_version": "TU09",
+  "manual_url": "https://ftc-resources.firstinspires.org/ftc/archive/2027/game/cm-html/BIOBUZZ%20Competition%20Manual%20-%20TU09.htm",
+  "field_dimensions_ft": [12, 12],
+  "zone_types": ["loading_zone", "garden", "flower_scoring_volume", "hive"],
+  "source": "Manual Sections 9.2–9.3. Default polygons remain user-drawn to account for camera calibration and event setup.",
+  "zones": []
+}

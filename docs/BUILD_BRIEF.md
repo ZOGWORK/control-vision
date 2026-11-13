@@ -414,8 +414,8 @@ Do not push straight to main.
 Do not claim anything is merged or live unless you verified it.
 Keep docs/BUILD_BRIEF.md in sync with this brief — update it in your first PR if it differs.
 Open questions (do not guess — verify or ask Sushil)
-Pollen ball colors and exact sizes (check the BIOBUZZ game manual).
-Exact BIOBUZZ field geometry: hive, flower, park, and pickup zone positions.
+Verified against official BIOBUZZ Competition Manual TU09 (Nov 12, 2026): POLLEN are yellow and approximately 2.8 in.; NECTAR are red or blue and approximately 3.6 in. Point values and scoring criteria from Section 10.5 are versioned in config/scoring_biobuzz.json. Source: https://ftc-resources.firstinspires.org/ftc/archive/2027/game/cm-html/BIOBUZZ%20Competition%20Manual%20-%20TU09.htm
+Exact BIOBUZZ field geometry still needs to be digitized from the official field drawings; users draw polygons until then.
 FTC scoreboard OCR: does it work on real streams? Unproven.
 CPU fps figures are host-dependent. Measure on the target laptop.
 No published FTC end-to-end scoring accuracy exists.

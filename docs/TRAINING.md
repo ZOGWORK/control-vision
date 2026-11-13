@@ -1,0 +1,9 @@
+# Local training workflow
+
+1. Download only BIOBUZZ footage confirmed as a fixed full-field camera. Do not use the listed holdout event footage for training.
+2. Extract candidate frames with `python -m control_vision.training.extract_frames path\to\match.mp4 --output datasets\biobuzz-v1\images\unlabeled`.
+3. Label boxes in CVAT and export YOLO format. Split by event, not by adjacent frames, into `images/train`, `images/val`, `labels/train`, and `labels/val`. Copy `control_vision/config/data_biobuzz.example.yaml` to the dataset and adjust its path. Use class order `robot`, `pollen`, `nectar`, or train only `robot` during the prototype. Avoid putting images from one match into both splits.
+4. Use a local base checkpoint (no model download is attempted): `python -m control_vision.training.train_yolo --data datasets\biobuzz-v1\data.yaml --base-weights models\yolo11n.pt --version 1.0.0 --device cpu`.
+5. The script trains, records validation metrics and a dataset SHA-256, exports `models/yolo11n-biobuzz-v1.0.0.onnx`, and runs an ONNX Runtime CPU smoke check. Existing model versions are never overwritten.
+
+The official BIOBUZZ Manual TU09 (Nov 12, 2026) describes POLLEN as yellow, about 2.8 inches, and NECTAR as red or blue, about 3.6 inches. The suggested class list is `robot`, `pollen`, and `nectar`; alliance color is a NECTAR attribute, not an extra class. The app currently uses only class 0 (`robot`) for tracking; ball outputs are not yet used for cycle or score verification. Inspect the training log and model metadata; the utility does not establish holdout performance. Keep holdout events completely separate and report metrics with the specific matches used.

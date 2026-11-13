@@ -2,7 +2,7 @@
 
 Local-first FTC match video analyzer: track robots, count cycles, clip highlights, and score matches from video.
 
-> Status: Phase 1 foundation in development. Holdout performance has not been measured.
+> Status: in development. Holdout performance has not been measured.
 
 ## What it is
 
@@ -17,15 +17,17 @@ You upload a video of an FTC match and it tells you what happened — per robot,
 ## How it works
 
 - Detection: YOLO11n.
-- Tracking: BoT-SORT with OSNet ReID, plus offline tracklet stitching.
+- Tracking: BoT-SORT motion tracking. OSNet ReID and tracklet stitching are not wired yet.
 - Field mapping: one homography per video (click the 4 field corners once) to a top-down 12×12 ft field.
-- Cycles: zone-crossing on top-down tracks, confirmed with a goal-ROI ball-count delta.
+- Cycles: user-drawn pickup-to-scoring zone trips, medium confidence until ball detection is available.
+- Scoring: zone trips create flagged, zero-point candidates. A human must review clips and enter points.
 - Runs fully offline on your own machine. No API calls. No cloud GPU.
 
 ## Docs
 
 - [Build brief for Claude](docs/BUILD_BRIEF.md) — the full spec: stack, papers, prior art, training data, holdout set, build phases.
 - [BIOBUZZ footage list](docs/BIOBUZZ_FOOTAGE.md) — 26 confirmed YouTube URLs (~15 events, ~300+ matches) for training and verification.
+- [User guide](docs/USER_GUIDE.md) — project setup, calibration, zones, review, and exports.
 
 ## Run locally
 
@@ -40,7 +42,7 @@ python -m control_vision
 
 Create a project folder, import a video, click its four field corners, seed each robot identity, then select the local model and process. Videos stay at their original paths; project records and run logs are stored in the project folder. No pretrained model is bundled, and the app does not download weights.
 
-Phase 1 currently implements video probing, manual corner calibration, identity seeding, offline robot detection/tracking, project-local tracks, and a top-down trail view. OSNet ReID, calibration reuse, editing/training screens, and acceptance measurements remain open work. No later phase has been started.
+The current build includes the tracking foundation, user-drawn zones, zone-trip cycles, reviewable event candidates, FFmpeg highlights, statistics, Scout JSON and robot-photo exports, and local training utilities. See the user guide for the manual review boundaries. Holdout acceptance metrics are still unmeasured; no accuracy or speed claim is implied.
 
 ## Workflow
 
