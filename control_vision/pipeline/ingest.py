@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,21 +35,25 @@ def probe_video(path: Path) -> dict[str, float | int]:
                     duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps
                     cap.release()
                 width, height = int(stream["width"]), int(stream["height"])
-                if fps <= 0 or width <= 0 or height <= 0 or duration is None or duration <= 0:
+                if not math.isfinite(fps) or fps <= 0 or width <= 0 or height <= 0 or duration is None or not math.isfinite(duration) or duration <= 0:
                     raise VideoError(f"Could not read video metadata for {path.name}.")
                 return {"duration_s": duration, "fps": fps, "width": width, "height": height}
             except (KeyError, IndexError, TypeError, ValueError, ZeroDivisionError) as exc:
                 raise VideoError(f"Could not read video metadata for {path.name}.") from exc
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
+        cap.release()
         raise VideoError(f"Could not open video file {path.name}. Check that the file is readable and ffprobe is installed.")
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-    width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-    if fps <= 0 or width <= 0 or height <= 0:
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    finally:
+        cap.release()
+    if not all(math.isfinite(value) and value > 0 for value in (fps, frames, width, height)):
         raise VideoError(f"Could not read video metadata for {path.name}.")
-    return {"duration_s": frames / fps, "fps": fps, "width": width, "height": height}
+    return {"duration_s": frames / fps, "fps": fps, "width": int(width), "height": int(height)}
 
 
 def _fraction(value: str) -> float:
@@ -62,4 +67,4 @@ def _positive_float(value) -> float | None:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed > 0 else None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
