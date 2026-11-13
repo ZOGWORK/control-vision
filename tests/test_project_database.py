@@ -76,6 +76,23 @@ class ProjectDatabaseTests(unittest.TestCase):
         self.assertEqual({event["origin_robot_id"] for event in events}, {self.red_robot, other_robot})
         self.assertEqual(next(event for event in events if event["id"] == reviewed_id)["status"], "confirmed")
 
+    def test_simultaneous_legacy_reviews_map_to_their_original_robots(self):
+        other_robot = self.db.add_robot(self.red_video, 1002, "red", 30, 30)
+        for robot_id in (self.red_robot, other_robot):
+            self.db.connection.execute(
+                "INSERT INTO scoring_events(robot_id,video_id,t_s,status,points,source,origin_robot_id) "
+                "VALUES (?,?,12,'confirmed',2,'zone_crossing',NULL)",
+                (robot_id, self.red_video),
+            )
+        self.db.connection.commit()
+        candidates = [{"robot_id": robot_id, "t_s": 12.0, "source": "zone_crossing"}
+                      for robot_id in (self.red_robot, other_robot)]
+        self.assertEqual(self.db.replace_analysis([self.red_robot, other_robot], [], candidates), [])
+        events = self.db.events_for_video(self.red_video)
+        self.assertEqual(len(events), 2)
+        self.assertEqual({event["origin_robot_id"] for event in events}, {self.red_robot, other_robot})
+        self.assertTrue(all(event["status"] == "confirmed" for event in events))
+
 
 class LegacyMigrationTests(unittest.TestCase):
     def test_existing_video_and_reviews_survive_schema_upgrade(self):

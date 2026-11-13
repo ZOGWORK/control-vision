@@ -168,11 +168,21 @@ class ProjectDatabase:
                     # Legacy reviewed events predate origin_robot_id. An exact,
                     # unique timestamp match preserves them after reassignment.
                     legacy = self.connection.execute(
-                        "SELECT id FROM scoring_events WHERE video_id=? AND origin_robot_id IS NULL "
-                        "AND source=? AND status IN ('confirmed','rejected') AND ABS(t_s-?)<0.001 LIMIT 2",
+                        "SELECT id,robot_id FROM scoring_events WHERE video_id=? AND origin_robot_id IS NULL "
+                        "AND source=? AND status IN ('confirmed','rejected') AND ABS(t_s-?)<0.001",
                         (video_id, source, event["t_s"]),
                     ).fetchall()
-                    retained = legacy[0] if len(legacy) == 1 else None
+                    same_robot = [row for row in legacy if row["robot_id"] == candidate_robot_id]
+                    total_reviewed = self.connection.execute(
+                        "SELECT COUNT(*) FROM scoring_events WHERE video_id=? AND source=? "
+                        "AND status IN ('confirmed','rejected') AND ABS(t_s-?)<0.001",
+                        (video_id, source, event["t_s"]),
+                    ).fetchone()[0]
+                    retained = (same_robot[0] if len(same_robot) == 1 else
+                                legacy[0] if len(legacy) == 1 and total_reviewed == 1 else None)
+                    if retained:
+                        self.connection.execute("UPDATE scoring_events SET origin_robot_id=? WHERE id=?",
+                                                (candidate_robot_id, retained["id"]))
                 if retained:
                     continue
                 cursor = self.connection.execute(
