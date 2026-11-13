@@ -11,18 +11,31 @@ def _optional_field(row, name: str):
 def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
                          pollinator_1_threshold: int = 4,
                          pollinator_2_threshold: int = 7,
-                         disqualified: set[str] | None = None) -> dict:
+                         disqualified: set[str] | None = None,
+                         qualification_disqualified_robot_ids: set[int] | None = None) -> dict:
     """Compute confirmed match points and BIOBUZZ ranking points.
 
     Events are evidence entries; this function never upgrades flagged events.
     Alliance attribution comes from scoring_alliance when set, otherwise from
     the robot's alliance. Disqualification is entered by the human reviewer.
+    ``disqualified`` is playoff alliance DQ. Qualification DQ uses robot IDs
+    and zeroes only the affected team's match points and ranking points.
+    ``team_points`` attributes observed actions to robots; ``team_match_points``
+    is the official alliance match score credited to each eligible team.
+    Ranking-point fields in this function are for qualification displays only.
     """
     events = list(events)
     robots = list(robots)
     disqualified = disqualified or set()
+    qualification_disqualified = {int(robot_id) for robot_id in
+                                   (qualification_disqualified_robot_ids or set())}
+    if disqualified and qualification_disqualified:
+        raise ValueError("Playoff alliance DQ and qualification team DQ cannot be combined")
     match_resolved = bool(events) and all(event["status"] in {"confirmed", "rejected"} for event in events)
     robot_by_id = {int(robot["id"]): robot for robot in robots}
+    unknown_ids = qualification_disqualified - robot_by_id.keys()
+    if unknown_ids:
+        raise ValueError(f"Unknown qualification DQ robot IDs: {sorted(unknown_ids)}")
     alliance_scores = {"red": 0, "blue": 0}
     team_points: dict[int, int] = {int(robot["id"]): 0 for robot in robots}
     swarm_points = {"red": 0, "blue": 0}
@@ -56,6 +69,9 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
                 if robot["alliance"] == alliance:
                     team_points[int(robot["id"])] = 0
 
+    for robot_id in qualification_disqualified:
+        team_points[robot_id] = 0
+
     ranking_points = {"red": {}, "blue": {}}
     for alliance in ("red", "blue"):
         swarm = int(swarm_points[alliance] >= swarm_threshold)
@@ -85,13 +101,21 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
         }
 
     team_rp = {}
+    team_match_points = {}
     for robot in robots:
-        team_rp[int(robot["id"])] = ranking_points[robot["alliance"]]["total"]
+        robot_id = int(robot["id"])
+        team_rp[robot_id] = (0 if robot_id in qualification_disqualified else
+                             ranking_points[robot["alliance"]]["total"])
+        team_match_points[robot_id] = (0 if robot_id in qualification_disqualified else
+                                       alliance_scores[robot["alliance"]])
     return {"alliance_points": alliance_scores, "team_points": dict(team_points),
             "ranking_points": ranking_points, "team_ranking_points": team_rp,
+            "team_match_points": team_match_points,
             "swarm_threshold": swarm_threshold,
             "pollinator_thresholds": [pollinator_1_threshold, pollinator_2_threshold],
-            "disqualified": sorted(disqualified), "match_resolved": match_resolved}
+            "disqualified": sorted(disqualified),
+            "qualification_disqualified_robot_ids": sorted(qualification_disqualified),
+            "match_resolved": match_resolved}
 
 
 def classify_match_time(t_s: float, periods: dict) -> tuple[str, float]:
