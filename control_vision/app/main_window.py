@@ -1140,7 +1140,8 @@ class MainWindow(QMainWindow):
                                      self.pollinator_2_threshold.value(), disqualified)
         totals = board["alliance_points"]
         flagged_count = sum(event["status"] == "flagged" for event in events)
-        state = "UNREVIEWED — final score pending" if flagged_count else "Reviewed" if any(event["status"] == "confirmed" for event in events) else "No scoring events confirmed"
+        state = ("UNREVIEWED — final score pending" if flagged_count else
+                 "Reviewed" if board["match_resolved"] else "No scoring events reviewed")
         parts = [f"{state}. Video total — red {totals['red']}, blue {totals['blue']}, match {sum(totals.values())}; flagged events: {flagged_count}."]
         for alliance, edit in (("red", self.official_red), ("blue", self.official_blue)):
             raw = edit.text().strip()

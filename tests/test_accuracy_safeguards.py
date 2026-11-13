@@ -350,6 +350,14 @@ class ScoreConsensusTests(unittest.TestCase):
         self.assertEqual(result["ranking_points"]["blue"]["WIN_TIE"], 0)
         self.assertEqual(result["ranking_points"]["red"]["total"], 0)
 
+    def test_rejecting_every_candidate_resolves_zero_zero_tie(self):
+        result = calculate_scoreboard([{"status": "rejected"}], [])
+        self.assertTrue(result["match_resolved"])
+        self.assertEqual(result["alliance_points"], {"red": 0, "blue": 0})
+        self.assertEqual(result["ranking_points"]["red"]["WIN_TIE"], 1)
+        self.assertEqual(result["ranking_points"]["blue"]["WIN_TIE"], 1)
+        self.assertFalse(calculate_scoreboard([], [])["match_resolved"])
+
     def test_disqualified_robots_have_no_exported_video_points(self):
         robots = [{"id": 1, "team_number": 1234, "alliance": "red"},
                   {"id": 2, "team_number": 5678, "alliance": "blue"}]
