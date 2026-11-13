@@ -49,6 +49,16 @@ class TrainingDatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unreadable val image"):
             validate_dataset(self.data, self.config, 1)
 
+    def test_webp_and_bmp_training_images_are_accepted(self):
+        for suffix in (".webp", ".bmp"):
+            with self.subTest(suffix=suffix):
+                (self.root / "images" / "val" / "two.jpg").unlink(missing_ok=True)
+                ok, encoded = cv2.imencode(suffix, np.full((32, 32, 3), 90, dtype=np.uint8))
+                self.assertTrue(ok)
+                (self.root / "images" / "val" / f"two{suffix}").write_bytes(encoded.tobytes())
+                self.assertEqual(validate_dataset(self.data, self.config, 1), self.root)
+                (self.root / "images" / "val" / f"two{suffix}").unlink()
+
     def test_missing_label_is_rejected(self):
         (self.root / "labels" / "val" / "two.txt").unlink()
         with self.assertRaisesRegex(ValueError, "Missing YOLO label"):

@@ -14,9 +14,15 @@ import cv2
 import numpy as np
 
 
+# Ultralytics 8.4.210 data.utils.IMG_FORMATS; decoding is checked below on
+# the actual training machine before an image enters a dataset hash or split.
+IMAGE_SUFFIXES = {".avif", ".bmp", ".dng", ".heic", ".heif", ".jp2", ".jpeg",
+                  ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp"}
+
+
 def dataset_hash(root: Path) -> str:
     digest = hashlib.sha256()
-    for path in sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in {".yaml", ".yml", ".txt", ".jpg", ".jpeg", ".png"}):
+    for path in sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES | {".yaml", ".yml", ".txt"}):
         digest.update(path.relative_to(root).as_posix().encode())
         with path.open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -57,7 +63,7 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
             raise ValueError(f"{split} images directory is missing or outside images/: {images_dir}")
         labels_dir = images_dir.parent.parent / "labels" / images_dir.name
         images = sorted(path for path in images_dir.iterdir()
-                        if path.suffix.lower() in {".jpg", ".jpeg", ".png"})
+                        if path.suffix.lower() in IMAGE_SUFFIXES)
         if not images:
             raise ValueError(f"{split} has no images in {images_dir}")
         for image in images:
