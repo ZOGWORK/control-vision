@@ -9,7 +9,7 @@ import numpy as np
 
 from control_vision.pipeline.homography import matrix_from_corners, project_point
 from control_vision.pipeline.ingest import VideoError, probe_video
-from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
+from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits, read_scoreboard
 from control_vision.pipeline.clips import create_highlight
 
 
@@ -42,13 +42,29 @@ class VideoEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(VideoError, "match.mp4"):
                 probe_video(Path("match.mp4"))
 
+    def test_fallback_rejects_video_with_zero_frames(self):
+        class Capture:
+            released = False
+            def isOpened(self): return True
+            def get(self, prop):
+                return {cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_COUNT: 0,
+                        cv2.CAP_PROP_FRAME_WIDTH: 1280, cv2.CAP_PROP_FRAME_HEIGHT: 720}[prop]
+            def release(self): self.released = True
+
+        capture = Capture()
+        with patch("control_vision.pipeline.ingest.shutil.which", return_value=None), \
+             patch("control_vision.pipeline.ingest.cv2.VideoCapture", return_value=capture):
+            with self.assertRaisesRegex(VideoError, "match.mp4"):
+                probe_video(Path("match.mp4"))
+        self.assertTrue(capture.released)
+
     def test_homography_maps_field_corners_and_rejects_degenerate_quad(self):
         matrix = matrix_from_corners([[10, 10], [130, 10], [130, 130], [10, 130]])
         self.assertEqual(tuple(round(value, 4) for value in project_point(matrix, 70, 70)), (6.0, 6.0))
         with self.assertRaises(ValueError):
             matrix_from_corners([[10, 10], [10, 10], [10, 10], [10, 10]])
 
-    def test_ocr_consensus_keeps_later_high_score_and_masks_polygon(self):
+    def test_ocr_consensus_retains_earlier_high_score_and_masks_polygon(self):
         result = _consensus([{"t_s": 1, "value": 100, "confidence": .9},
                              {"t_s": 2, "value": 90, "confidence": .9},
                              {"t_s": 3, "value": 90, "confidence": .9}])
@@ -65,6 +81,51 @@ class VideoEvidenceTests(unittest.TestCase):
         _read_digits(engine, np.full((20, 20, 3), 255, dtype=np.uint8), [[0, 0], [19, 0], [0, 19]])
         self.assertIsNotNone(engine.crop)
         self.assertEqual(int(engine.crop[-1, -1].max()), 0)
+
+    def test_ocr_consensus_uses_later_stable_high_score(self):
+        rows = ([{"t_s": float(i), "value": 90, "confidence": .99} for i in range(8)] +
+                [{"t_s": float(i), "value": 100, "confidence": .99} for i in range(8, 12)])
+        self.assertEqual(_consensus(rows)["value"], 100)
+
+    def test_ocr_engine_failure_releases_video(self):
+        class Capture:
+            released = False
+            def isOpened(self): return True
+            def get(self, prop):
+                return {cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_COUNT: 300}[prop]
+            def release(self): self.released = True
+
+        capture = Capture()
+        with patch("control_vision.pipeline.scoreboard_ocr.cv2.VideoCapture", return_value=capture), \
+             patch("rapidocr_onnxruntime.RapidOCR", side_effect=RuntimeError("model load failed")):
+            with self.assertRaisesRegex(RuntimeError, "model load failed"):
+                read_scoreboard(Path("match.mp4"), [], [])
+        self.assertTrue(capture.released)
+
+    def test_one_bad_ocr_frame_does_not_discard_later_evidence(self):
+        class Capture:
+            released = False
+            reads = 0
+            def isOpened(self): return True
+            def get(self, prop):
+                return {cv2.CAP_PROP_FPS: 1, cv2.CAP_PROP_FRAME_COUNT: 3}[prop]
+            def set(self, *_): pass
+            def read(self):
+                self.reads += 1
+                return True, np.zeros((20, 20, 3), dtype=np.uint8)
+            def release(self): self.released = True
+
+        capture = Capture()
+        ocr_values = [RuntimeError("one frame failed"), (100, .9, "100"), (90, .9, "90"),
+                      (100, .9, "100"), (90, .9, "90")]
+        with patch("control_vision.pipeline.scoreboard_ocr.cv2.VideoCapture", return_value=capture), \
+             patch("rapidocr_onnxruntime.RapidOCR"), \
+             patch("control_vision.pipeline.scoreboard_ocr._read_digits", side_effect=ocr_values), \
+             patch("control_vision.pipeline.scoreboard_ocr.logging.getLogger"):
+            result = read_scoreboard(Path("match.mp4"), [], [], sample_fps=1, tail_seconds=3)
+        self.assertEqual(result["frames_sampled"], 2)
+        self.assertEqual(result["red"]["value"], 100)
+        self.assertTrue(capture.released)
 
     def test_failed_clip_copy_reencodes_without_leaving_partial_copy(self):
         with tempfile.TemporaryDirectory() as folder:
