@@ -50,7 +50,7 @@ Wrapper package: imageio-ffmpeg $wrapperVersion (requirements.txt)
 Binary: $ffmpegVersion
 SHA-256: $ffmpegHash
 Provider release: https://github.com/GyanD/codexffmpeg/releases/tag/7.1
-FFmpeg source commit identified by that release: https://github.com/FFmpeg/FFmpeg/tree/b08d7969c5
+FFmpeg source commit identified by that release: https://github.com/FFmpeg/FFmpeg/tree/b08d7969c550a804a59511c7b83f2dd8cc0499b8
 Build configuration: FFMPEG_BUILD.txt in this folder
 License: FFMPEG_LICENSE.txt and licenses/GPL-3.0.txt in this folder
 
@@ -64,7 +64,9 @@ FFmpeg build and its linked libraries is provided with any public binary.
     if (-not (Test-Path -LiteralPath $exe)) { throw "PyInstaller did not produce ControlVision.exe." }
     $packageDir = Split-Path -Parent $exe
     Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $repoRoot "licenses\GPL-3.0.txt") -Destination $packageDir
+    $licenseDir = Join-Path $packageDir "licenses"
+    New-Item -ItemType Directory -Force -Path $licenseDir | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot "licenses\GPL-3.0.txt") -Destination $licenseDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "docs\THIRD_PARTY_NOTICES.md") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $releaseDir "SOURCE.txt") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $releaseDir "FFMPEG_LICENSE.txt") -Destination $packageDir
