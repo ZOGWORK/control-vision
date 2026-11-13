@@ -215,6 +215,9 @@ class ProjectDatabase:
                 if video_id is not None and robot["video_id"] != video_id:
                     raise ValueError("Scoring event cannot be assigned to a robot from another video")
                 video_id = robot["video_id"]
+            # Keep origin_robot_id as the generator identity. Reassignment changes
+            # the credited robot, not which candidate was reviewed; another robot
+            # may produce independent evidence at the same timestamp.
             self.connection.execute("UPDATE scoring_events SET status=?,points=?,robot_id=?,video_id=?,event_type=?,confidence=?,scoring_alliance=? WHERE id=?",
                                     (status, points, robot_id, video_id, event_type, confidence, scoring_alliance, event_id))
 
