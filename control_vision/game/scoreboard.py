@@ -34,7 +34,7 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
             continue
         robot_id = event["robot_id"]
         robot = robot_by_id.get(int(robot_id)) if robot_id is not None else None
-        alliance = (_optional_field(event, "event_alliance") or _optional_field(event, "scoring_alliance")
+        alliance = (_optional_field(event, "scoring_alliance") or _optional_field(event, "event_alliance")
                     or (robot["alliance"] if robot else None))
         if alliance not in alliance_scores:
             continue

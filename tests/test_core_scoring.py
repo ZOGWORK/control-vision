@@ -34,6 +34,12 @@ class CoreScoringTests(unittest.TestCase):
         board = calculate_scoreboard([{"robot_id": 1, "status": "confirmed", "points": 5}], self.robots)
         self.assertEqual(board["alliance_points"]["red"], 5)
 
+    def test_reviewed_alliance_overrides_inferred_alliance(self):
+        event = {"robot_id": 1, "status": "confirmed", "points": 5,
+                 "event_alliance": "red", "scoring_alliance": "blue"}
+        board = calculate_scoreboard([event], self.robots)
+        self.assertEqual(board["alliance_points"], {"red": 0, "blue": 5})
+
     def test_disqualification_clears_alliance_and_robot_points(self):
         events = [{"robot_id": 1, "status": "confirmed", "points": 20, "event_type": "park_teleop"},
                   {"robot_id": 2, "status": "confirmed", "points": 5, "event_type": "nectar_floor"}]
