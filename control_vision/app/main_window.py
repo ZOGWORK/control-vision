@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
-from control_vision.pipeline.ingest import VideoError, probe_video
+from control_vision.pipeline.ingest import VideoError, probe_video, video_quality_warnings
 from control_vision.pipeline.tracking import track_video
 from control_vision.pipeline.manual_tracking import track_seeded_video
 from control_vision.pipeline.cycles import count_zone_cycles
@@ -732,11 +732,7 @@ class MainWindow(QMainWindow):
         path = Path(selected)
         try:
             metadata = probe_video(path)
-            video_warnings = []
-            if metadata["width"] < 1280 or metadata["height"] < 720:
-                video_warnings.append(f"Resolution is {metadata['width']}×{metadata['height']}; 1280×720 or higher is recommended.")
-            if metadata["fps"] < 15:
-                video_warnings.append(f"Frame rate is {metadata['fps']:.1f} fps; 15 fps or higher is recommended.")
+            video_warnings = video_quality_warnings(metadata)
             if video_warnings:
                 QMessageBox.warning(self, "Video quality warning", "\n".join(video_warnings) + "\n\nYou can still import this video.")
             event_code, ok = QInputDialog.getText(self, "Match details", "Event code (optional)")
@@ -767,11 +763,9 @@ class MainWindow(QMainWindow):
         self.capture = cv2.VideoCapture(str(path))
         self.canvas.show_frame(frame)
         self.slider.setValue(0)
-        warnings = []
-        if metadata["width"] < 1280 or metadata["height"] < 720: warnings.append("below 720p")
-        if metadata["fps"] < 15: warnings.append("below 15 fps")
+        warnings = video_quality_warnings(metadata)
         message = f"{path.name}: {metadata['width']}×{metadata['height']}, {metadata['fps']:.2f} fps, {self.duration:.1f} s"
-        if warnings: message += " — warning: " + " and ".join(warnings)
+        if warnings: message += " — warning: " + " ".join(warnings)
         self.progress_label.setText(message)
         self.statusBar().showMessage("Video imported. Select the field corners in this order: top-left, top-right, bottom-right, bottom-left.")
         self.refresh_home()

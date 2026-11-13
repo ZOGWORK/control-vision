@@ -12,6 +12,18 @@ class VideoError(RuntimeError):
     pass
 
 
+def video_quality_warnings(metadata: dict[str, float | int]) -> list[str]:
+    """Return non-blocking import warnings for video quality below the v1 target."""
+    warnings = []
+    width, height = int(metadata["width"]), int(metadata["height"])
+    fps = float(metadata["fps"])
+    if width < 1280 or height < 720:
+        warnings.append(f"Resolution is {width}×{height}; 1280×720 or higher is recommended.")
+    if fps < 15:
+        warnings.append(f"Frame rate is {fps:.1f} fps; 15 fps or higher is recommended.")
+    return warnings
+
+
 def probe_video(path: Path) -> dict[str, float | int]:
     """Probe with ffprobe; use OpenCV for a fallback when ffprobe is unavailable."""
     ffprobe = shutil.which("ffprobe")

@@ -11,7 +11,7 @@ from control_vision.pipeline.tracking import (
     _unmatched_roi_detections,
 )
 from control_vision.pipeline.tracking import track_video
-from control_vision.pipeline.ingest import probe_video
+from control_vision.pipeline.ingest import probe_video, video_quality_warnings
 from control_vision.pipeline.manual_tracking import _photo_crop_bounds, _save_best_photos
 from control_vision.pipeline.zones import zone_at
 from control_vision.game.scoreboard import calculate_scoreboard
@@ -459,6 +459,68 @@ class ShutdownTests(unittest.TestCase):
 
 
 class VideoIngestTests(unittest.TestCase):
+    def test_import_quality_warnings_are_non_blocking_threshold_guidance(self):
+        self.assertEqual(video_quality_warnings({"width": 1280, "height": 720, "fps": 15}), [])
+
+        warnings = video_quality_warnings({"width": 960, "height": 720, "fps": 12.5})
+        self.assertEqual(len(warnings), 2)
+        self.assertIn("Resolution is 960×720", warnings[0])
+        self.assertIn("1280×720 or higher is recommended", warnings[0])
+        self.assertIn("Frame rate is 12.5 fps", warnings[1])
+        self.assertIn("15 fps or higher is recommended", warnings[1])
+
+    def test_import_quality_warning_checks_both_resolution_dimensions(self):
+        self.assertEqual(
+            video_quality_warnings({"width": 1280, "height": 480, "fps": 30}),
+            ["Resolution is 1280×480; 1280×720 or higher is recommended."],
+        )
+
+    def test_low_quality_warning_does_not_block_video_import(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from control_vision.app.main_window import MainWindow
+
+        database = SimpleNamespace(add_video=Mock(return_value=7))
+        class Capture:
+            def __init__(self): self.released = False
+            def read(self): return True, object()
+            def release(self): self.released = True
+        captures = [Capture(), Capture()]
+        widgets = lambda **attrs: SimpleNamespace(**attrs)
+        window = SimpleNamespace(
+            db=database, project_id=1, capture=None, corners=[], seed_points=[], robot_labels=[],
+            tracks={}, zones={}, cycles=[], events=[], photo_rows=[], scoreboard_ocr=None,
+            zone_remove_combo=widgets(clear=Mock()), official_red=widgets(clear=Mock()),
+            official_blue=widgets(clear=Mock()), use_ocr_btn=widgets(setEnabled=Mock()),
+            scoreboard_ocr_status=widgets(setText=Mock()), disq_red=widgets(setChecked=Mock()),
+            disq_blue=widgets(setChecked=Mock()),
+            scoring_config={"ranking_points": {"thresholds_by_event_type": {"standard": {
+                "swarm_leave_park_points": 16, "pollinator_1_hive_tips": 4,
+                "pollinator_2_hive_tips": 7,
+            }}}},
+            swarm_threshold=widgets(setValue=Mock()), pollinator_1_threshold=widgets(setValue=Mock()),
+            pollinator_2_threshold=widgets(setValue=Mock()),
+            canvas=widgets(roi_points=[], named_rois={}, show_frame=Mock()),
+            field_map=widgets(zones={}, tracks={}, update=Mock()), duration=0,
+            slider=widgets(setValue=Mock()), progress_label=widgets(setText=Mock()),
+            statusBar=Mock(return_value=widgets(showMessage=Mock())), refresh_home=Mock(),
+        )
+        with patch("control_vision.app.main_window.QFileDialog.getOpenFileName", return_value=("low.mp4", "")), \
+             patch("control_vision.app.main_window.QInputDialog.getText", side_effect=[("EV", True), ("Q3", True)]), \
+             patch("control_vision.app.main_window.probe_video", return_value={
+                 "width": 960, "height": 720, "fps": 12.5, "duration_s": 12,
+             }), \
+             patch("control_vision.app.main_window.cv2.VideoCapture", side_effect=captures), \
+             patch("control_vision.app.main_window.QMessageBox.warning") as warning:
+            MainWindow.import_video(window)
+
+        warning.assert_called_once()
+        self.assertIn("You can still import this video", warning.call_args.args[2])
+        database.add_video.assert_called_once_with(1, Path("low.mp4"), {
+            "width": 960, "height": 720, "fps": 12.5, "duration_s": 12,
+        }, "EV", "Q3")
+        self.assertEqual(window.video_id, 7)
+
     def test_unreadable_first_frame_is_not_saved_in_project(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
