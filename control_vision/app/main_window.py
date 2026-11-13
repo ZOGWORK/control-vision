@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
     QPushButton, QSlider, QSpinBox, QStatusBar, QVBoxLayout, QWidget, QTabWidget,
-    QTableWidget, QTableWidgetItem, QDoubleSpinBox, QInputDialog, QHeaderView, QListWidgetItem,
+    QTableWidget, QTableWidgetItem, QDoubleSpinBox, QInputDialog, QHeaderView, QListWidgetItem, QCheckBox, QTextBrowser,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -31,6 +31,7 @@ from control_vision.pipeline.clips import create_highlight, thumbnail
 from control_vision.pipeline.stats import robot_statistics
 from control_vision.scout.exports import export_scout_json, export_stats_csv
 from control_vision.storage.database import ProjectDatabase
+from control_vision.game.scoreboard import calculate_scoreboard, classify_match_time
 
 
 class FrameCanvas(QLabel):
@@ -167,7 +168,7 @@ class ProcessingWorker(QObject):
             self.progress.emit(stage, percent, f"{detail} · elapsed {elapsed:.0f}s")
         try:
             self.done.emit(track_video(*self.args[:5], cancel=lambda: self.cancelled,
-                                       progress=report, logger=self.args[5], photos_dir=self.args[6], confidence_threshold=self.args[7], goal_roi=self.args[8]))
+                                       progress=report, logger=self.args[5], photos_dir=self.args[6], confidence_threshold=self.args[7], goal_roi=self.args[8], reid_model_path=self.args[9]))
         except InterruptedError:
             self.failed.emit("Processing was cancelled.")
         except Exception as exc:
@@ -268,20 +269,35 @@ class MainWindow(QMainWindow):
         self.log_view = QListWidget(); self.log_view.setMaximumHeight(100)
         layout.addWidget(self.log_view)
         self.tabs = QTabWidget()
+        home_page = QWidget(); home_layout = QVBoxLayout(home_page)
+        self.home_project_label = QLabel("No project is open")
+        self.home_project_label.setStyleSheet("font-size:20px;font-weight:600")
+        self.home_recent = QListWidget()
+        self.home_recent.itemDoubleClicked.connect(lambda item: self.load_saved_video_id(item.data(Qt.ItemDataRole.UserRole)))
+        home_actions = QHBoxLayout()
+        home_new = QPushButton("New Project"); home_open = QPushButton("Open Project")
+        home_import = QPushButton("Import Video"); home_load = QPushButton("Load Selected Video")
+        home_new.clicked.connect(self.new_project); home_open.clicked.connect(self.open_project)
+        home_import.clicked.connect(self.import_video)
+        home_load.clicked.connect(lambda: self.load_saved_video_id(self.home_recent.currentItem().data(Qt.ItemDataRole.UserRole) if self.home_recent.currentItem() else None))
+        for button in (home_new, home_open, home_import, home_load): home_actions.addWidget(button)
+        home_layout.addWidget(self.home_project_label); home_layout.addLayout(home_actions)
+        home_layout.addWidget(QLabel("Recent videos in this project — double-click to load")); home_layout.addWidget(self.home_recent)
+        self.tabs.addTab(home_page, "Home / Projects")
         self.tabs.addTab(root, "Analysis")
         self.cycles_table = QTableWidget(0, 6)
         self.cycles_table.setHorizontalHeaderLabels(["Team", "Alliance", "Start", "End", "Pickup", "Scoring"])
         self.cycles_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.cycles_table.cellDoubleClicked.connect(self.jump_to_cycle)
         cycles_page = QWidget(); cycles_layout = QVBoxLayout(cycles_page)
-        self.stats_table = QTableWidget(0, 8)
-        self.stats_table.setHorizontalHeaderLabels(["Team", "Alliance", "Cycles", "Avg cycle (s)", "Top speed (ft/s)", "Distance (ft)", "Time per zone (s)", "Confirmed points"])
+        self.stats_table = QTableWidget(0, 9)
+        self.stats_table.setHorizontalHeaderLabels(["Team", "Alliance", "Cycles", "Avg cycle (s)", "Top speed (ft/s)", "Distance (ft)", "Time per zone (s)", "Confirmed points", "Ranking points"])
         self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         cycles_layout.addWidget(QLabel("Zone-trip cycle list. Cycle counts use pickup-to-scoring zone transitions and have medium confidence until ball detection is available."))
         cycles_layout.addWidget(self.cycles_table); cycles_layout.addWidget(QLabel("Per-robot movement statistics")); cycles_layout.addWidget(self.stats_table)
         self.tabs.addTab(cycles_page, "Cycles & Stats")
-        self.review_table = QTableWidget(0, 8)
-        self.review_table.setHorizontalHeaderLabels(["Time", "Team", "Alliance", "Event type", "Points", "Confidence", "Status", "Clip"])
+        self.review_table = QTableWidget(0, 9)
+        self.review_table.setHorizontalHeaderLabels(["Time", "Team", "Robot alliance", "Points to", "Event type", "Points", "Confidence", "Status", "Clip"])
         self.review_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.review_table.cellDoubleClicked.connect(self.preview_review_event)
         review_page = QWidget(); review_layout = QVBoxLayout(review_page)
@@ -290,15 +306,18 @@ class MainWindow(QMainWindow):
         scoring_config_path = Path(__file__).resolve().parents[1] / "config" / "scoring_biobuzz.json"
         self.scoring_config = json.loads(scoring_config_path.read_text(encoding="utf-8"))
         self.event_types = {entry["id"]: entry for entry in self.scoring_config["review_event_types"]}
-        review_controls = QHBoxLayout(); self.review_robot = QComboBox(); self.review_points = QSpinBox(); self.review_points.setRange(0, 999)
+        review_controls = QHBoxLayout(); self.review_robot = QComboBox(); self.review_points = QSpinBox(); self.review_points.setRange(-999, 999)
+        self.review_alliance = QComboBox(); self.review_alliance.addItem("Robot alliance", None); self.review_alliance.addItem("Red", "red"); self.review_alliance.addItem("Blue", "blue")
         self.review_confidence = QComboBox(); self.review_confidence.addItems(["low", "medium", "high"])
         self.review_type = QComboBox(); self.review_type.addItem("Unclassified / other", "unclassified")
         for event_type in self.scoring_config["review_event_types"]: self.review_type.addItem(event_type["label"], event_type["id"])
         self.confirm_btn = QPushButton("Confirm"); self.reject_btn = QPushButton("Reject")
-        review_controls.addWidget(QLabel("Event")); review_controls.addWidget(self.review_type); review_controls.addWidget(QLabel("Reassign to")); review_controls.addWidget(self.review_robot); review_controls.addWidget(QLabel("Points")); review_controls.addWidget(self.review_points); review_controls.addWidget(QLabel("Confidence")); review_controls.addWidget(self.review_confidence); review_controls.addWidget(self.confirm_btn); review_controls.addWidget(self.reject_btn)
-        review_layout.addLayout(review_controls); self.tabs.addTab(review_page, "Review Queue")
-        self.scoring_table = QTableWidget(0, 7)
-        self.scoring_table.setHorizontalHeaderLabels(["Time", "Team", "Alliance", "Event type", "Points", "Confidence", "Status"])
+        review_controls.addWidget(QLabel("Event")); review_controls.addWidget(self.review_type); review_controls.addWidget(QLabel("Attributed robot")); review_controls.addWidget(self.review_robot); review_controls.addWidget(QLabel("Points")); review_controls.addWidget(self.review_points); review_controls.addWidget(QLabel("Points go to")); review_controls.addWidget(self.review_alliance); review_controls.addWidget(QLabel("Confidence")); review_controls.addWidget(self.review_confidence); review_controls.addWidget(self.confirm_btn); review_controls.addWidget(self.reject_btn)
+        review_layout.addLayout(review_controls)
+        self.review_rule_hint = QLabel("Scoring is awarded to an alliance under the manual; select robot attribution and point recipient separately."); self.review_rule_hint.setWordWrap(True); review_layout.addWidget(self.review_rule_hint)
+        self.tabs.addTab(review_page, "Review Queue")
+        self.scoring_table = QTableWidget(0, 8)
+        self.scoring_table.setHorizontalHeaderLabels(["Time", "Team", "Robot alliance", "Points to", "Event type", "Points", "Confidence", "Status"])
         self.scoring_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.scoring_table.cellDoubleClicked.connect(self.jump_to_event)
         scoring_page = QWidget(); scoring_layout = QVBoxLayout(scoring_page)
@@ -317,16 +336,32 @@ class MainWindow(QMainWindow):
         official_row = QHBoxLayout(); official_row.addWidget(QLabel("Official red total")); official_row.addWidget(self.official_red); official_row.addWidget(QLabel("Official blue total")); official_row.addWidget(self.official_blue)
         export_layout.addLayout(official_row)
         self.score_compare = QLabel("Video totals include confirmed events only."); export_layout.addWidget(self.score_compare)
+        rp_row = QHBoxLayout()
+        self.disq_red = QCheckBox("Red disqualified"); self.disq_blue = QCheckBox("Blue disqualified")
+        self.swarm_threshold = QSpinBox(); self.swarm_threshold.setRange(0, 999); self.swarm_threshold.setValue(16)
+        self.pollinator_1_threshold = QSpinBox(); self.pollinator_1_threshold.setRange(0, 99); self.pollinator_1_threshold.setValue(4)
+        self.pollinator_2_threshold = QSpinBox(); self.pollinator_2_threshold.setRange(0, 99); self.pollinator_2_threshold.setValue(7)
+        for widget in (self.disq_red, self.disq_blue, QLabel("SWARM threshold"), self.swarm_threshold, QLabel("POLLINATOR 1 tips"), self.pollinator_1_threshold, QLabel("POLLINATOR 2 tips"), self.pollinator_2_threshold): rp_row.addWidget(widget)
+        export_layout.addLayout(rp_row)
+        self.ranking_summary = QLabel("Ranking Points follow the selected event thresholds."); self.ranking_summary.setWordWrap(True); export_layout.addWidget(self.ranking_summary)
         self.csv_export_btn = QPushButton("Export statistics CSV"); self.json_export_btn = QPushButton("Export Scout JSON")
         self.photos_export_btn = QPushButton("Export robot photos")
         export_row = QHBoxLayout(); export_row.addWidget(self.csv_export_btn); export_row.addWidget(self.json_export_btn); export_row.addWidget(self.photos_export_btn); export_layout.addLayout(export_row)
         self.tabs.addTab(export_page, "Export")
         settings_page = QWidget(); settings_layout = QFormLayout(settings_page)
-        self.model_path_edit = QLineEdit(); self.ffmpeg_path_edit = QLineEdit()
+        self.model_path_edit = QLineEdit(); self.reid_path_edit = QLineEdit(); self.ffmpeg_path_edit = QLineEdit()
+        self.model_browse_btn = QPushButton("Browse…"); self.reid_browse_btn = QPushButton("Browse…"); self.ffmpeg_browse_btn = QPushButton("Browse…")
+        model_row = QHBoxLayout(); model_row.addWidget(self.model_path_edit); model_row.addWidget(self.model_browse_btn)
+        reid_row = QHBoxLayout(); reid_row.addWidget(self.reid_path_edit); reid_row.addWidget(self.reid_browse_btn)
+        ffmpeg_row = QHBoxLayout(); ffmpeg_row.addWidget(self.ffmpeg_path_edit); ffmpeg_row.addWidget(self.ffmpeg_browse_btn)
         self.confidence_spin = QDoubleSpinBox(); self.confidence_spin.setRange(0.05, 0.95); self.confidence_spin.setSingleStep(0.05); self.confidence_spin.setValue(0.25)
         self.settings_save_btn = QPushButton("Save settings")
-        settings_layout.addRow("YOLO11n ONNX model", self.model_path_edit); settings_layout.addRow("FFmpeg executable (blank uses PATH)", self.ffmpeg_path_edit); settings_layout.addRow("Detection confidence", self.confidence_spin); settings_layout.addRow(self.settings_save_btn)
+        settings_layout.addRow("YOLO11n ONNX model", model_row); settings_layout.addRow("Optional local ReID embeddings (ONNX) or compatible YOLO .pt", reid_row); settings_layout.addRow("FFmpeg executable (blank uses PATH)", ffmpeg_row); settings_layout.addRow("Detection confidence", self.confidence_spin); settings_layout.addRow("Sample rate (frames per second)", self.sample_rate); settings_layout.addRow(self.settings_save_btn)
         self.tabs.addTab(settings_page, "Settings")
+        rules_page = QWidget(); rules_layout = QVBoxLayout(rules_page)
+        self.rules_browser = QTextBrowser(); self.rules_browser.setOpenExternalLinks(True)
+        self.rules_browser.setMarkdown(self.build_rules_reference())
+        rules_layout.addWidget(self.rules_browser); self.tabs.addTab(rules_page, "BIOBUZZ Rules")
         self.setCentralWidget(self.tabs)
 
         self.project_btn.clicked.connect(self.new_project)
@@ -349,6 +384,7 @@ class MainWindow(QMainWindow):
         self.confirm_btn.clicked.connect(lambda: self.review_selected("confirmed"))
         self.reject_btn.clicked.connect(lambda: self.review_selected("rejected"))
         self.review_type.currentIndexChanged.connect(self.review_type_changed)
+        self.review_robot.currentIndexChanged.connect(self.review_type_changed)
         self.review_table.currentCellChanged.connect(self.load_review_selection)
         self.add_event_btn.clicked.connect(self.add_manual_event)
         self.generate_clips_btn.clicked.connect(self.generate_clips)
@@ -359,9 +395,17 @@ class MainWindow(QMainWindow):
         self.photos_export_btn.clicked.connect(self.export_photos)
         self.official_red.textChanged.connect(self.update_score_comparison)
         self.official_blue.textChanged.connect(self.update_score_comparison)
+        self.review_alliance.currentIndexChanged.connect(self.update_score_comparison)
         self.official_red.editingFinished.connect(self.save_official_scores)
         self.official_blue.editingFinished.connect(self.save_official_scores)
+        self.disq_red.clicked.connect(self.save_official_scores); self.disq_blue.clicked.connect(self.save_official_scores)
+        self.swarm_threshold.editingFinished.connect(self.save_official_scores); self.pollinator_1_threshold.editingFinished.connect(self.save_official_scores); self.pollinator_2_threshold.editingFinished.connect(self.save_official_scores)
+        self.disq_red.stateChanged.connect(self.update_score_comparison); self.disq_blue.stateChanged.connect(self.update_score_comparison)
+        self.swarm_threshold.valueChanged.connect(self.update_score_comparison); self.pollinator_1_threshold.valueChanged.connect(self.update_score_comparison); self.pollinator_2_threshold.valueChanged.connect(self.update_score_comparison)
         self.settings_save_btn.clicked.connect(self.save_settings)
+        self.model_browse_btn.clicked.connect(self.browse_model)
+        self.reid_browse_btn.clicked.connect(self.browse_reid)
+        self.ffmpeg_browse_btn.clicked.connect(self.browse_ffmpeg)
         self.timer = QTimer(self); self.timer.setInterval(100); self.timer.timeout.connect(self.refresh_video)
         self._mode = None
         self._worker = None
@@ -370,14 +414,44 @@ class MainWindow(QMainWindow):
     def project_dir(self) -> Path | None:
         return self.db.path.parent if self.db else None
 
+    def build_rules_reference(self) -> str:
+        resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+        reference = resource_root / "docs" / "BIOBUZZ_RULES.md"
+        if reference.is_file():
+            return reference.read_text(encoding="utf-8")
+        return "# BIOBUZZ rules unavailable\n\nSee the official [Competition Manual TU09](https://ftc-resources.firstinspires.org/ftc/archive/2027/game/cm-html/BIOBUZZ%20Competition%20Manual%20-%20TU09.htm)."
+
     def save_settings(self):
         folder = self.project_dir()
         if not folder:
             QMessageBox.information(self, "Open a project", "Project settings are saved with the active project."); return
-        settings = {"model_path": self.model_path_edit.text().strip(), "ffmpeg_path": self.ffmpeg_path_edit.text().strip(),
+        settings = {"model_path": self.model_path_edit.text().strip(), "reid_model_path": self.reid_path_edit.text().strip(), "ffmpeg_path": self.ffmpeg_path_edit.text().strip(),
                     "confidence": self.confidence_spin.value(), "sample_fps": int(self.sample_rate.currentText())}
         (folder / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
         self.statusBar().showMessage("Settings saved in this project.")
+
+    def browse_model(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose local YOLO11n ONNX model", "", "ONNX model (*.onnx)")
+        if path: self.model_path_edit.setText(path)
+
+    def browse_reid(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose compatible local ReID model", "", "ReID model (*.onnx *.pt *.torchscript);;All files (*)")
+        if path: self.reid_path_edit.setText(path)
+
+    def browse_ffmpeg(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose FFmpeg executable", "", "Executable (ffmpeg.exe);;All files (*)")
+        if path: self.ffmpeg_path_edit.setText(path)
+
+    def refresh_home(self):
+        self.home_recent.clear()
+        if not self.db or self.project_id is None:
+            self.home_project_label.setText("No project is open")
+            return
+        project = self.db.connection.execute("SELECT name FROM projects WHERE id=?", (self.project_id,)).fetchone()
+        self.home_project_label.setText(f"{project['name']} — {self.db.path}")
+        for row in self.db.connection.execute("SELECT id,path,event_code,match_number,duration_s FROM videos WHERE project_id=? ORDER BY id DESC LIMIT 20", (self.project_id,)):
+            label = f"{Path(row['path']).name}  ·  {row['event_code'] or 'Practice'} {row['match_number'] or ''}  ·  {row['duration_s'] or 0:.0f}s"
+            item = QListWidgetItem(label); item.setData(Qt.ItemDataRole.UserRole, int(row['id'])); self.home_recent.addItem(item)
 
     def load_settings(self):
         folder = self.project_dir()
@@ -387,6 +461,7 @@ class MainWindow(QMainWindow):
         try:
             settings = json.loads(path.read_text(encoding="utf-8"))
             self.model_path_edit.setText(settings.get("model_path", ""))
+            self.reid_path_edit.setText(settings.get("reid_model_path", ""))
             self.ffmpeg_path_edit.setText(settings.get("ffmpeg_path", ""))
             self.confidence_spin.setValue(float(settings.get("confidence", 0.25)))
             self.sample_rate.setCurrentText(str(settings.get("sample_fps", 8)))
@@ -486,6 +561,7 @@ class MainWindow(QMainWindow):
             (Path(folder) / "run_logs").mkdir(exist_ok=True)
             self.load_settings()
             self.statusBar().showMessage(f"Project ready: {name.strip()}")
+            self.refresh_home()
         except Exception as exc:
             QMessageBox.critical(self, "Could not create project", str(exc))
 
@@ -504,6 +580,7 @@ class MainWindow(QMainWindow):
             self.load_settings()
             (self.project_dir() / "run_logs").mkdir(exist_ok=True)
             self.statusBar().showMessage(f"Project opened: {project['name']}")
+            self.refresh_home()
         except Exception as exc:
             self.db = None
             QMessageBox.critical(self, "Could not open project", str(exc))
@@ -532,6 +609,8 @@ class MainWindow(QMainWindow):
         self.zone_remove_combo.clear()
         self.official_red.clear()
         self.official_blue.clear()
+        self.disq_red.setChecked(False); self.disq_blue.setChecked(False)
+        self.swarm_threshold.setValue(16); self.pollinator_1_threshold.setValue(4); self.pollinator_2_threshold.setValue(7)
         self.cycles_table.setRowCount(0)
         self.stats_table.setRowCount(0)
         self.review_table.setRowCount(0)
@@ -540,6 +619,7 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("Project opened. Load or import a match video to begin.")
         self.slider.setValue(0)
         self.refresh_result_tables()
+        self.refresh_home()
 
     def import_video(self):
         if not self.db or self.project_id is None:
@@ -565,6 +645,10 @@ class MainWindow(QMainWindow):
         self.video_id, self.video_path, self.metadata = video_id, path, metadata
         self.corners.clear(); self.seed_points.clear(); self.robot_labels.clear(); self.tracks.clear(); self.zones.clear(); self.cycles.clear(); self.events = []
         self.zone_remove_combo.clear(); self.official_red.clear(); self.official_blue.clear()
+        self.disq_red.setChecked(False); self.disq_blue.setChecked(False)
+        self.swarm_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["swarm_leave_park_points"]))
+        self.pollinator_1_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["pollinator_1_hive_tips"]))
+        self.pollinator_2_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["pollinator_2_hive_tips"]))
         self.canvas.roi_points = []
         self.field_map.zones = {}; self.field_map.tracks = {}; self.field_map.update()
         self.duration = float(metadata["duration_s"])
@@ -578,13 +662,14 @@ class MainWindow(QMainWindow):
         if warnings: message += " — warning: " + " and ".join(warnings)
         self.progress_label.setText(message)
         self.statusBar().showMessage("Video imported. Select the field corners in this order: top-left, top-right, bottom-right, bottom-left.")
+        self.refresh_home()
 
     def load_saved_video(self):
         if not self.db or self.project_id is None:
             QMessageBox.information(self, "Open a project", "Open a project before loading one of its saved videos.")
             return
         videos = self.db.connection.execute(
-            "SELECT id,path,duration_s,width,height,official_red,official_blue FROM videos WHERE project_id=? ORDER BY id DESC", (self.project_id,)
+            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold FROM videos WHERE project_id=? ORDER BY id DESC", (self.project_id,)
         ).fetchall()
         if not videos:
             QMessageBox.information(self, "No videos", "This project has no imported videos yet.")
@@ -594,6 +679,15 @@ class MainWindow(QMainWindow):
         choice, ok = QInputDialog.getItem(self, "Load saved video", "Video", choices, 0, False)
         if not ok: return
         video = videos[choices.index(choice)]
+        self.load_saved_video_id(int(video["id"]))
+
+    def load_saved_video_id(self, video_id: int | None):
+        if not self.db or self.project_id is None or video_id is None: return
+        video = self.db.connection.execute(
+            "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold FROM videos WHERE project_id=? AND id=?",
+            (self.project_id, int(video_id)),
+        ).fetchone()
+        if video is None: return
         path = Path(video["path"])
         if not path.is_file():
             QMessageBox.warning(self, "Video unavailable", f"The saved video path no longer exists: {path}")
@@ -611,6 +705,8 @@ class MainWindow(QMainWindow):
         self.duration = float(metadata["duration_s"]); self.current_time = 0
         self.official_red.setText(str(video["official_red"]) if video["official_red"] is not None else "")
         self.official_blue.setText(str(video["official_blue"]) if video["official_blue"] is not None else "")
+        self.disq_red.setChecked(bool(video["red_disqualified"])); self.disq_blue.setChecked(bool(video["blue_disqualified"]))
+        self.swarm_threshold.setValue(int(video["swarm_threshold"])); self.pollinator_1_threshold.setValue(int(video["pollinator_1_threshold"])); self.pollinator_2_threshold.setValue(int(video["pollinator_2_threshold"]))
         calibration = self.db.connection.execute("SELECT corners_json FROM calibrations WHERE video_id=?", (self.video_id,)).fetchone()
         self.corners = json.loads(calibration["corners_json"]) if calibration else []
         zones_row = self.db.connection.execute("SELECT zones_json FROM calibrations WHERE video_id=?", (self.video_id,)).fetchone()
@@ -624,6 +720,7 @@ class MainWindow(QMainWindow):
         self.seed_points = [(row["id"], row["seed_x"], row["seed_y"]) for row in robots if row["seed_x"] is not None and row["seed_y"] is not None]
         self.robot_labels = [f"{row['team_number']} ({row['alliance']})" for row in robots]
         self.canvas.show_frame(frame, [(int(x), int(y), str(index + 1)) for index, (x, y) in enumerate(self.corners)])
+        self.refresh_home()
         self.progress_label.setText(f"Loaded {path.name}. Corners: {len(self.corners)}/4; seeded identities: {len(self.seed_points)}.")
         rows = self.db.connection.execute("SELECT robot_id,t_s,x_ft,y_ft FROM tracks WHERE robot_id IN (SELECT id FROM robots WHERE video_id=?) ORDER BY frame", (self.video_id,)).fetchall()
         track_by_id = {}
@@ -704,7 +801,7 @@ class MainWindow(QMainWindow):
         photos_dir = self.project_dir() / "photos"
         self._worker = ProcessingWorker((self.video_path, Path(model_path), self.corners.copy(), self.seed_points.copy(),
                                          float(self.sample_rate.currentText()), self.logger, photos_dir, self.confidence_spin.value(),
-                                         self.zones.get("goal_roi", {}).get("points")))
+                                         self.zones.get("goal_roi", {}).get("points"), self.reid_path_edit.text().strip()))
         self._thread = QThread(self); self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self.show_progress)
@@ -754,15 +851,18 @@ class MainWindow(QMainWindow):
         track_rows = [tuple(row) for row in self.db.tracks_for_video(self.video_id)]
         stats = robot_statistics(track_rows, [dict(row) for row in self.cycles], self.zones)
         points_by_robot = {}
+        robot_alliances = {int(robot["id"]): robot["alliance"] for robot in robots}
         for event in self.events:
-            if event["status"] == "confirmed" and event["robot_id"] is not None:
+            if event["status"] == "confirmed" and event["robot_id"] is not None and event["event_alliance"] == robot_alliances.get(int(event["robot_id"])):
                 points_by_robot[event["robot_id"]] = points_by_robot.get(event["robot_id"], 0) + event["points"]
+        board = calculate_scoreboard(self.events, robots, self.swarm_threshold.value(), self.pollinator_1_threshold.value(),
+                                     self.pollinator_2_threshold.value(), {a for a, cb in (("red", self.disq_red), ("blue", self.disq_blue)) if cb.isChecked()})
         self.stats_table.setRowCount(len(robots))
         for row_index, robot in enumerate(robots):
             values = stats.get(robot["id"], {"cycles": 0, "cycle_time_avg_s": 0, "top_speed_ft_s": 0, "distance_ft": 0})
             zone_seconds = values.get("zone_time_s", {})
             zone_summary = ", ".join(f"{name}: {seconds:.1f}" for name, seconds in zone_seconds.items())
-            display = [robot["team_number"], robot["alliance"], values["cycles"], f"{values['cycle_time_avg_s']:.2f}", f"{values['top_speed_ft_s']:.2f}", f"{values['distance_ft']:.2f}", zone_summary, points_by_robot.get(robot["id"], 0)]
+            display = [robot["team_number"], robot["alliance"], values["cycles"], f"{values['cycle_time_avg_s']:.2f}", f"{values['top_speed_ft_s']:.2f}", f"{values['distance_ft']:.2f}", zone_summary, points_by_robot.get(robot["id"], 0), board["team_ranking_points"].get(int(robot["id"]), 0)]
             for col, value in enumerate(display): self.stats_table.setItem(row_index, col, QTableWidgetItem(str(value)))
         flagged = [event for event in self.events if event["status"] == "flagged"]
         self.review_table.setRowCount(len(flagged))
@@ -770,14 +870,16 @@ class MainWindow(QMainWindow):
         for row_index, event in enumerate(flagged):
             clip = clips_by_event.get(event["id"])
             event_label = self.event_types.get(event["event_type"], {}).get("label", "Unclassified / other")
-            values = [f"{event['t_s']:.2f}", event["team_number"], event["alliance"], event_label, event["points"], event["confidence"], event["status"], Path(clip["path"]).name if clip else "Not generated"]
+            phase, remaining = classify_match_time(float(event["t_s"]), self.scoring_config["match_periods_s"])
+            values = [f"{event['t_s']:.2f}s {phase} ({remaining:.0f}s left)", event["team_number"], event["alliance"], event["event_alliance"], event_label, event["points"], event["confidence"], event["status"], Path(clip["path"]).name if clip else "Not generated"]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value)); self.review_table.setItem(row_index, col, item)
             self.review_table.item(row_index, 0).setData(Qt.ItemDataRole.UserRole, event["id"])
         self.scoring_table.setRowCount(len(self.events))
         for row_index, event in enumerate(self.events):
             event_label = self.event_types.get(event["event_type"], {}).get("label", "Unclassified / other")
-            values = [f"{event['t_s']:.2f}", event["team_number"], event["alliance"], event_label, event["points"], event["confidence"], event["status"]]
+            phase, remaining = classify_match_time(float(event["t_s"]), self.scoring_config["match_periods_s"])
+            values = [f"{event['t_s']:.2f}s {phase} ({remaining:.0f}s left)", event["team_number"], event["alliance"], event["event_alliance"], event_label, event["points"], event["confidence"], event["status"]]
             for col, value in enumerate(values): self.scoring_table.setItem(row_index, col, QTableWidgetItem(str(value)))
             self.scoring_table.item(row_index, 0).setData(Qt.ItemDataRole.UserRole, event["t_s"])
         self.refresh_clips()
@@ -803,13 +905,29 @@ class MainWindow(QMainWindow):
         if row < 0 or not self.db: return
         event_id = self.review_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
         robot_id = self.review_robot.currentData()
-        self.db.review_event(event_id, status, self.review_points.value(), robot_id, self.review_type.currentData(), self.review_confidence.currentText())
+        self.db.review_event(event_id, status, self.review_points.value(), robot_id, self.review_type.currentData(), self.review_confidence.currentText(), self.review_alliance.currentData())
         self.refresh_result_tables()
 
     def review_type_changed(self, index: int):
         event_type = self.review_type.currentData()
         if event_type in self.event_types:
             self.review_points.setValue(int(self.event_types[event_type]["points"]))
+            robot_id = self.review_robot.currentData()
+            robot = self.db.connection.execute("SELECT alliance FROM robots WHERE id=?", (robot_id,)).fetchone() if self.db and robot_id is not None else None
+            if robot and self.event_types[event_type].get("recipient") == "opponent":
+                recipient = "blue" if robot["alliance"] == "red" else "red"
+                self.review_alliance.setCurrentIndex(self.review_alliance.findData(recipient))
+            selected = self.review_table.currentRow()
+            event = None
+            if 0 <= selected < self.review_table.rowCount():
+                event_id = self.review_table.item(selected, 0).data(Qt.ItemDataRole.UserRole)
+                event = next((entry for entry in self.events if entry["id"] == event_id), None)
+            if event and event_type.startswith("flower_") and float(event["t_s"]) < float(self.scoring_config["match_periods_s"]["flower_unlock_elapsed_s"]):
+                self.review_rule_hint.setText("TU09 G410: FLOWER scoring starts with 60 seconds left in TELEOP. This early achievement can still score, but each early NECTAR may receive a 20-point Major Foul; verify the official call and add the penalty separately if recorded.")
+            elif event_type in {"minor_foul", "major_foul"}:
+                self.review_rule_hint.setText("Foul credits are awarded to the opponent alliance. Preserve the offending robot attribution and set the recipient alliance separately. Only record referee-assessed fouls.")
+            else:
+                self.review_rule_hint.setText("Scoring recipient can differ from the attributed robot. Confirm achievement evidence and receiver from the rule criteria before marking confirmed.")
 
     def load_review_selection(self, row: int, column: int, previous_row: int, previous_column: int):
         if row < 0 or row >= self.review_table.rowCount(): return
@@ -822,36 +940,47 @@ class MainWindow(QMainWindow):
         index = self.review_type.findData(event["event_type"])
         self.review_type.setCurrentIndex(index if index >= 0 else 0)
         self.review_type.blockSignals(False)
-        self.review_points.setValue(int(event["points"]))
-        self.review_confidence.setCurrentText(event["confidence"])
         robot_index = self.review_robot.findData(event["robot_id"])
         if robot_index >= 0: self.review_robot.setCurrentIndex(robot_index)
+        self.review_points.setValue(int(event["points"]))
+        self.review_confidence.setCurrentText(event["confidence"])
+        alliance_index = self.review_alliance.findData(event["scoring_alliance"])
+        self.review_alliance.setCurrentIndex(alliance_index if alliance_index >= 0 else 0)
 
     def update_score_comparison(self, *_):
         if not self.db or self.video_id is None:
             self.score_compare.setText("Video totals include confirmed events only."); return
         events = self.db.events_for_video(self.video_id)
-        totals = {"red": 0, "blue": 0}
+        robots = [dict(row) for row in self.db.robots_for_video(self.video_id)]
         has_tracks = self.db.connection.execute("SELECT 1 FROM tracks WHERE robot_id IN (SELECT id FROM robots WHERE video_id=?) LIMIT 1", (self.video_id,)).fetchone()
         if not events and not has_tracks:
             self.score_compare.setText("No analysis has run for this video yet."); return
-        for event in events:
-            if event["status"] == "confirmed" and event["alliance"] in totals:
-                totals[event["alliance"]] += event["points"]
+        disqualified = {alliance for alliance, checkbox in (("red", self.disq_red), ("blue", self.disq_blue)) if checkbox.isChecked()}
+        board = calculate_scoreboard(events, robots, self.swarm_threshold.value(), self.pollinator_1_threshold.value(),
+                                     self.pollinator_2_threshold.value(), disqualified)
+        totals = board["alliance_points"]
         flagged_count = sum(event["status"] == "flagged" for event in events)
-        state = "UNREVIEWED — final score pending" if flagged_count else "Reviewed"
+        state = "UNREVIEWED — final score pending" if flagged_count else "Reviewed" if any(event["status"] == "confirmed" for event in events) else "No scoring events confirmed"
         parts = [f"{state}. Video total — red {totals['red']}, blue {totals['blue']}, match {sum(totals.values())}; flagged events: {flagged_count}."]
         for alliance, edit in (("red", self.official_red), ("blue", self.official_blue)):
             raw = edit.text().strip()
             if raw.isdigit(): parts.append(f"{alliance.capitalize()} official {int(raw)}; difference {totals[alliance] - int(raw):+d}")
         self.score_compare.setText("  ".join(parts))
+        rp = board["ranking_points"]
+        self.ranking_summary.setText(
+            f"Ranking Points per team (standard thresholds: SWARM ≥{board['swarm_threshold']} Leave+Park points; "
+            f"POLLINATOR 1 ≥{board['pollinator_thresholds'][0]} HIVE TIPS; POLLINATOR 2 ≥{board['pollinator_thresholds'][1]}): "
+            f"Red {rp['red']['total']} [SWARM {rp['red']['SWARM']}, P1 {rp['red']['POLLINATOR_1']}, P2 {rp['red']['POLLINATOR_2']}, Win/Tie {rp['red']['WIN_TIE']}]; "
+            f"Blue {rp['blue']['total']} [SWARM {rp['blue']['SWARM']}, P1 {rp['blue']['POLLINATOR_1']}, P2 {rp['blue']['POLLINATOR_2']}, Win/Tie {rp['blue']['WIN_TIE']}].")
 
     def save_official_scores(self):
         if not self.db or self.video_id is None: return
         red, blue = self.official_red.text().strip(), self.official_blue.text().strip()
         if (red and not red.isdigit()) or (blue and not blue.isdigit()):
             QMessageBox.warning(self, "Invalid official score", "Enter whole-number red and blue totals, or leave a field blank."); return
-        self.db.set_official_scores(self.video_id, int(red) if red else None, int(blue) if blue else None)
+        disqualified = {alliance for alliance, checkbox in (("red", self.disq_red), ("blue", self.disq_blue)) if checkbox.isChecked()}
+        self.db.set_official_scores(self.video_id, int(red) if red else None, int(blue) if blue else None,
+                                    disqualified, self.swarm_threshold.value(), self.pollinator_1_threshold.value(), self.pollinator_2_threshold.value())
         self.update_score_comparison()
 
     def preview_review_event(self, row: int, column: int):
@@ -916,12 +1045,17 @@ class MainWindow(QMainWindow):
         if not target: return
         events = self.db.events_for_video(self.video_id)
         points = {}
+        robot_alliances = {int(robot["id"]): robot["alliance"] for robot in self.db.robots_for_video(self.video_id)}
         for event in events:
-            if event["status"] == "confirmed" and event["robot_id"] is not None:
+            if event["status"] == "confirmed" and event["robot_id"] is not None and event["event_alliance"] == robot_alliances.get(int(event["robot_id"])):
                 points[event["robot_id"]] = points.get(event["robot_id"], 0) + event["points"]
+        video = self.db.connection.execute("SELECT * FROM videos WHERE id=?", (self.video_id,)).fetchone()
+        board = calculate_scoreboard(events, self.db.robots_for_video(self.video_id), int(video["swarm_threshold"]),
+                                     int(video["pollinator_1_threshold"]), int(video["pollinator_2_threshold"]),
+                                     {a for a, col in (("red", "red_disqualified"), ("blue", "blue_disqualified")) if video[col]})
         export_stats_csv(Path(target), self.db.robots_for_video(self.video_id),
                          [tuple(row) for row in self.db.tracks_for_video(self.video_id)],
-                         [dict(row) for row in self.db.cycles_for_video(self.video_id)], self.zones, points)
+                         [dict(row) for row in self.db.cycles_for_video(self.video_id)], self.zones, points, board["team_ranking_points"])
         QMessageBox.information(self, "Export complete", f"Saved {target}")
 
     def export_json(self):

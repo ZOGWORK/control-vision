@@ -9,12 +9,12 @@ from typing import Any
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS videos (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), path TEXT NOT NULL, duration_s REAL, fps REAL, width INTEGER, height INTEGER, event_code TEXT, match_number TEXT, official_red INTEGER, official_blue INTEGER);
+CREATE TABLE IF NOT EXISTS videos (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), path TEXT NOT NULL, duration_s REAL, fps REAL, width INTEGER, height INTEGER, event_code TEXT, match_number TEXT, official_red INTEGER, official_blue INTEGER, red_disqualified INTEGER NOT NULL DEFAULT 0, blue_disqualified INTEGER NOT NULL DEFAULT 0, swarm_threshold INTEGER NOT NULL DEFAULT 16, pollinator_1_threshold INTEGER NOT NULL DEFAULT 4, pollinator_2_threshold INTEGER NOT NULL DEFAULT 7);
 CREATE TABLE IF NOT EXISTS calibrations (video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE, corners_json TEXT NOT NULL, zones_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS robots (id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE, team_number INTEGER NOT NULL, alliance TEXT NOT NULL CHECK(alliance IN ('red','blue')), color_hint TEXT, seed_x INTEGER, seed_y INTEGER);
 CREATE TABLE IF NOT EXISTS tracks (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, frame INTEGER NOT NULL, t_s REAL NOT NULL, x_ft REAL NOT NULL, y_ft REAL NOT NULL, conf REAL NOT NULL, UNIQUE(robot_id, frame));
 CREATE TABLE IF NOT EXISTS cycles (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, start_t_s REAL NOT NULL, end_t_s REAL NOT NULL, pickup_zone TEXT, scoring_zone TEXT);
-CREATE TABLE IF NOT EXISTS scoring_events (id INTEGER PRIMARY KEY, robot_id INTEGER REFERENCES robots(id) ON DELETE SET NULL, t_s REAL NOT NULL, points INTEGER NOT NULL DEFAULT 0, confidence TEXT NOT NULL DEFAULT 'low', status TEXT NOT NULL DEFAULT 'flagged', source TEXT NOT NULL DEFAULT 'zone_crossing', event_type TEXT NOT NULL DEFAULT 'unclassified');
+CREATE TABLE IF NOT EXISTS scoring_events (id INTEGER PRIMARY KEY, robot_id INTEGER REFERENCES robots(id) ON DELETE SET NULL, t_s REAL NOT NULL, points INTEGER NOT NULL DEFAULT 0, confidence TEXT NOT NULL DEFAULT 'low', status TEXT NOT NULL DEFAULT 'flagged', source TEXT NOT NULL DEFAULT 'zone_crossing', event_type TEXT NOT NULL DEFAULT 'unclassified', scoring_alliance TEXT CHECK(scoring_alliance IN ('red','blue')));
 CREATE TABLE IF NOT EXISTS clips (id INTEGER PRIMARY KEY, scoring_event_id INTEGER REFERENCES scoring_events(id) ON DELETE CASCADE, path TEXT NOT NULL, start_t_s REAL NOT NULL, end_t_s REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, path TEXT NOT NULL, t_s REAL NOT NULL);
 """
@@ -28,9 +28,11 @@ class ProjectDatabase:
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript(SCHEMA)
         video_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(videos)")}
-        for column in ("official_red", "official_blue"):
+        for column in ("official_red", "official_blue", "red_disqualified", "blue_disqualified",
+                       "swarm_threshold", "pollinator_1_threshold", "pollinator_2_threshold"):
             if column not in video_columns:
-                self.connection.execute(f"ALTER TABLE videos ADD COLUMN {column} INTEGER")
+                default = " NOT NULL DEFAULT 0" if column.endswith("disqualified") else " NOT NULL DEFAULT 16" if column == "swarm_threshold" else " NOT NULL DEFAULT 4" if column == "pollinator_1_threshold" else " NOT NULL DEFAULT 7" if column == "pollinator_2_threshold" else ""
+                self.connection.execute(f"ALTER TABLE videos ADD COLUMN {column} INTEGER{default}")
         robot_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(robots)")}
         for column in ("seed_x", "seed_y"):
             if column not in robot_columns:
@@ -41,6 +43,8 @@ class ProjectDatabase:
         event_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(scoring_events)")}
         if "event_type" not in event_columns:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'unclassified'")
+        if "scoring_alliance" not in event_columns:
+            self.connection.execute("ALTER TABLE scoring_events ADD COLUMN scoring_alliance TEXT")
         self.connection.commit()
 
     def add_project(self, name: str) -> int:
@@ -98,7 +102,7 @@ class ProjectDatabase:
 
     def events_for_video(self, video_id: int):
         return self.connection.execute(
-            "SELECT e.*,r.team_number,r.alliance FROM scoring_events e LEFT JOIN robots r ON r.id=e.robot_id WHERE r.video_id=? ORDER BY e.t_s",
+            "SELECT e.*,r.team_number,r.alliance,COALESCE(e.scoring_alliance,r.alliance) AS event_alliance FROM scoring_events e LEFT JOIN robots r ON r.id=e.robot_id WHERE r.video_id=? ORDER BY e.t_s",
             (video_id,),
         ).fetchall()
 
@@ -129,13 +133,17 @@ class ProjectDatabase:
         self.connection.commit()
         return int(cursor.lastrowid)
 
-    def review_event(self, event_id: int, status: str, points: int, robot_id: int | None = None, event_type: str = "unclassified", confidence: str = "low") -> None:
-        self.connection.execute("UPDATE scoring_events SET status=?,points=?,robot_id=?,event_type=?,confidence=? WHERE id=?",
-                                (status, points, robot_id, event_type, confidence, event_id))
+    def review_event(self, event_id: int, status: str, points: int, robot_id: int | None = None, event_type: str = "unclassified", confidence: str = "low", scoring_alliance: str | None = None) -> None:
+        self.connection.execute("UPDATE scoring_events SET status=?,points=?,robot_id=?,event_type=?,confidence=?,scoring_alliance=? WHERE id=?",
+                                (status, points, robot_id, event_type, confidence, scoring_alliance, event_id))
         self.connection.commit()
 
-    def set_official_scores(self, video_id: int, red: int | None, blue: int | None) -> None:
-        self.connection.execute("UPDATE videos SET official_red=?,official_blue=? WHERE id=?", (red, blue, video_id))
+    def set_official_scores(self, video_id: int, red: int | None, blue: int | None,
+                            disqualified: set[str] | None = None, swarm_threshold: int = 16,
+                            pollinator_1_threshold: int = 4, pollinator_2_threshold: int = 7) -> None:
+        disqualified = disqualified or set()
+        self.connection.execute("UPDATE videos SET official_red=?,official_blue=?,red_disqualified=?,blue_disqualified=?,swarm_threshold=?,pollinator_1_threshold=?,pollinator_2_threshold=? WHERE id=?",
+                                (red, blue, int("red" in disqualified), int("blue" in disqualified), swarm_threshold, pollinator_1_threshold, pollinator_2_threshold, video_id))
         self.connection.commit()
 
     def add_clip(self, event_id: int, path: Path, start_t_s: float, end_t_s: float) -> None:

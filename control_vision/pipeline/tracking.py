@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -23,6 +24,7 @@ def track_video(
     photos_dir: Path | None = None,
     confidence_threshold: float = 0.25,
     goal_roi: list[list[float]] | None = None,
+    reid_model_path: str | None = None,
 ) -> tuple[list[tuple[int, int, float, float, float, float]], list[tuple[int, Path, float]], list[dict]]:
     """Run local YOLO tracking at the requested sampling rate and map robot footpoints.
 
@@ -47,6 +49,27 @@ def track_video(
     stride = max(1, round(fps / sample_fps))
     sampled_total = max(1, total_frames // stride)
     tracker_cfg = Path(__file__).resolve().parents[1] / "config" / "botsort.yaml"
+    tracker_override = None
+    if reid_model_path:
+        reid_path = Path(reid_model_path)
+        if not reid_path.is_file():
+            cap.release()
+            raise RuntimeError(f"Configured ReID model was not found at {reid_path}.")
+        try:
+            import yaml
+            config = yaml.safe_load(tracker_cfg.read_text(encoding="utf-8"))
+            config["with_reid"] = True
+            config["model"] = str(reid_path.resolve())
+            tracker_override = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8", delete=False)
+            yaml.safe_dump(config, tracker_override)
+            tracker_override.close()
+            tracker_cfg = Path(tracker_override.name)
+            logger.info("BoT-SORT appearance ReID enabled using local model: %s", reid_path)
+        except Exception as exc:
+            cap.release()
+            raise RuntimeError(f"Could not configure the local ReID model: {exc}") from exc
+    else:
+        logger.warning("BoT-SORT appearance ReID is disabled; using motion and overlap association only.")
     model = YOLO(str(model_path), task="detect")
     matrix = matrix_from_corners(corners)
     seed_to_track: dict[int, int] = {}
@@ -155,6 +178,8 @@ def track_video(
             frame_index += 1
     finally:
         cap.release()
+        if tracker_override:
+            Path(tracker_override.name).unlink(missing_ok=True)
     if sampled and sampled < 30 and empty == sampled:
         raise RuntimeError("No robots were detected in the first sampled frames. Check the video and robot model.")
     grouped: dict[int, list[tuple]] = {}

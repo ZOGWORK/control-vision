@@ -2,17 +2,29 @@
   "season": "BIOBUZZ 2026-27",
   "manual_version": "TU09",
   "manual_url": "https://ftc-resources.firstinspires.org/ftc/archive/2027/game/cm-html/BIOBUZZ%20Competition%20Manual%20-%20TU09.htm",
-  "match_periods_s": {"auto": 30, "transition": 8, "teleop": 120, "gameplay_total": 150, "elapsed_total": 158, "flower_scoring_unlock_at_teleop_remaining_s": 60},
+  "match_periods_s": {"auto": 30, "transition": 8, "teleop": 120, "gameplay_total": 150, "elapsed_total": 158, "flower_scoring_unlock_at_teleop_remaining_s": 60, "flower_unlock_elapsed_s": 98},
+  "ranking_points": {
+    "thresholds_by_event_type": {"standard": {"swarm_leave_park_points": 16, "pollinator_1_hive_tips": 4, "pollinator_2_hive_tips": 7}, "regional": null, "championship": null, "premier_custom": null},
+    "swarm_rp": 1,
+    "pollinator_1_rp": 1,
+    "pollinator_2_rp": 1,
+    "win_rp": 3,
+    "tie_rp": 1,
+    "note": "Regional and FIRST Championship thresholds are published through Team Updates; PREMIER Events may set their own thresholds. The app uses standard-event thresholds unless overridden for the event."
+  },
   "review_event_types": [
-    {"id": "leave_auto", "label": "Leave (AUTO)", "points": 3, "alliance_scoped": false},
+    {"id": "leave_auto", "label": "LEAVE (AUTO)", "points": 3, "alliance_scoped": false, "recipient": "robot_alliance", "criteria": "Robot no longer contacts the perimeter wall at end of AUTO."},
     {"id": "park_auto", "label": "Park (AUTO)", "points": 5, "alliance_scoped": false},
     {"id": "park_teleop", "label": "Park (TELEOP)", "points": 5, "alliance_scoped": false},
-    {"id": "hive_tip_auto", "label": "HIVE TIP (AUTO)", "points": 20, "alliance_scoped": true},
-    {"id": "hive_tip_teleop", "label": "HIVE TIP (TELEOP)", "points": 20, "alliance_scoped": true},
-    {"id": "cell_element_endgame", "label": "POLLEN/NECTAR remaining in upward CELL", "points": 2, "per_element": true, "alliance_scoped": true},
-    {"id": "flower_bottom_nectar", "label": "Bottom NECTAR bonus", "points": 5, "alliance_scoped": true},
-    {"id": "flower_owned_element", "label": "Element in owned FLOWER", "points": 2, "per_element": true, "alliance_scoped": true},
-    {"id": "garden_element", "label": "POLLEN/NECTAR in GARDEN", "points": 1, "per_element": true, "alliance_scoped": true}
+    {"id": "hive_tip_auto", "label": "HIVE TIP (AUTO)", "points": 20, "alliance_scoped": true, "recipient": "hive_alliance", "criteria": "HIVE transitions to the other stable state with the upward CELL facing up and the previously free damper contacting the frame. TIPS are assessed through the end of the MATCH."},
+    {"id": "hive_tip_teleop", "label": "HIVE TIP (TELEOP)", "points": 20, "alliance_scoped": true, "recipient": "hive_alliance", "criteria": "HIVE transitions to the other stable state with the upward CELL facing up and the previously free damper contacting the frame. TIPS are assessed through the end of the MATCH."},
+    {"id": "cell_element_endgame", "label": "POLLEN/NECTAR remaining in upward CELL", "points": 2, "per_element": true, "alliance_scoped": true, "recipient": "cell_alliance", "criteria": "Count elements remaining in the upward-facing CELL after all robots and elements come to rest."},
+    {"id": "flower_bottom_nectar", "label": "Bottom NECTAR bonus", "points": 5, "alliance_scoped": true, "recipient": "nectar_color", "criteria": "Alliance whose color NECTAR is lowest while meeting FLOWER scoring criteria."},
+    {"id": "flower_owned_element", "label": "Element in owned FLOWER", "points": 2, "per_element": true, "alliance_scoped": true, "recipient": "flower_owner", "criteria": "A FLOWER is owned by the alliance with the highest qualifying NECTAR; score each qualifying POLLEN and NECTAR in that FLOWER for its owner, regardless of who placed it."},
+    {"id": "garden_element", "label": "POLLEN/NECTAR in GARDEN", "points": 1, "per_element": true, "alliance_scoped": true, "recipient": "garden_color", "criteria": "Score each qualifying element for the color of the GARDEN, regardless of which alliance placed it."},
+    {"id": "minor_foul", "label": "MINOR FOUL credit to opponent", "points": 5, "alliance_scoped": true, "recipient": "opponent", "criteria": "REFEREE-assessed MINOR FOUL awards 5 match points to the opposing alliance."},
+    {"id": "major_foul", "label": "MAJOR FOUL credit to opponent", "points": 20, "alliance_scoped": true, "recipient": "opponent", "criteria": "REFEREE-assessed MAJOR FOUL awards 20 match points to the opposing alliance."},
+    {"id": "manual_adjustment", "label": "Manual alliance score adjustment", "points": 0, "alliance_scoped": true, "recipient": "selected_alliance", "criteria": "Use only to record an official score correction supported by the event score; add a note."}
   ],
-  "review_note": "Point values follow Manual Section 10.5, Table 10-2 (TU09). Video detections do not infer these achievements or alliance ownership. A reviewer must select event type and count, confirm the clip, and may reassign a robot."
+  "review_note": "Point values follow Manual Section 10.5, Tables 10-2 and 10-3 (TU09). Official scoring includes end-state checks, alliance-dependent ownership, foul credits, and event-specific Ranking Points. Video alone cannot determine referee rulings, ownership, or event count. A human must verify evidence and may attribute a scoring achievement to the alliance that receives its points, separately from the robot believed to have caused it."
 }

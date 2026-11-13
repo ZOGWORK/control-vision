@@ -4,6 +4,7 @@ from PyInstaller.utils.hooks import collect_data_files
 
 root = Path(SPECPATH)
 datas = collect_data_files("control_vision", includes=["config/*.yaml", "config/*.json"])
+datas += [(str(root / "docs" / "BIOBUZZ_RULES.md"), "docs")]
 
 a = Analysis(
     [str(root / "control_vision" / "__main__.py")],
