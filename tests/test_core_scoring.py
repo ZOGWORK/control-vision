@@ -24,15 +24,19 @@ class CoreScoringTests(unittest.TestCase):
                 self.assertEqual(board["alliance_points"], {"red": 5, "blue": 0})
                 self.assertEqual(board["ranking_points"]["red"]["WIN_TIE"], 0)
 
-    def test_empty_completed_review_queue_resolves_zero_zero_tie(self):
-        board = calculate_scoreboard([], self.robots)
+    def test_empty_queue_is_unresolved_but_reviewed_zero_zero_ties(self):
+        empty = calculate_scoreboard([], self.robots)
+        self.assertFalse(empty["match_resolved"])
+        self.assertEqual(empty["ranking_points"]["red"]["WIN_TIE"], 0)
+        board = calculate_scoreboard([{"robot_id": None, "status": "rejected", "points": 0}], self.robots)
         self.assertTrue(board["match_resolved"])
         self.assertEqual(board["ranking_points"]["red"]["WIN_TIE"], 1)
         self.assertEqual(board["ranking_points"]["blue"]["WIN_TIE"], 1)
         self.assertEqual(board["team_points"], {1: 0, 2: 0})
 
     def test_alliance_disqualification_awards_opponent_win_at_zero_points(self):
-        board = calculate_scoreboard([], self.robots, disqualified={"red"})
+        board = calculate_scoreboard([{"robot_id": None, "status": "rejected", "points": 0}],
+                                     self.robots, disqualified={"red"})
         self.assertEqual(board["alliance_points"], {"red": 0, "blue": 0})
         self.assertEqual(board["ranking_points"]["red"]["WIN_TIE"], 0)
         self.assertEqual(board["ranking_points"]["blue"]["WIN_TIE"], 3)
