@@ -17,7 +17,7 @@ def extract(video: Path, output: Path, every_seconds: float = 2.0, max_frames: i
     if not cap.isOpened():
         raise RuntimeError(f"Cannot read {video}")
     fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
+    if not math.isfinite(fps) or fps <= 0:
         cap.release(); raise RuntimeError(f"Invalid FPS in {video}")
     try:
         interval = max(1, round(fps * every_seconds))
