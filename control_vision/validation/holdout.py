@@ -338,7 +338,7 @@ def aggregate(cases: list[dict]) -> dict:
     visible = sum(case["tracking"]["visible_observations"] for case in cases)
     matched = sum(case["tracking"]["matched_observations"] for case in cases)
     identity_correct = sum(case["tracking"]["correct_identity_observations"] for case in cases)
-    per_robot_completeness = [metrics["identity_aware_completeness"]
+    per_robot_completeness = [metrics["identity_aware_completeness"] or 0.0
                               for case in cases for metrics in case["tracking"]["per_robot"].values()]
     scored = sum(case["scoring"]["confirmed_scored_events"] for case in cases)
     attributed = sum(case["scoring"]["correct_robot_attribution"] for case in cases)

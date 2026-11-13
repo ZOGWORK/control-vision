@@ -116,6 +116,20 @@ class HoldoutValidationTests(unittest.TestCase):
                 distinct.append(report)
             self.assertFalse(aggregate(distinct)["summary"]["phase_1_pass"])
 
+    def test_fully_occluded_seeded_robot_fails_metric_without_crashing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            case_path, _, _, _ = self.make_case(Path(folder))
+            truth = json.loads(case_path.read_text(encoding="utf-8"))
+            for row in truth["tracks"]:
+                if row["team_number"] == 5678:
+                    row.update(visible=False, x_ft=None, y_ft=None)
+            case_path.write_text(json.dumps(truth), encoding="utf-8")
+            case = evaluate_case(case_path)
+            self.assertIsNone(case["tracking"]["per_robot"]["5678"]["identity_aware_completeness"])
+            report = aggregate([case])
+            self.assertEqual(report["summary"]["minimum_per_robot_identity_aware_completeness"], 0)
+            self.assertFalse(report["summary"]["phase_1_pass"])
+
     def test_incomplete_truth_cannot_claim_coverage(self):
         with tempfile.TemporaryDirectory() as folder:
             case_path, _, _, _ = self.make_case(Path(folder))
