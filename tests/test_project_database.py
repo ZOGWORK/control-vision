@@ -63,6 +63,18 @@ class ProjectDatabaseTests(unittest.TestCase):
         self.assertEqual((events[0]["id"], events[0]["status"], events[0]["points"]),
                          (event_id, "confirmed", 2))
 
+    def test_reassignment_keeps_independent_simultaneous_robot_candidate(self):
+        other_robot = self.db.add_robot(self.red_video, 1002, "red", 30, 30)
+        first = {"robot_id": self.red_robot, "t_s": 12.0, "source": "zone_crossing"}
+        simultaneous = {"robot_id": other_robot, "t_s": 12.0, "source": "zone_crossing"}
+        reviewed_id = self.db.replace_analysis([self.red_robot, other_robot], [], [first])[0]
+        self.db.review_event(reviewed_id, "confirmed", 2, other_robot, "flower_owned_element")
+        self.db.replace_analysis([self.red_robot, other_robot], [], [first, simultaneous])
+        events = self.db.events_for_video(self.red_video)
+        self.assertEqual(len(events), 2)
+        self.assertEqual({event["origin_robot_id"] for event in events}, {self.red_robot, other_robot})
+        self.assertEqual(next(event for event in events if event["id"] == reviewed_id)["status"], "confirmed")
+
 
 if __name__ == "__main__":
     unittest.main()
