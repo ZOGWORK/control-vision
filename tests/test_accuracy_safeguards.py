@@ -35,6 +35,35 @@ class WorkerDispatchTests(unittest.TestCase):
 
 
 class SeedMatchingTests(unittest.TestCase):
+    def test_yolo_stops_after_thirty_empty_sampled_frames(self):
+        import numpy as np
+        from types import SimpleNamespace
+
+        class Capture:
+            reads = 0
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else 35
+            def read(self):
+                self.reads += 1
+                return (True, np.zeros((480, 640, 3), dtype=np.uint8)) if self.reads <= 35 else (False, None)
+            def release(self): pass
+
+        capture = Capture()
+        model = SimpleNamespace(track=lambda *args, **kwargs: [SimpleNamespace(boxes=[])])
+        with tempfile.TemporaryDirectory() as folder:
+            model_path = Path(folder) / "robot.onnx"
+            model_path.touch()
+            with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=capture), \
+                 patch("ultralytics.YOLO", return_value=model):
+                with self.assertRaisesRegex(RuntimeError, "No robots were detected in the first 30"):
+                    track_video(Path("match.mp4"), model_path,
+                                [[0, 0], [100, 0], [100, 100], [0, 100]], [(1, 90, 90)],
+                                30.0, lambda: False, lambda *_: None,
+                                logging.getLogger("empty-model-test"))
+        self.assertEqual(capture.reads, 30)
+
     def test_goal_candidate_does_not_guess_a_missing_or_distant_robot(self):
         self.assertIsNone(_nearest_robot_id([], 100, 100, 150))
         self.assertIsNone(_nearest_robot_id([(7, 400, 400)], 100, 100, 150))
