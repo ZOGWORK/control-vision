@@ -151,6 +151,8 @@ def calculate_playoff_scoreboard(events, robots, *, disqualified: set[str] | Non
         tie = red == blue
         winner = "red" if red > blue else "blue" if blue > red else None
         resolved = True
-    board["match_resolved"] = resolved
+    # An official DQ can determine the winner while evidence reviews remain
+    # pending. Keep review completion separate from the playoff outcome.
+    board["match_resolved"] = board["match_resolved"] or (match_final and reviewed)
     board["playoff_outcome"] = {"resolved": resolved, "winner": winner, "tie": tie}
     return board

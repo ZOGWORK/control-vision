@@ -19,6 +19,11 @@ class PlayoffScoringTests(unittest.TestCase):
             self.assertEqual(board["ranking_points"][alliance]["total"], 0)
             self.assertEqual(board["ranking_points"][alliance]["WIN_TIE"], 0)
         self.assertEqual(board["team_ranking_points"], {1: 0, 2: 0})
+        pending = calculate_playoff_scoreboard([{"robot_id": 1, "status": "flagged",
+                                                 "points": 20}], self.robots,
+                                               disqualified={"red"})
+        self.assertTrue(pending["playoff_outcome"]["resolved"])
+        self.assertFalse(pending["match_resolved"])
 
     def test_double_dq_requires_chronology_or_simultaneous_ruling(self):
         unknown = calculate_playoff_scoreboard(self.events, self.robots,
