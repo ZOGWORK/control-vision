@@ -245,6 +245,19 @@ class PreviewDialog(QDialog):
         self.finished.connect(lambda _: self.player.stop())
 
 
+def _video_switch_blocked(window) -> bool:
+    for thread in (getattr(window, "_thread", None), getattr(window, "_ocr_thread", None)):
+        try:
+            if thread is not None and thread.isRunning():
+                QMessageBox.information(window, "Analysis in progress",
+                                        "Wait for processing or scoreboard OCR to finish, or cancel processing, before changing projects or videos.")
+                return True
+        except RuntimeError:
+            # Qt may already have deleted a finished OCR thread.
+            continue
+    return False
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -621,6 +634,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Corners and user-drawn zones copied. Confirm they align with this camera view before processing.")
 
     def new_project(self):
+        if _video_switch_blocked(self): return
         folder = QFileDialog.getExistingDirectory(self, "Choose project folder")
         if not folder:
             return
@@ -641,6 +655,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not create project", str(exc))
 
     def open_project(self):
+        if _video_switch_blocked(self): return
         selected, _ = QFileDialog.getOpenFileName(self, "Open Control Vision project", "", "Control Vision project (*.sqlite *.db)")
         if not selected:
             return
@@ -701,6 +716,7 @@ class MainWindow(QMainWindow):
         self.refresh_home()
 
     def import_video(self):
+        if _video_switch_blocked(self): return
         if not self.db or self.project_id is None:
             QMessageBox.information(self, "Create a project", "Create or open a project before importing a video.")
             return
@@ -755,6 +771,7 @@ class MainWindow(QMainWindow):
         self.refresh_home()
 
     def load_saved_video(self):
+        if _video_switch_blocked(self): return
         if not self.db or self.project_id is None:
             QMessageBox.information(self, "Open a project", "Open a project before loading one of its saved videos.")
             return
@@ -772,6 +789,7 @@ class MainWindow(QMainWindow):
         self.load_saved_video_id(int(video["id"]))
 
     def load_saved_video_id(self, video_id: int | None):
+        if _video_switch_blocked(self): return
         if not self.db or self.project_id is None or video_id is None: return
         video = self.db.connection.execute(
             "SELECT id,path,duration_s,width,height,official_red,official_blue,red_disqualified,blue_disqualified,swarm_threshold,pollinator_1_threshold,pollinator_2_threshold,scoreboard_ocr_json,tracking_mode FROM videos WHERE project_id=? AND id=?",

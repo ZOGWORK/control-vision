@@ -179,6 +179,29 @@ class DatabaseMigrationTests(unittest.TestCase):
 
 
 class ShutdownTests(unittest.TestCase):
+    def test_active_analysis_blocks_project_and_video_switches(self):
+        from types import SimpleNamespace
+        from control_vision.app.main_window import MainWindow
+
+        class ActiveThread:
+            def isRunning(self): return True
+
+        for slot in ("_thread", "_ocr_thread"):
+            window = SimpleNamespace(_thread=None, _ocr_thread=None)
+            setattr(window, slot, ActiveThread())
+            with self.subTest(slot=slot), \
+                 patch("control_vision.app.main_window.QMessageBox.information") as notice, \
+                 patch("control_vision.app.main_window.QFileDialog.getExistingDirectory") as folder, \
+                 patch("control_vision.app.main_window.QFileDialog.getOpenFileName") as file:
+                MainWindow.new_project(window)
+                MainWindow.open_project(window)
+                MainWindow.import_video(window)
+                MainWindow.load_saved_video(window)
+                MainWindow.load_saved_video_id(window, 1)
+                self.assertEqual(notice.call_count, 5)
+                folder.assert_not_called()
+                file.assert_not_called()
+
     def test_close_waits_for_processing_before_database_close(self):
         from types import SimpleNamespace
         from control_vision.app.main_window import MainWindow
