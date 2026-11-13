@@ -141,6 +141,8 @@ def evaluate_case(case_file: Path) -> dict:
         video = connection.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
         if video is None:
             raise ValueError(f"Video {video_id} does not exist in {db_path}.")
+        if video["analysis_status"] != "ready":
+            raise ValueError("The holdout video has an unfinished or failed analysis; process it successfully first.")
         robots = connection.execute("SELECT * FROM robots WHERE video_id=?", (video_id,)).fetchall()
         robot_by_id = {row["id"]: row for row in robots}
         team_numbers = {int(row["team_number"]) for row in robots}

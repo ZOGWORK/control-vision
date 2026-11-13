@@ -152,6 +152,16 @@ class HoldoutValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "nonnegative whole numbers"):
                 evaluate_case(case_path)
 
+    def test_failed_rerun_cannot_reuse_stale_saved_tracks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            case_path, _, _, _ = self.make_case(Path(folder))
+            truth = json.loads(case_path.read_text(encoding="utf-8"))
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            db.set_analysis_status(truth["video_id"], "failed")
+            db.close()
+            with self.assertRaisesRegex(ValueError, "failed analysis"):
+                evaluate_case(case_path)
+
     def test_incomplete_truth_cannot_claim_coverage(self):
         with tempfile.TemporaryDirectory() as folder:
             case_path, _, _, _ = self.make_case(Path(folder))
