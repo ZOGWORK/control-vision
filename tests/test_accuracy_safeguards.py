@@ -202,6 +202,14 @@ class ShutdownTests(unittest.TestCase):
                 folder.assert_not_called()
                 file.assert_not_called()
 
+        # A queued completion callback can outlive QThread.isRunning().
+        window = SimpleNamespace(_thread=None, _ocr_thread=None, _processing_active=True)
+        with patch("control_vision.app.main_window.QMessageBox.information") as notice, \
+             patch("control_vision.app.main_window.QFileDialog.getExistingDirectory") as folder:
+            MainWindow.new_project(window)
+            notice.assert_called_once()
+            folder.assert_not_called()
+
     def test_close_waits_for_processing_before_database_close(self):
         from types import SimpleNamespace
         from control_vision.app.main_window import MainWindow

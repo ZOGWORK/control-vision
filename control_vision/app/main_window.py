@@ -246,6 +246,10 @@ class PreviewDialog(QDialog):
 
 
 def _video_switch_blocked(window) -> bool:
+    if getattr(window, "_processing_active", False) or getattr(window, "_ocr_active", False):
+        QMessageBox.information(window, "Analysis in progress",
+                                "Wait for processing or scoreboard OCR to finish, or cancel processing, before changing projects or videos.")
+        return True
     for thread in (getattr(window, "_thread", None), getattr(window, "_ocr_thread", None)):
         try:
             if thread is not None and thread.isRunning():
@@ -478,8 +482,10 @@ class MainWindow(QMainWindow):
         self._mode = None
         self._worker = None
         self._thread = None
+        self._processing_active = False
         self._ocr_worker = None
         self._ocr_thread = None
+        self._ocr_active = False
         self.scoreboard_ocr = None
 
     def project_dir(self) -> Path | None:
@@ -924,6 +930,7 @@ class MainWindow(QMainWindow):
         self._worker.done.connect(self.processing_done)
         self._worker.failed.connect(self.processing_failed)
         self._worker.done.connect(self._thread.quit); self._worker.failed.connect(self._thread.quit)
+        self._processing_active = True
         self._thread.start()
 
     def show_progress(self, stage, percent, detail):
@@ -955,6 +962,7 @@ class MainWindow(QMainWindow):
         self.refresh_result_tables()
         self.process_btn.setEnabled(True)
         if self.capture: self.timer.start()
+        self._processing_active = False
 
     def refresh_result_tables(self):
         if not self.db or self.video_id is None: return
@@ -1130,6 +1138,7 @@ class MainWindow(QMainWindow):
         self._ocr_worker.done.connect(self._ocr_thread.quit)
         self._ocr_worker.failed.connect(self._ocr_thread.quit)
         self._ocr_thread.finished.connect(self._ocr_thread.deleteLater)
+        self._ocr_active = True
         self._ocr_thread.start()
 
     def show_ocr_progress(self, percent: float, detail: str):
@@ -1157,10 +1166,12 @@ class MainWindow(QMainWindow):
             self.db.set_scoreboard_ocr(self.video_id, result)
         self.read_scoreboard_btn.setEnabled(True)
         self.show_scoreboard_ocr(result)
+        self._ocr_active = False
 
     def scoreboard_ocr_failed(self, message: str):
         self.read_scoreboard_btn.setEnabled(True)
         self.scoreboard_ocr_status.setText(f"Scoreboard OCR did not finish: {message}")
+        self._ocr_active = False
 
     def apply_scoreboard_ocr(self):
         if not self.scoreboard_ocr:
@@ -1278,6 +1289,7 @@ class MainWindow(QMainWindow):
         self.progress_label.setText(message)
         self.log_view.addItem(message)
         self.process_btn.setEnabled(True)
+        self._processing_active = False
 
     def cancel_process(self):
         if self._worker: self._worker.cancel(); self.statusBar().showMessage("Cancelling after the current frame…")
