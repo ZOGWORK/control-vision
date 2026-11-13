@@ -38,6 +38,7 @@ class BiobuzzRulesTests(unittest.TestCase):
         self.assertEqual(dq["alliance_points"], {"red": 0, "blue": 0})
         self.assertEqual(dq["team_points"][1], 0)
         self.assertEqual(dq["ranking_points"]["red"]["total"], 0)
+        self.assertEqual(dq["ranking_points"]["blue"]["WIN_TIE"], 3)
 
     def test_reviewed_alliance_overrides_stale_inferred_alliance(self):
         event = [{"robot_id": 1, "status": "confirmed", "points": 5,

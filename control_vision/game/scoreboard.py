@@ -67,6 +67,8 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
             outcome = 0
         elif not match_resolved:
             outcome = 0
+        elif ("blue" if alliance == "red" else "red") in disqualified:
+            outcome = 3
         elif alliance_scores[alliance] > alliance_scores["blue" if alliance == "red" else "red"]:
             outcome = 3
         elif alliance_scores[alliance] == alliance_scores["blue" if alliance == "red" else "red"]:
