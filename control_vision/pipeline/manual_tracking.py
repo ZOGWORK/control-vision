@@ -186,13 +186,22 @@ def track_seeded_video(video_path: Path, corners: list[list[float]],
             frame_index += 1
     finally:
         cap.release()
-    photo_rows = []
-    if photos_dir:
-        photos_dir.mkdir(parents=True, exist_ok=True)
-        for rid, (_, _, t_s, crop) in best_photos.items():
-            if crop.shape[0] >= 32 and crop.shape[1] >= 48:
-                path = photos_dir / f"robot-{rid}.png"
-                if cv2.imwrite(str(path), crop):
-                    photo_rows.append((rid, path, t_s))
+    photo_rows = _save_best_photos(best_photos, photos_dir, logger)
     logger.info("Manual tracker seed positions: %s; track points: %d; photos: %d", seed_anchors, len(rows), len(photo_rows))
     return rows, photo_rows, []
+
+
+def _save_best_photos(best_photos, photos_dir, logger):
+    photo_rows = []
+    if photos_dir is None:
+        return photo_rows
+    photos_dir.mkdir(parents=True, exist_ok=True)
+    for rid, (_, _, t_s, crop) in best_photos.items():
+        if crop.shape[0] < 200 or crop.shape[1] < 200:
+            logger.info("Robot %s preview photo skipped: best crop is %dx%d, below 200x200",
+                        rid, crop.shape[1], crop.shape[0])
+            continue
+        path = photos_dir / f"robot-{rid}.png"
+        if cv2.imwrite(str(path), crop):
+            photo_rows.append((rid, path, t_s))
+    return photo_rows

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
 from control_vision.pipeline.tracking import _match_initial_seeds
 from control_vision.pipeline.ingest import probe_video
+from control_vision.pipeline.manual_tracking import _save_best_photos
 from control_vision.pipeline.zones import zone_at
 from control_vision.game.scoreboard import calculate_scoreboard
 from control_vision.storage.database import ProjectDatabase, SCHEMA
@@ -166,6 +167,20 @@ class VideoIngestTests(unittest.TestCase):
             metadata = probe_video(Path("playable.mp4"))
         self.assertEqual(metadata["duration_s"], 10)
         self.assertTrue(capture.released)
+
+
+class PreviewPhotoTests(unittest.TestCase):
+    def test_only_full_size_crops_are_written(self):
+        import logging
+        import numpy as np
+        with tempfile.TemporaryDirectory() as folder:
+            photos = _save_best_photos({
+                1: (1, 1.0, 0.0, np.zeros((199, 250, 3), dtype=np.uint8)),
+                2: (1, 1.0, 0.0, np.zeros((200, 200, 3), dtype=np.uint8)),
+            }, Path(folder), logging.getLogger("preview-photo-test"))
+            self.assertEqual([row[0] for row in photos], [2])
+            self.assertFalse((Path(folder) / "robot-1.png").exists())
+            self.assertTrue((Path(folder) / "robot-2.png").is_file())
 
 
 if __name__ == "__main__":
