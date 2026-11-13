@@ -31,3 +31,9 @@ You upload a video of an FTC match and it tells you what happened — per robot,
 
 - Every change via PR. Code review must give 5/5 before merge. Never merge below 5/5.
 - One feature per PR. Base main only. No stacked PRs.
+
+## License
+
+Control Vision is licensed under the [GNU Affero General Public License v3.0](LICENSE). The complete corresponding source for a distributed build is available in this repository; release artifacts must identify the source commit used to build them.
+
+This project uses [Ultralytics YOLO](https://github.com/ultralytics/ultralytics), which is offered under AGPL-3.0 or an Enterprise license. Any released model weights must include their own provenance and licensing information.
