@@ -40,6 +40,13 @@ class CoreScoringTests(unittest.TestCase):
         board = calculate_scoreboard([event], self.robots)
         self.assertEqual(board["alliance_points"], {"red": 0, "blue": 5})
 
+    def test_one_shot_event_and_robot_iterators_score_once(self):
+        board = calculate_scoreboard(iter([{"robot_id": 1, "status": "confirmed", "points": 5}]),
+                                     iter(self.robots))
+        self.assertEqual(board["alliance_points"], {"red": 5, "blue": 0})
+        self.assertEqual(board["team_points"][1], 5)
+        self.assertIn(1, board["team_ranking_points"])
+
     def test_disqualification_clears_alliance_and_robot_points(self):
         events = [{"robot_id": 1, "status": "confirmed", "points": 20, "event_type": "park_teleop"},
                   {"robot_id": 2, "status": "confirmed", "points": 5, "event_type": "nectar_floor"}]

@@ -21,6 +21,8 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
     Alliance attribution comes from scoring_alliance when set, otherwise from
     the robot's alliance. Disqualification is entered by the human reviewer.
     """
+    events = list(events)
+    robots = list(robots)
     disqualified = disqualified or set()
     match_resolved = all(event["status"] in {"confirmed", "rejected"} for event in events)
     robot_by_id = {int(robot["id"]): robot for robot in robots}
