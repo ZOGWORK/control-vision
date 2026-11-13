@@ -127,6 +127,15 @@ class ProjectDatabase:
                     "AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.scoring_event_id=scoring_events.id)",
                     robot_ids,
                 )
+                video_ids = {row[0] for row in self.connection.execute(
+                    f"SELECT DISTINCT video_id FROM robots WHERE id IN ({placeholders})", robot_ids)}
+                for video_id in video_ids:
+                    self.connection.execute(
+                        "DELETE FROM scoring_events WHERE video_id=? AND origin_robot_id=0 "
+                        "AND source IN ('zone_crossing','goal_roi') AND status='flagged' "
+                        "AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.scoring_event_id=scoring_events.id)",
+                        (video_id,),
+                    )
                 self.connection.execute(f"DELETE FROM cycles WHERE robot_id IN ({placeholders})", robot_ids)
             self.connection.executemany(
                 "INSERT INTO cycles(robot_id,start_t_s,end_t_s,pickup_zone,scoring_zone,confidence) VALUES (?,?,?,?,?,?)",
@@ -134,12 +143,18 @@ class ProjectDatabase:
             )
             for event in events:
                 source = event.get("source", "zone_crossing")
-                video_id = self.connection.execute("SELECT video_id FROM robots WHERE id=?", (event["robot_id"],)).fetchone()[0]
+                candidate_robot_id = event.get("robot_id")
+                context_robot_id = candidate_robot_id if candidate_robot_id is not None else (robot_ids[0] if robot_ids else None)
+                video_row = self.connection.execute("SELECT video_id FROM robots WHERE id=?", (context_robot_id,)).fetchone()
+                if video_row is None:
+                    raise ValueError("A generated event needs a robot or video context.")
+                video_id = video_row[0]
+                origin_robot_id = candidate_robot_id if candidate_robot_id is not None else 0
                 retained = self.connection.execute(
                     "SELECT id FROM scoring_events WHERE video_id=? AND origin_robot_id=? AND source=? AND ABS(t_s-?)<=0.5 LIMIT 1",
-                    (video_id, event["robot_id"], source, event["t_s"]),
+                    (video_id, origin_robot_id, source, event["t_s"]),
                 ).fetchone()
-                if not retained:
+                if not retained and candidate_robot_id is not None:
                     # Legacy reviewed events predate origin_robot_id. An exact,
                     # unique timestamp match preserves them after reassignment.
                     legacy = self.connection.execute(
@@ -152,7 +167,7 @@ class ProjectDatabase:
                     continue
                 cursor = self.connection.execute(
                     "INSERT INTO scoring_events(robot_id,video_id,origin_robot_id,t_s,points,confidence,status,source,event_type) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (event["robot_id"], video_id, event["robot_id"], event["t_s"],event.get("points",0),event.get("confidence","low"),event.get("status","flagged"),source,event.get("event_type","unclassified")),
+                    (candidate_robot_id, video_id, origin_robot_id, event["t_s"],event.get("points",0),event.get("confidence","low"),event.get("status","flagged"),source,event.get("event_type","unclassified")),
                 )
                 event_ids.append(int(cursor.lastrowid))
         return event_ids

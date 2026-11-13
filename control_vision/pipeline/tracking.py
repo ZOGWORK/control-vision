@@ -20,6 +20,14 @@ def _new_roi_candidate(x: float, y: float, t_s: float,
                for old_x, old_y, _ in recent)
 
 
+def _nearest_robot_id(positions, x: float, y: float, max_distance: float):
+    if not positions:
+        return None
+    robot_id, robot_x, robot_y = min(
+        positions, key=lambda pos: (pos[1] - x) ** 2 + (pos[2] - y) ** 2)
+    return robot_id if (robot_x - x) ** 2 + (robot_y - y) ** 2 <= max_distance ** 2 else None
+
+
 def _match_initial_seeds(seed_points, detections, assigned_robot_ids, assigned_track_ids, max_distance):
     """One-to-one seed assignment with a hard distance gate; never guess late entrants."""
     remaining = [seed for seed in seed_points if seed[0] not in assigned_robot_ids]
@@ -200,10 +208,8 @@ def track_video(
                     for ball_x, ball_y, ball_conf in roi_balls[stable_roi_count:current_roi_count]:
                         if not _new_roi_candidate(ball_x, ball_y, t_s, recent_roi_candidates):
                             continue
-                        if robot_positions:
-                            robot_id = min(robot_positions, key=lambda pos: (pos[1] - ball_x) ** 2 + (pos[2] - ball_y) ** 2)[0]
-                        else:
-                            robot_id = robot_ids[0]
+                        robot_id = _nearest_robot_id(robot_positions, ball_x, ball_y,
+                                                     max(100.0, min(frame.shape[:2]) * 0.25))
                         scoring_candidates.append({"robot_id": robot_id, "t_s": t_s, "points": 0,
                                                    "confidence": "high" if ball_conf >= 0.7 else "medium",
                                                    "status": "flagged", "source": "goal_roi", "event_type": "unclassified"})

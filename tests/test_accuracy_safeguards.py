@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
-from control_vision.pipeline.tracking import _match_initial_seeds, _new_roi_candidate
+from control_vision.pipeline.tracking import _match_initial_seeds, _new_roi_candidate, _nearest_robot_id
 from control_vision.pipeline.tracking import track_video
 from control_vision.pipeline.ingest import probe_video
 from control_vision.pipeline.manual_tracking import _photo_crop_bounds, _save_best_photos
@@ -35,6 +35,11 @@ class WorkerDispatchTests(unittest.TestCase):
 
 
 class SeedMatchingTests(unittest.TestCase):
+    def test_goal_candidate_does_not_guess_a_missing_or_distant_robot(self):
+        self.assertIsNone(_nearest_robot_id([], 100, 100, 150))
+        self.assertIsNone(_nearest_robot_id([(7, 400, 400)], 100, 100, 150))
+        self.assertEqual(_nearest_robot_id([(7, 120, 120)], 100, 100, 150), 7)
+
     def test_yolo_track_outside_calibrated_field_is_not_saved(self):
         import numpy as np
         from types import SimpleNamespace
@@ -148,6 +153,23 @@ class ScoreConsensusTests(unittest.TestCase):
 
 
 class DatabaseMigrationTests(unittest.TestCase):
+    def test_unassigned_goal_candidate_survives_review_and_reprocessing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            project_id = db.add_project("unassigned")
+            video_id = db.add_video(project_id, Path("match.mp4"),
+                                    {"duration_s": 120, "fps": 30, "width": 1280, "height": 720})
+            robot_id = db.add_robot(video_id, 1234, "red", 10, 10)
+            candidate = {"robot_id": None, "t_s": 12.0, "source": "goal_roi", "status": "flagged"}
+            event_id = db.replace_analysis([robot_id], [], [candidate])[0]
+            row = db.events_for_video(video_id)[0]
+            self.assertIsNone(row["robot_id"])
+            self.assertEqual(row["origin_robot_id"], 0)
+            db.review_event(event_id, "confirmed", 2, robot_id, "flower_element", "medium", "red")
+            self.assertEqual(db.replace_analysis([robot_id], [], [candidate]), [])
+            self.assertEqual(len(db.events_for_video(video_id)), 1)
+            db.close()
+
     def test_old_project_gets_default_yolo_mode_and_persists_new_mode(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "old-project.sqlite"

@@ -970,6 +970,7 @@ class MainWindow(QMainWindow):
         self.events = self.db.events_for_video(self.video_id)
         robots = self.db.robots_for_video(self.video_id)
         self.review_robot.clear()
+        self.review_robot.addItem("Unassigned — choose a robot only if the video supports it", None)
         for robot in robots:
             self.review_robot.addItem(f"{robot['team_number']} ({robot['alliance']})", robot["id"])
         self.cycles_table.setRowCount(len(self.cycles))
