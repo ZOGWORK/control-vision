@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 import cv2
@@ -38,6 +39,18 @@ class TrainingDatasetTests(unittest.TestCase):
     def test_portable_yaml_relative_dataset_path(self):
         self.config["path"] = "."
         self.assertEqual(validate_dataset(self.data, self.config, 1), self.root)
+
+    def test_ambiguous_relative_dataset_path_is_rejected(self):
+        other = self.root / "other"
+        (other / "images" / "train").mkdir(parents=True)
+        self.config["path"] = "."
+        previous = Path.cwd()
+        try:
+            os.chdir(other)
+            with self.assertRaisesRegex(ValueError, "Ambiguous relative dataset path"):
+                validate_dataset(self.data, self.config, 1)
+        finally:
+            os.chdir(previous)
 
     def test_exact_image_leakage_is_rejected(self):
         self._sample("val", "two", self._image(30), "0 0.4 0.4 0.2 0.2\n")

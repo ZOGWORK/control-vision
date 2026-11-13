@@ -6,6 +6,7 @@ import json
 import math
 import re
 import shutil
+import tempfile
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
@@ -42,7 +43,11 @@ def _dataset_root(data: Path, config: dict) -> Path:
     from_cwd = configured.resolve()
     from_yaml = (data.resolve().parent / configured).resolve()
     train_ref = config.get("train", "")
-    if isinstance(train_ref, str) and (from_cwd / train_ref).is_dir():
+    cwd_has_train = isinstance(train_ref, str) and (from_cwd / train_ref).is_dir()
+    yaml_has_train = isinstance(train_ref, str) and (from_yaml / train_ref).is_dir()
+    if cwd_has_train and yaml_has_train and from_cwd != from_yaml:
+        raise ValueError("Ambiguous relative dataset path; use an absolute path in data.yaml")
+    if cwd_has_train:
         return from_cwd
     return from_yaml
 
@@ -150,8 +155,14 @@ def main():
     try:
         with reserve_model_version(Path("models"), args.version) as (onnx_path, metadata_path):
             model = YOLO(str(args.base_weights))
-            run = model.train(data=str(args.data), epochs=args.epochs, batch=args.batch, imgsz=args.imgsz,
-                              lr0=0.01, patience=20, device=args.device, project="runs/training", name=f"biobuzz-{args.version}")
+            # Ultralytics resolves a relative `path` against its process CWD.
+            # Pass the exact dataset root that was validated, even when the
+            # original YAML was written relative to its own directory.
+            with tempfile.TemporaryDirectory(prefix="control-vision-data-") as temp:
+                normalized_data = Path(temp) / "data.yaml"
+                normalized_data.write_text(yaml.safe_dump({**config, "path": str(data_root)}), encoding="utf-8")
+                run = model.train(data=str(normalized_data), epochs=args.epochs, batch=args.batch, imgsz=args.imgsz,
+                                  lr0=0.01, patience=20, device=args.device, project="runs/training", name=f"biobuzz-{args.version}")
             trainer = model.trainer
             metrics = run.results_dict if hasattr(run, "results_dict") else run if isinstance(run, dict) else {}
             best_pt = Path(getattr(trainer, "best", Path(trainer.save_dir) / "weights" / "best.pt"))
