@@ -26,8 +26,10 @@ def probe_video(path: Path) -> dict[str, float | int]:
                 payload = json.loads(result.stdout)
                 stream = payload["streams"][0]
                 fps = _fraction(stream.get("avg_frame_rate") or stream.get("r_frame_rate") or "0/1")
-                duration = float(stream.get("duration") or payload.get("format", {}).get("duration") or 0)
-                if duration <= 0 and fps > 0:
+                duration = _positive_float(stream.get("duration"))
+                if duration is None:
+                    duration = _positive_float(payload.get("format", {}).get("duration"))
+                if duration is None and fps > 0:
                     cap = cv2.VideoCapture(str(path))
                     duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps
                     cap.release()
@@ -50,3 +52,11 @@ def _fraction(value: str) -> float:
     numerator, denominator = value.split("/", 1)
     denominator_value = float(denominator)
     return float(numerator) / denominator_value if denominator_value else 0.0
+
+
+def _positive_float(value) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None

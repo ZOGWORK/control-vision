@@ -2,9 +2,11 @@ import unittest
 import sqlite3
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
 from control_vision.pipeline.tracking import _match_initial_seeds
+from control_vision.pipeline.ingest import probe_video
 from control_vision.storage.database import ProjectDatabase, SCHEMA
 
 
@@ -73,6 +75,29 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(db.connection.execute(
                 "SELECT tracking_mode FROM videos WHERE id=?", (video_id,)).fetchone()[0], "seeded_optical_flow")
             db.close()
+
+
+class VideoIngestTests(unittest.TestCase):
+    def test_nonnumeric_stream_duration_uses_readable_video_frame_count(self):
+        class Capture:
+            released = False
+            def get(self, prop):
+                import cv2
+                return {cv2.CAP_PROP_FRAME_COUNT: 300, cv2.CAP_PROP_FPS: 30}[prop]
+            def release(self):
+                self.released = True
+
+        capture = Capture()
+        result = type("Result", (), {"returncode": 0, "stdout": (
+            '{"streams":[{"avg_frame_rate":"30/1","duration":"N/A",'
+            '"width":1280,"height":720}]}'
+        )})()
+        with patch("control_vision.pipeline.ingest.shutil.which", return_value="ffprobe"), \
+             patch("control_vision.pipeline.ingest.subprocess.run", return_value=result), \
+             patch("control_vision.pipeline.ingest.cv2.VideoCapture", return_value=capture):
+            metadata = probe_video(Path("playable.mp4"))
+        self.assertEqual(metadata["duration_s"], 10)
+        self.assertTrue(capture.released)
 
 
 if __name__ == "__main__":
