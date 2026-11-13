@@ -1,6 +1,7 @@
 import unittest
 import sqlite3
 import tempfile
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,25 @@ from control_vision.pipeline.manual_tracking import _photo_crop_bounds, _save_be
 from control_vision.pipeline.zones import zone_at
 from control_vision.game.scoreboard import calculate_scoreboard
 from control_vision.storage.database import ProjectDatabase, SCHEMA
+from control_vision.app.main_window import ProcessingWorker
+
+
+class WorkerDispatchTests(unittest.TestCase):
+    def test_seeded_mode_passes_progress_logger_and_photos_in_order(self):
+        logger = logging.getLogger("control-vision-worker-test")
+        photos_dir = Path("photos")
+        worker = ProcessingWorker((Path("match.mp4"), Path("unused.onnx"), [], [(1, 20, 30)],
+                                   8.0, logger, photos_dir, 0.25, None, "",
+                                   "seeded_optical_flow", {1: "red"}))
+        with patch("control_vision.app.main_window.track_seeded_video", autospec=True,
+                   return_value=([], [], [])) as tracker:
+            worker.run()
+        args = tracker.call_args.args
+        self.assertEqual(args[:5], (Path("match.mp4"), [], [(1, 20, 30)], {1: "red"}, 8.0))
+        self.assertTrue(callable(args[5]))
+        self.assertTrue(callable(args[6]))
+        self.assertIs(args[7], logger)
+        self.assertEqual(args[8], photos_dir)
 
 
 class SeedMatchingTests(unittest.TestCase):
