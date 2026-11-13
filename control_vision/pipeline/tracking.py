@@ -20,6 +20,31 @@ def _new_roi_candidate(x: float, y: float, t_s: float,
                for old_x, old_y, _ in recent)
 
 
+def _unmatched_roi_detections(detections, known_positions, max_distance: float = 35.0):
+    """Return ROI detections that cannot be spatially matched to known elements.
+
+    Detector output ordering is not stable across frames. Greedy nearest-neighbor
+    matching is sufficient here because this ROI contains a small number of game
+    elements and prevents an existing element at a different list index from being
+    reported as newly arrived.
+    """
+    pairs = []
+    for detection_index, detection in enumerate(detections):
+        x, y = detection[:2]
+        for known_index, (known_x, known_y) in enumerate(known_positions):
+            distance_sq = (x - known_x) ** 2 + (y - known_y) ** 2
+            if distance_sq <= max_distance ** 2:
+                pairs.append((distance_sq, detection_index, known_index))
+    pairs.sort()
+    matched_detections, matched_known = set(), set()
+    for _, detection_index, known_index in pairs:
+        if detection_index not in matched_detections and known_index not in matched_known:
+            matched_detections.add(detection_index)
+            matched_known.add(known_index)
+    return [detection for index, detection in enumerate(detections)
+            if index not in matched_detections]
+
+
 def _nearest_robot_id(positions, x: float, y: float, max_distance: float):
     if not positions:
         return None
@@ -130,6 +155,7 @@ def track_video(
     empty = 0
     consecutive_inference_failures = 0
     stable_roi_count = 0
+    stable_roi_positions: list[tuple[float, float]] = []
     pending_roi_count = 0
     pending_roi_since: float | None = None
     try:
@@ -206,11 +232,13 @@ def track_video(
                 if previous is None or (area, conf) > (previous[0], previous[1]):
                     best_photos[robot_id] = (area, conf, t_s, crop)
             current_roi_count = len(roi_balls)
-            if goal_roi and current_roi_count > stable_roi_count:
-                if current_roi_count != pending_roi_count:
-                    pending_roi_count, pending_roi_since = current_roi_count, t_s
+            current_roi_positions = [(x, y) for x, y, _ in roi_balls]
+            new_roi_balls = _unmatched_roi_detections(roi_balls, stable_roi_positions)
+            if goal_roi and new_roi_balls:
+                if len(new_roi_balls) != pending_roi_count:
+                    pending_roi_count, pending_roi_since = len(new_roi_balls), t_s
                 elif pending_roi_since is not None and t_s - pending_roi_since >= 0.5:
-                    for ball_x, ball_y, ball_conf in roi_balls[stable_roi_count:current_roi_count]:
+                    for ball_x, ball_y, ball_conf in new_roi_balls:
                         if not _new_roi_candidate(ball_x, ball_y, t_s, recent_roi_candidates):
                             continue
                         robot_id = _nearest_robot_id(robot_positions, ball_x, ball_y,
@@ -220,13 +248,15 @@ def track_video(
                                                    "status": "flagged", "source": "goal_roi", "event_type": "unclassified"})
                         recent_roi_candidates.append((ball_x, ball_y, t_s))
                     stable_roi_count = current_roi_count
-                    pending_roi_count, pending_roi_since = stable_roi_count, None
-            elif goal_roi and current_roi_count < pending_roi_count:
-                pending_roi_count = current_roi_count
-                pending_roi_since = t_s if current_roi_count > stable_roi_count else None
-            if goal_roi and current_roi_count < stable_roi_count:
-                stable_roi_count = current_roi_count
-                pending_roi_count, pending_roi_since = current_roi_count, None
+                    stable_roi_positions = current_roi_positions
+                    pending_roi_count, pending_roi_since = 0, None
+            elif goal_roi:
+                if current_roi_count < stable_roi_count:
+                    # Elements that leave the scoring ROI free up positions for
+                    # the next arrival; they do not erase candidate history.
+                    stable_roi_count = current_roi_count
+                    stable_roi_positions = current_roi_positions
+                pending_roi_count, pending_roi_since = 0, None
             sampled += 1
             progress("Detect and track", min(100.0, 100 * sampled / sampled_total), f"Processed {sampled:,} sampled frames")
             frame_index += 1

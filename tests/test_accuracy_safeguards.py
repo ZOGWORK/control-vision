@@ -6,7 +6,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
-from control_vision.pipeline.tracking import _match_initial_seeds, _new_roi_candidate, _nearest_robot_id
+from control_vision.pipeline.tracking import (
+    _match_initial_seeds, _new_roi_candidate, _nearest_robot_id,
+    _unmatched_roi_detections,
+)
 from control_vision.pipeline.tracking import track_video
 from control_vision.pipeline.ingest import probe_video
 from control_vision.pipeline.manual_tracking import _photo_crop_bounds, _save_best_photos
@@ -171,6 +174,70 @@ class SeedMatchingTests(unittest.TestCase):
         self.assertFalse(_new_roi_candidate(105.0, 99.0, 2.0, recent))
         self.assertTrue(_new_roi_candidate(180.0, 100.0, 2.0, recent))
         self.assertTrue(_new_roi_candidate(100.0, 100.0, 4.0, recent))
+
+    def test_new_goal_element_is_found_when_detector_reorders_roi_detections(self):
+        # Previously known A shifts slightly; newly arrived B is listed first.
+        known = [(100.0, 100.0)]
+        current = [(200.0, 100.0, 0.91), (102.0, 101.0, 0.88)]
+        self.assertEqual(_unmatched_roi_detections(current, known), [current[0]])
+
+    def test_new_goal_element_is_found_when_roi_count_stays_the_same(self):
+        # A can leave as B enters. Count deltas alone miss this replacement.
+        known = [(100.0, 100.0)]
+        current = [(180.0, 100.0, 0.93)]
+        self.assertEqual(_unmatched_roi_detections(current, known), current)
+
+    def test_track_video_flags_new_roi_element_after_detector_reorders_list(self):
+        import numpy as np
+        from types import SimpleNamespace
+
+        class Capture:
+            reads = 0
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else 35
+            def read(self):
+                self.reads += 1
+                if self.reads <= 35:
+                    return True, np.zeros((100, 100, 3), dtype=np.uint8)
+                return False, None
+            def release(self): pass
+
+        def box(class_id, x, y, track_id):
+            return SimpleNamespace(cls=[class_id], xyxy=np.array([[x - 5, y - 5, x + 5, y + 5]]),
+                                   conf=[0.9], id=[track_id])
+
+        frame_index = 0
+        def detect(*args, **kwargs):
+            nonlocal frame_index
+            robot = SimpleNamespace(cls=[0], xyxy=np.array([[10, 10, 30, 50]]),
+                                    conf=[0.95], id=[1])
+            if frame_index < 16:
+                balls = [box(1, 45, 45, 10)]
+            else:
+                # Same existing A, now listed after newly arrived B.
+                balls = [box(1, 90, 45, 11), box(1, 45, 45, 10)]
+            frame_index += 1
+            return [SimpleNamespace(boxes=[robot, *balls])]
+
+        model = SimpleNamespace(track=detect)
+        logger = logging.getLogger("roi-reorder-integration-test")
+        with tempfile.TemporaryDirectory() as folder:
+            model_path = Path(folder) / "robot.onnx"
+            model_path.touch()
+            with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=Capture()), \
+                 patch("ultralytics.YOLO", return_value=model):
+                _, _, events = track_video(
+                    Path("match.mp4"), model_path,
+                    [[0, 0], [100, 0], [100, 100], [0, 100]], [(1, 20, 50)],
+                    30.0, lambda: False, lambda *_: None, logger,
+                    goal_roi=[[0, 0], [100, 0], [100, 100], [0, 100]],
+                )
+
+        self.assertEqual(len(events), 2)
+        self.assertAlmostEqual(events[0]["t_s"], 0.5)
+        self.assertGreaterEqual(events[1]["t_s"], 1.0)
 
     def test_assigns_one_to_one_by_minimum_total_distance(self):
         seeds = [(10, 100, 100), (20, 200, 100)]
