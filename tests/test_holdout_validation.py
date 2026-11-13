@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from copy import deepcopy
@@ -81,6 +84,28 @@ class HoldoutValidationTests(unittest.TestCase):
             self.assertTrue(aggregate(distinct)["summary"]["brief_targets_met"])
             distinct[0]["tracking_mode"] = "seeded_optical_flow"
             self.assertFalse(aggregate(distinct)["summary"]["brief_targets_met"])
+
+    def test_command_line_template_and_report_from_another_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            case_path, _, _, _ = self.make_case(root)
+            environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+            template_path = root / "template.json"
+            command = [sys.executable, "-m", "control_vision.validation.holdout"]
+            subprocess.run(command + ["--make-template", "--project", "project.sqlite",
+                                      "--video-id", "1", "--sample-fps", "2",
+                                      "--output", "template.json"],
+                           cwd=root, env=environment, check=True, capture_output=True,
+                           text=True, timeout=30)
+            template = json.loads(template_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(template["tracks"]), 4)
+            self.assertIsNone(template["tracks"][0]["visible"])
+            subprocess.run(command + [case_path.name, "--output", "report.json"],
+                           cwd=root, env=environment, check=True, capture_output=True,
+                           text=True, timeout=30)
+            report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["summary"]["match_count"], 1)
+            self.assertFalse(report["summary"]["brief_targets_met"])
 
     def test_identity_switches_are_counted_even_when_tracks_are_present(self):
         with tempfile.TemporaryDirectory() as folder:
