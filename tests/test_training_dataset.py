@@ -89,6 +89,7 @@ class TrainingDatasetTests(unittest.TestCase):
         self.assertEqual(audit["mode"], "match_audited")
         self.assertEqual(audit["matches"], 2)
         self.assertEqual(len(audit["manifest_sha256"]), 64)
+        self.assertEqual(training_split_provenance(self.root, self.config, exploratory=True), audit)
 
     def test_manifest_mode_rejects_nonstandard_training_directories(self):
         config = {**self.config, "val": "images/train"}

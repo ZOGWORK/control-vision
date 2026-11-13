@@ -110,7 +110,7 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
 
 def training_split_provenance(root: Path, config: dict, exploratory: bool = False) -> dict:
     """Require match-level split provenance for a normal training run."""
-    if exploratory:
+    if exploratory and not (root / "split_manifest.csv").is_file():
         return {"mode": "exploratory_unverified", "manifest_sha256": None}
     for split in ("train", "val"):
         configured = Path(config[split])
