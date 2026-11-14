@@ -56,7 +56,7 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
                 if robot["alliance"] == alliance:
                     team_points[int(robot["id"])] = 0
 
-    ranking_points = {"red": {}, "blue": {}}
+    ranking_points: dict[str, dict[str, int]] = {"red": {}, "blue": {}}
     for alliance in ("red", "blue"):
         swarm = int(swarm_points[alliance] >= swarm_threshold)
         p1 = int(hive_tips[alliance] >= pollinator_1_threshold)
