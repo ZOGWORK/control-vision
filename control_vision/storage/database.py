@@ -37,6 +37,7 @@ class ProjectDatabase:
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript(SCHEMA)
         video_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(videos)")}
+        added_analysis_status = "analysis_status" not in video_columns
         for column in ("official_red", "official_blue", "red_disqualified", "blue_disqualified",
                        "swarm_threshold", "pollinator_1_threshold", "pollinator_2_threshold", "scoreboard_ocr_json", "tracking_mode", "analysis_status"):
             if column not in video_columns:
@@ -45,7 +46,7 @@ class ProjectDatabase:
                 elif column == "tracking_mode":
                     self.connection.execute("ALTER TABLE videos ADD COLUMN tracking_mode TEXT NOT NULL DEFAULT 'yolo'")
                 elif column == "analysis_status":
-                    self.connection.execute("ALTER TABLE videos ADD COLUMN analysis_status TEXT NOT NULL DEFAULT 'ready'")
+                    self.connection.execute("ALTER TABLE videos ADD COLUMN analysis_status TEXT NOT NULL DEFAULT 'unprocessed'")
                 else:
                     default = " NOT NULL DEFAULT 0" if column.endswith("disqualified") else " NOT NULL DEFAULT 16" if column == "swarm_threshold" else " NOT NULL DEFAULT 4" if column == "pollinator_1_threshold" else " NOT NULL DEFAULT 7" if column == "pollinator_2_threshold" else ""
                     self.connection.execute(f"ALTER TABLE videos ADD COLUMN {column} INTEGER{default}")
@@ -66,6 +67,15 @@ class ProjectDatabase:
             self.connection.execute("UPDATE scoring_events SET video_id=(SELECT video_id FROM robots WHERE robots.id=scoring_events.robot_id) WHERE robot_id IS NOT NULL")
         if "origin_robot_id" not in event_columns:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN origin_robot_id INTEGER")
+        if added_analysis_status:
+            # Old projects have no processing marker. Preserve access to videos
+            # with saved evidence while leaving empty imports unprocessed.
+            self.connection.execute(
+                "UPDATE videos SET analysis_status='ready' WHERE "
+                "EXISTS (SELECT 1 FROM tracks t JOIN robots r ON r.id=t.robot_id WHERE r.video_id=videos.id) "
+                "OR EXISTS (SELECT 1 FROM cycles c JOIN robots r ON r.id=c.robot_id WHERE r.video_id=videos.id) "
+                "OR EXISTS (SELECT 1 FROM scoring_events e WHERE e.video_id=videos.id)"
+            )
         self.connection.commit()
 
     def add_project(self, name: str) -> int:
@@ -163,14 +173,33 @@ class ProjectDatabase:
                 "INSERT INTO cycles(robot_id,start_t_s,end_t_s,pickup_zone,scoring_zone,confidence) VALUES (?,?,?,?,?,?)",
                 [(c["robot_id"],c["start_t_s"],c["end_t_s"],c["pickup_zone"],c["scoring_zone"],c.get("confidence","medium")) for c in cycles],
             )
-            for event in events:
+            preserved = self.connection.execute(
+                "SELECT id,origin_robot_id,source,t_s FROM scoring_events "
+                "WHERE video_id=? AND origin_robot_id IS NOT NULL", (video_id,),
+            ).fetchall()
+            # Match existing reviewed/clipped candidates one-to-one before
+            # inserting anything new. Otherwise two close candidates can both
+            # match the first row, silently discarding the second event.
+            pairings = []
+            for index, event in enumerate(events):
+                origin = event.get("robot_id") if event.get("robot_id") is not None else 0
+                source = event.get("source", "zone_crossing")
+                for row in preserved:
+                    distance = abs(float(row["t_s"]) - float(event["t_s"]))
+                    if row["origin_robot_id"] == origin and row["source"] == source and distance <= 0.5:
+                        pairings.append((distance, index, row["id"]))
+            matched: dict[int, int] = {}
+            used_retained_ids: set[int] = set()
+            for _, index, retained_id in sorted(pairings):
+                if index not in matched and retained_id not in used_retained_ids:
+                    matched[index] = retained_id
+                    used_retained_ids.add(retained_id)
+            for index, event in enumerate(events):
                 source = event.get("source", "zone_crossing")
                 candidate_robot_id = event.get("robot_id")
                 origin_robot_id = candidate_robot_id if candidate_robot_id is not None else 0
-                retained = self.connection.execute(
-                    "SELECT id FROM scoring_events WHERE video_id=? AND origin_robot_id=? AND source=? AND ABS(t_s-?)<=0.5 LIMIT 1",
-                    (video_id, origin_robot_id, source, event["t_s"]),
-                ).fetchone()
+                retained_id = matched.get(index)
+                retained = {"id": retained_id} if retained_id is not None else None
                 if not retained and candidate_robot_id is not None:
                     # Legacy reviewed events predate origin_robot_id. An exact,
                     # unique timestamp match preserves them after reassignment.
@@ -179,6 +208,7 @@ class ProjectDatabase:
                         "AND source=? AND status IN ('confirmed','rejected') AND ABS(t_s-?)<0.001",
                         (video_id, source, event["t_s"]),
                     ).fetchall()
+                    legacy = [row for row in legacy if row["id"] not in used_retained_ids]
                     same_robot = [row for row in legacy if row["robot_id"] == candidate_robot_id]
                     total_reviewed = self.connection.execute(
                         "SELECT COUNT(*) FROM scoring_events WHERE video_id=? AND source=? "
@@ -191,6 +221,7 @@ class ProjectDatabase:
                         self.connection.execute("UPDATE scoring_events SET origin_robot_id=? WHERE id=?",
                                                 (candidate_robot_id, retained["id"]))
                 if retained:
+                    used_retained_ids.add(retained["id"])
                     continue
                 cursor = self.connection.execute(
                     "INSERT INTO scoring_events(robot_id,video_id,origin_robot_id,t_s,points,confidence,status,source,event_type) VALUES (?,?,?,?,?,?,?,?,?)",
