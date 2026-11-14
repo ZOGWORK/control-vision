@@ -22,6 +22,13 @@ CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY, robot_id INTEGER NOT 
 _UNCHANGED = object()
 
 
+def _inserted_id(cursor: sqlite3.Cursor) -> int:
+    row_id = cursor.lastrowid
+    if row_id is None:
+        raise RuntimeError("Database insert did not return a row ID")
+    return int(row_id)
+
+
 class ProjectDatabase:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +71,7 @@ class ProjectDatabase:
     def add_project(self, name: str) -> int:
         cursor = self.connection.execute("INSERT INTO projects(name) VALUES (?)", (name,))
         self.connection.commit()
-        return int(cursor.lastrowid)
+        return _inserted_id(cursor)
 
     def add_video(self, project_id: int, path: Path, metadata: dict[str, Any], event_code: str | None = None, match_number: str | None = None) -> int:
         cursor = self.connection.execute(
@@ -72,7 +79,7 @@ class ProjectDatabase:
             (project_id, str(path), metadata["duration_s"], metadata["fps"], metadata["width"], metadata["height"], event_code, match_number, "unprocessed"),
         )
         self.connection.commit()
-        return int(cursor.lastrowid)
+        return _inserted_id(cursor)
 
     def save_calibration(self, video_id: int, corners: list[list[float]], zones: dict[str, Any] | None = None) -> None:
         self.connection.execute(
@@ -87,7 +94,7 @@ class ProjectDatabase:
             (video_id, team_number, alliance, seed_x, seed_y),
         )
         self.connection.commit()
-        return int(cursor.lastrowid)
+        return _inserted_id(cursor)
 
     def replace_tracks(self, rows: list[tuple[int, int, float, float, float, float]], clear_robot_ids: list[int] | None = None) -> None:
         with self.connection:
@@ -189,7 +196,7 @@ class ProjectDatabase:
                     "INSERT INTO scoring_events(robot_id,video_id,origin_robot_id,t_s,points,confidence,status,source,event_type) VALUES (?,?,?,?,?,?,?,?,?)",
                     (candidate_robot_id, video_id, origin_robot_id, event["t_s"],event.get("points",0),event.get("confidence","low"),event.get("status","flagged"),source,event.get("event_type","unclassified")),
                 )
-                event_ids.append(int(cursor.lastrowid))
+                event_ids.append(_inserted_id(cursor))
         return event_ids
 
     def add_scoring_event(self, robot_id: int, t_s: float, source: str = "manual") -> int:
@@ -198,7 +205,7 @@ class ProjectDatabase:
             (robot_id, self.connection.execute("SELECT video_id FROM robots WHERE id=?", (robot_id,)).fetchone()[0] if robot_id is not None else None, t_s, source),
         )
         self.connection.commit()
-        return int(cursor.lastrowid)
+        return _inserted_id(cursor)
 
     def review_event(self, event_id: int, status: str, points: int, robot_id: int | None | object = _UNCHANGED, event_type: str = "unclassified", confidence: str = "low", scoring_alliance: str | None = None) -> None:
         with self.connection:
