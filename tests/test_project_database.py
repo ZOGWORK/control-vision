@@ -78,6 +78,20 @@ class ProjectDatabaseTests(unittest.TestCase):
                          (12.3, "confirmed", 2))
         self.assertEqual(next(event for event in events if event["t_s"] == 12.0)["status"], "flagged")
 
+    def test_time_matching_preserves_maximum_reviewed_candidates(self):
+        original = [{"robot_id": self.red_robot, "t_s": time, "source": "goal_roi"}
+                    for time in (1.0, 1.5)]
+        ids = self.db.replace_analysis([self.red_robot], [], original)
+        for event_id in ids:
+            self.db.review_event(event_id, "confirmed", 2, event_type="flower_owned_element")
+        shifted = [{"robot_id": self.red_robot, "t_s": time, "source": "goal_roi"}
+                   for time in (1.2, 0.6)]
+        self.assertEqual(self.db.replace_analysis([self.red_robot], [], shifted), [])
+        events = self.db.events_for_video(self.red_video)
+        self.assertEqual(len(events), 2)
+        self.assertEqual({event["id"] for event in events}, set(ids))
+        self.assertTrue(all(event["status"] == "confirmed" for event in events))
+
     def test_reassignment_keeps_independent_simultaneous_robot_candidate(self):
         other_robot = self.db.add_robot(self.red_video, 1002, "red", 30, 30)
         first = {"robot_id": self.red_robot, "t_s": 12.0, "source": "zone_crossing"}
