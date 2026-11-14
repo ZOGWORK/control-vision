@@ -435,7 +435,7 @@ class DatabaseMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "old-project.sqlite"
             old_schema = SCHEMA.replace(
-                ", scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo', analysis_status TEXT NOT NULL DEFAULT 'ready'", "").replace(
+                ", scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo', analysis_status TEXT NOT NULL DEFAULT 'unprocessed'", "").replace(
                 ", origin_robot_id INTEGER", "")
             connection = sqlite3.connect(path)
             connection.executescript(old_schema)
@@ -447,7 +447,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(db.connection.execute(
                 "SELECT tracking_mode FROM videos WHERE id=?", (video_id,)).fetchone()[0], "yolo")
             self.assertEqual(db.connection.execute(
-                "SELECT analysis_status FROM videos WHERE id=?", (video_id,)).fetchone()[0], "ready")
+                "SELECT analysis_status FROM videos WHERE id=?", (video_id,)).fetchone()[0], "unprocessed")
             db.set_tracking_mode(video_id, "seeded_optical_flow")
             self.assertEqual(db.connection.execute(
                 "SELECT tracking_mode FROM videos WHERE id=?", (video_id,)).fetchone()[0], "seeded_optical_flow")

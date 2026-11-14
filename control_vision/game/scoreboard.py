@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
-
-
 def _optional_field(row, name: str):
     """Read an optional field from dicts and sqlite3.Row objects."""
     try:
@@ -21,12 +18,13 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
     Alliance attribution comes from scoring_alliance when set, otherwise from
     the robot's alliance. Disqualification is entered by the human reviewer.
     """
+    events = list(events)
+    robots = list(robots)
     disqualified = disqualified or set()
-    match_resolved = (any(event["status"] in {"confirmed", "rejected"} for event in events)
-                      and not any(event["status"] == "flagged" for event in events))
+    match_resolved = bool(events) and all(event["status"] in {"confirmed", "rejected"} for event in events)
     robot_by_id = {int(robot["id"]): robot for robot in robots}
     alliance_scores = {"red": 0, "blue": 0}
-    team_points: dict[int, int] = defaultdict(int)
+    team_points: dict[int, int] = {int(robot["id"]): 0 for robot in robots}
     swarm_points = {"red": 0, "blue": 0}
     hive_tips = {"red": 0, "blue": 0}
 
@@ -35,18 +33,20 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
             continue
         robot_id = event["robot_id"]
         robot = robot_by_id.get(int(robot_id)) if robot_id is not None else None
-        alliance = (_optional_field(event, "event_alliance") or _optional_field(event, "scoring_alliance")
+        alliance = (_optional_field(event, "scoring_alliance") or _optional_field(event, "event_alliance")
                     or (robot["alliance"] if robot else None))
         if alliance not in alliance_scores:
             continue
         points = int(event["points"])
         alliance_scores[alliance] += points
-        event_type = event["event_type"]
+        event_type = _optional_field(event, "event_type") or "unclassified"
         if event_type in {"leave_auto", "park_auto", "park_teleop"}:
             swarm_points[alliance] += points
         if event_type in {"hive_tip_auto", "hive_tip_teleop"}:
             hive_tips[alliance] += 1
-        if robot and robot["alliance"] == alliance:
+        # Robot attribution describes the observed actor; the recipient
+        # alliance can differ for alliance-scoped achievements and fouls.
+        if robot:
             team_points[int(robot_id)] += points
 
     for alliance in disqualified:
@@ -66,6 +66,8 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
             outcome = 0
         elif not match_resolved:
             outcome = 0
+        elif ("blue" if alliance == "red" else "red") in disqualified:
+            outcome = 3
         elif alliance_scores[alliance] > alliance_scores["blue" if alliance == "red" else "red"]:
             outcome = 3
         elif alliance_scores[alliance] == alliance_scores["blue" if alliance == "red" else "red"]:
