@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import math
+import tempfile
 from pathlib import Path
 
 import cv2
@@ -14,33 +15,42 @@ def extract(video: Path, output: Path, every_seconds: float = 2.0, max_frames: i
     if max_frames is not None and max_frames <= 0:
         raise ValueError("--max-frames must be positive")
     cap = cv2.VideoCapture(str(video))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot read {video}")
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if not math.isfinite(fps) or fps <= 0:
-        cap.release(); raise RuntimeError(f"Invalid FPS in {video}")
     try:
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot read {video}")
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not math.isfinite(fps) or fps <= 0:
+            raise RuntimeError(f"Invalid FPS in {video}")
         interval = max(1, round(fps * every_seconds))
         expected_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
         output.mkdir(parents=True, exist_ok=True)
         video_key = hashlib.sha256(str(video.resolve()).encode("utf-8")).hexdigest()[:10]
-        frame_index = 0
-        written = 0
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                if math.isfinite(expected_frames) and expected_frames > 0 and frame_index < round(expected_frames):
-                    raise RuntimeError(f"Video ended before its declared frame count: {video}")
-                break
-            if frame_index % interval == 0:
-                target = output / f"{video.stem}-{video_key}-{frame_index:09d}.jpg"
-                if not cv2.imwrite(str(target), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
-                    raise RuntimeError(f"Could not write {target}")
-                written += 1
-                if max_frames is not None and written >= max_frames:
+        destination = output / f"{video.stem}-{video_key}"
+        if destination.exists():
+            raise FileExistsError(f"Extracted frames already exist at {destination}; choose another output directory")
+        # Publish a complete per-video folder only after decoding succeeds.
+        with tempfile.TemporaryDirectory(prefix=".extract-", dir=output) as stage_name:
+            stage = Path(stage_name)
+            frame_index = 0
+            written = 0
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    if math.isfinite(expected_frames) and expected_frames > 0 and frame_index < round(expected_frames):
+                        raise RuntimeError(f"Video ended before its declared frame count: {video}")
                     break
-            frame_index += 1
-        return written
+                if frame_index % interval == 0:
+                    target = stage / f"{frame_index:09d}.jpg"
+                    if not cv2.imwrite(str(target), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+                        raise RuntimeError(f"Could not write {target}")
+                    written += 1
+                    if max_frames is not None and written >= max_frames:
+                        break
+                frame_index += 1
+            if written == 0:
+                raise RuntimeError(f"No readable frames in {video}")
+            stage.rename(destination)
+            return written
     finally:
         cap.release()
 
