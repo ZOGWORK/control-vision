@@ -2,7 +2,7 @@ import tempfile
 import unittest
 import math
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -85,6 +85,27 @@ class FrameExtractionTests(unittest.TestCase):
                                              max_frames=limit), expected)
                 self.assertTrue(video.released)
                 self.assertEqual(len(list(Path(folder).glob("**/*.jpg"))), expected)
+
+    def test_duplicate_extraction_preserves_existing_frames(self):
+        def capture():
+            video = Mock()
+            video.isOpened.return_value = True
+            video.get.side_effect = lambda prop: {
+                cv2.CAP_PROP_FPS: 1, cv2.CAP_PROP_FRAME_COUNT: 1}[prop]
+            video.read.side_effect = [(True, np.zeros((8, 8, 3), dtype=np.uint8)), (False, None)]
+            return video
+
+        with tempfile.TemporaryDirectory() as folder:
+            first, second = capture(), capture()
+            with patch("control_vision.training.extract_frames.cv2.VideoCapture", side_effect=[first, second]):
+                self.assertEqual(extract(Path("match.mp4"), Path(folder), every_seconds=1), 1)
+                image = next(Path(folder).glob("**/*.jpg"))
+                before = image.read_bytes()
+                with self.assertRaises(FileExistsError):
+                    extract(Path("match.mp4"), Path(folder), every_seconds=1)
+                self.assertEqual(image.read_bytes(), before)
+            first.release.assert_called_once()
+            second.release.assert_called_once()
 
 
 if __name__ == "__main__":
