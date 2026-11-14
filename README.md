@@ -27,6 +27,17 @@ You upload a video of an FTC match and it tells you what happened — per robot,
 - [Build brief for Claude](docs/BUILD_BRIEF.md) — the full spec: stack, papers, prior art, training data, holdout set, build phases.
 - [BIOBUZZ footage list](docs/BIOBUZZ_FOOTAGE.md) — 26 confirmed YouTube URLs (~15 events, ~300+ matches) for training and verification.
 
+## Extract frames for labeling
+
+With Python 3.11 or newer, install the extractor's pinned dependencies and create unlabeled frames for manual annotation:
+
+```powershell
+python -m pip install -r requirements-extract.txt
+python -m control_vision.training.extract_frames path\to\match.mp4 --output datasets\biobuzz-v1\images\unlabeled
+```
+
+Each video is published to its own folder only after decoding succeeds. An existing folder for that video is left untouched; choose another output directory for a new extraction.
+
 ## Workflow
 
 - Every change via PR. Code review must give 5/5 before merge. Never merge below 5/5.
