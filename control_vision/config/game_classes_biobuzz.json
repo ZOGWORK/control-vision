@@ -1,0 +1,11 @@
+{
+  "season": "BIOBUZZ 2026-27",
+  "manual_version": "TU09",
+  "manual_url": "https://ftc-resources.firstinspires.org/ftc/archive/2027/game/cm-html/BIOBUZZ%20Competition%20Manual%20-%20TU09.htm",
+  "classes": [
+    {"id": 0, "name": "robot"},
+    {"id": 1, "name": "pollen", "reference_size_in": 2.8, "verified_color": "yellow"},
+    {"id": 2, "name": "nectar", "reference_size_in": 3.6, "verified_colors": ["red", "blue"]}
+  ],
+  "notes": "Reference sizes are approximate. Nectar alliance color is an attribute; do not create additional object classes for color. Color and size are from Manual Section 9.8, TU09 dated Nov 12, 2026."
+}
