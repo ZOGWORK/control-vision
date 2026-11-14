@@ -29,6 +29,53 @@ def _inserted_id(cursor: sqlite3.Cursor) -> int:
     return int(row_id)
 
 
+def _match_preserved_events(events: list[dict], preserved: list[sqlite3.Row]) -> dict[int, int]:
+    """Match same-source candidates by maximum count, then minimum time error."""
+    matched: dict[int, int] = {}
+    keys = {(event.get("robot_id") if event.get("robot_id") is not None else 0,
+             event.get("source", "zone_crossing")) for event in events}
+    for origin, source in keys:
+        candidates = sorted(((index, float(event["t_s"])) for index, event in enumerate(events)
+                             if (event.get("robot_id") if event.get("robot_id") is not None else 0,
+                                 event.get("source", "zone_crossing")) == (origin, source)),
+                            key=lambda item: item[1])
+        rows = sorted(((int(row["id"]), float(row["t_s"])) for row in preserved
+                       if (row["origin_robot_id"], row["source"]) == (origin, source)),
+                      key=lambda item: item[1])
+        if not candidates or not rows:
+            continue
+        count, width = len(candidates), len(rows)
+        scores: list[list[tuple[int, float]]] = [[(0, 0.0) for _ in range(width + 1)]
+                                                  for _ in range(count + 1)]
+        choices = [["" for _ in range(width + 1)] for _ in range(count + 1)]
+        for i in range(1, count + 1):
+            for j in range(1, width + 1):
+                best = scores[i - 1][j]
+                choice = "candidate"
+                skip_row = scores[i][j - 1]
+                if (skip_row[0], -skip_row[1]) > (best[0], -best[1]):
+                    best, choice = skip_row, "row"
+                distance = abs(candidates[i - 1][1] - rows[j - 1][1])
+                if distance <= 0.5:
+                    previous = scores[i - 1][j - 1]
+                    paired = (previous[0] + 1, previous[1] + distance)
+                    if (paired[0], -paired[1]) >= (best[0], -best[1]):
+                        best, choice = paired, "pair"
+                scores[i][j], choices[i][j] = best, choice
+        i, j = count, width
+        while i and j:
+            choice = choices[i][j]
+            if choice == "pair":
+                matched[candidates[i - 1][0]] = rows[j - 1][0]
+                i -= 1
+                j -= 1
+            elif choice == "candidate":
+                i -= 1
+            else:
+                j -= 1
+    return matched
+
+
 class ProjectDatabase:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -177,23 +224,8 @@ class ProjectDatabase:
                 "SELECT id,origin_robot_id,source,t_s FROM scoring_events "
                 "WHERE video_id=? AND origin_robot_id IS NOT NULL", (video_id,),
             ).fetchall()
-            # Match existing reviewed/clipped candidates one-to-one before
-            # inserting anything new. Otherwise two close candidates can both
-            # match the first row, silently discarding the second event.
-            pairings = []
-            for index, event in enumerate(events):
-                origin = event.get("robot_id") if event.get("robot_id") is not None else 0
-                source = event.get("source", "zone_crossing")
-                for row in preserved:
-                    distance = abs(float(row["t_s"]) - float(event["t_s"]))
-                    if row["origin_robot_id"] == origin and row["source"] == source and distance <= 0.5:
-                        pairings.append((distance, index, row["id"]))
-            matched: dict[int, int] = {}
-            used_retained_ids: set[int] = set()
-            for _, index, retained_id in sorted(pairings):
-                if index not in matched and retained_id not in used_retained_ids:
-                    matched[index] = retained_id
-                    used_retained_ids.add(retained_id)
+            matched = _match_preserved_events(events, preserved)
+            used_retained_ids: set[int] = set(matched.values())
             for index, event in enumerate(events):
                 source = event.get("source", "zone_crossing")
                 candidate_robot_id = event.get("robot_id")
