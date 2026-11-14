@@ -64,6 +64,20 @@ class ProjectDatabaseTests(unittest.TestCase):
         self.assertEqual((events[0]["id"], events[0]["status"], events[0]["points"]),
                          (event_id, "confirmed", 2))
 
+    def test_close_candidates_remain_distinct_and_review_stays_with_nearest(self):
+        first = {"robot_id": self.red_robot, "t_s": 12.0, "source": "goal_roi"}
+        second = {"robot_id": self.red_robot, "t_s": 12.3, "source": "goal_roi"}
+        ids = self.db.replace_analysis([self.red_robot], [], [first, second])
+        self.assertEqual(len(ids), 2)
+        self.db.review_event(ids[1], "confirmed", 2, event_type="flower_owned_element")
+        self.db.replace_analysis([self.red_robot], [], [first, second])
+        events = self.db.events_for_video(self.red_video)
+        self.assertEqual(len(events), 2)
+        reviewed = next(event for event in events if event["id"] == ids[1])
+        self.assertEqual((reviewed["t_s"], reviewed["status"], reviewed["points"]),
+                         (12.3, "confirmed", 2))
+        self.assertEqual(next(event for event in events if event["t_s"] == 12.0)["status"], "flagged")
+
     def test_reassignment_keeps_independent_simultaneous_robot_candidate(self):
         other_robot = self.db.add_robot(self.red_video, 1002, "red", 30, 30)
         first = {"robot_id": self.red_robot, "t_s": 12.0, "source": "zone_crossing"}
@@ -105,6 +119,7 @@ class LegacyMigrationTests(unittest.TestCase):
             connection.executescript(old_schema)
             connection.execute("INSERT INTO projects(id,name) VALUES (1,'legacy')")
             connection.execute("INSERT INTO videos(id,project_id,path) VALUES (1,1,'match.mp4')")
+            connection.execute("INSERT INTO videos(id,project_id,path) VALUES (2,1,'unprocessed.mp4')")
             connection.execute("INSERT INTO robots(id,video_id,team_number,alliance) VALUES (1,1,1001,'red')")
             connection.execute("INSERT INTO scoring_events(robot_id,video_id,t_s,status,points) VALUES (1,1,12,'confirmed',3)")
             connection.commit()
@@ -113,6 +128,8 @@ class LegacyMigrationTests(unittest.TestCase):
             try:
                 video = db.connection.execute("SELECT tracking_mode,analysis_status FROM videos WHERE id=1").fetchone()
                 self.assertEqual(tuple(video), ("yolo", "ready"))
+                self.assertEqual(db.connection.execute(
+                    "SELECT analysis_status FROM videos WHERE id=2").fetchone()[0], "unprocessed")
                 self.assertEqual(db.events_for_video(1)[0]["points"], 3)
                 self.assertEqual(db.events_for_video(1)[0]["status"], "confirmed")
                 fresh = db.add_video(1, Path("new.mp4"), {"duration_s": 120, "fps": 30,
