@@ -27,6 +27,20 @@ class FrameExtractionTests(unittest.TestCase):
                 extract(Path("match.mp4"), Path("unused"), max_frames=0)
             video.assert_not_called()
 
+    def test_unopened_or_empty_video_releases_capture_and_publishes_nothing(self):
+        for opened in (False, True):
+            with self.subTest(opened=opened), tempfile.TemporaryDirectory() as folder:
+                with patch("control_vision.training.extract_frames.cv2.VideoCapture") as video:
+                    capture = video.return_value
+                    capture.isOpened.return_value = opened
+                    capture.get.side_effect = lambda prop: {
+                        cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_COUNT: 0}[prop]
+                    capture.read.return_value = (False, None)
+                    with self.assertRaisesRegex(RuntimeError, "Cannot read|No readable frames"):
+                        extract(Path("match.mp4"), Path(folder))
+                    capture.release.assert_called_once()
+                self.assertEqual(list(Path(folder).iterdir()), [])
+
     def test_early_decode_failure_names_video_and_releases_capture(self):
         class Capture:
             def __init__(self, valid_frames):
@@ -44,11 +58,11 @@ class FrameExtractionTests(unittest.TestCase):
         for valid_frames in (2, 9):
             with self.subTest(valid_frames=valid_frames), tempfile.TemporaryDirectory() as folder:
                 video = Capture(valid_frames)
-                with patch("control_vision.training.extract_frames.cv2.VideoCapture", return_value=video), \
-                     patch("control_vision.training.extract_frames.cv2.imwrite", return_value=True):
+                with patch("control_vision.training.extract_frames.cv2.VideoCapture", return_value=video):
                     with self.assertRaisesRegex(RuntimeError, "match.mp4"):
                         extract(Path("match.mp4"), Path(folder))
                 self.assertTrue(video.released)
+                self.assertEqual(list(Path(folder).iterdir()), [])
 
     def test_complete_video_and_explicit_frame_limit(self):
         class Capture:
@@ -63,15 +77,14 @@ class FrameExtractionTests(unittest.TestCase):
                 return self.reads <= 4, np.zeros((8, 8, 3), dtype=np.uint8)
             def release(self): self.released = True
 
-        with tempfile.TemporaryDirectory() as folder:
-            for limit, expected in ((None, 4), (2, 2)):
-                with self.subTest(limit=limit):
-                    video = Capture()
-                    with patch("control_vision.training.extract_frames.cv2.VideoCapture", return_value=video), \
-                         patch("control_vision.training.extract_frames.cv2.imwrite", return_value=True):
-                        self.assertEqual(extract(Path("match.mp4"), Path(folder), every_seconds=.5,
-                                                 max_frames=limit), expected)
-                    self.assertTrue(video.released)
+        for limit, expected in ((None, 4), (2, 2)):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as folder:
+                video = Capture()
+                with patch("control_vision.training.extract_frames.cv2.VideoCapture", return_value=video):
+                    self.assertEqual(extract(Path("match.mp4"), Path(folder), every_seconds=.5,
+                                             max_frames=limit), expected)
+                self.assertTrue(video.released)
+                self.assertEqual(len(list(Path(folder).glob("**/*.jpg"))), expected)
 
 
 if __name__ == "__main__":
