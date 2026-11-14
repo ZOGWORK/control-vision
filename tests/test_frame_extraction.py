@@ -1,0 +1,112 @@
+import tempfile
+import unittest
+import math
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import cv2
+import numpy as np
+
+from control_vision.training.extract_frames import extract
+
+
+class FrameExtractionTests(unittest.TestCase):
+    def test_nonfinite_fps_releases_capture(self):
+        for fps in (math.nan, math.inf):
+            with self.subTest(fps=fps), patch("control_vision.training.extract_frames.cv2.VideoCapture") as video:
+                capture = video.return_value
+                capture.isOpened.return_value = True
+                capture.get.return_value = fps
+                with self.assertRaisesRegex(RuntimeError, "Invalid FPS"):
+                    extract(Path("match.mp4"), Path("unused"))
+                capture.release.assert_called_once()
+
+    def test_zero_limit_is_rejected_before_video_open(self):
+        with patch("control_vision.training.extract_frames.cv2.VideoCapture") as video:
+            with self.assertRaisesRegex(ValueError, "--max-frames"):
+                extract(Path("match.mp4"), Path("unused"), max_frames=0)
+            video.assert_not_called()
+
+    def test_unopened_or_empty_video_releases_capture_and_publishes_nothing(self):
+        for opened in (False, True):
+            with self.subTest(opened=opened), tempfile.TemporaryDirectory() as folder:
+                with patch("control_vision.training.extract_frames.cv2.VideoCapture") as video:
+                    capture = video.return_value
+                    capture.isOpened.return_value = opened
+                    capture.get.side_effect = lambda prop: {
+                        cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_COUNT: 0}[prop]
+                    capture.read.return_value = (False, None)
+                    with self.assertRaisesRegex(RuntimeError, "Cannot read|No readable frames"):
+                        extract(Path("match.mp4"), Path(folder))
+                    capture.release.assert_called_once()
+                self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_early_decode_failure_names_video_and_releases_capture(self):
+        class Capture:
+            def __init__(self, valid_frames):
+                self.valid_frames = valid_frames
+                self.reads = 0
+                self.released = False
+            def isOpened(self): return True
+            def get(self, prop):
+                return {cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_COUNT: 10}[prop]
+            def read(self):
+                self.reads += 1
+                return self.reads <= self.valid_frames, np.zeros((8, 8, 3), dtype=np.uint8)
+            def release(self): self.released = True
+
+        for valid_frames in (2, 9):
+            with self.subTest(valid_frames=valid_frames), tempfile.TemporaryDirectory() as folder:
+                video = Capture(valid_frames)
+                with patch("control_vision.training.extract_frames.cv2.VideoCapture", return_value=video):
+                    with self.assertRaisesRegex(RuntimeError, "match.mp4"):
+                        extract(Path("match.mp4"), Path(folder))
+                self.assertTrue(video.released)
+                self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_complete_video_and_explicit_frame_limit(self):
+        class Capture:
+            def __init__(self):
+                self.reads = 0
+                self.released = False
+            def isOpened(self): return True
+            def get(self, prop):
+                return {cv2.CAP_PROP_FPS: 2, cv2.CAP_PROP_FRAME_COUNT: 4}[prop]
+            def read(self):
+                self.reads += 1
+                return self.reads <= 4, np.zeros((8, 8, 3), dtype=np.uint8)
+            def release(self): self.released = True
+
+        for limit, expected in ((None, 4), (2, 2)):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as folder:
+                video = Capture()
+                with patch("control_vision.training.extract_frames.cv2.VideoCapture", return_value=video):
+                    self.assertEqual(extract(Path("match.mp4"), Path(folder), every_seconds=.5,
+                                             max_frames=limit), expected)
+                self.assertTrue(video.released)
+                self.assertEqual(len(list(Path(folder).glob("**/*.jpg"))), expected)
+
+    def test_duplicate_extraction_preserves_existing_frames(self):
+        def capture():
+            video = Mock()
+            video.isOpened.return_value = True
+            video.get.side_effect = lambda prop: {
+                cv2.CAP_PROP_FPS: 1, cv2.CAP_PROP_FRAME_COUNT: 1}[prop]
+            video.read.side_effect = [(True, np.zeros((8, 8, 3), dtype=np.uint8)), (False, None)]
+            return video
+
+        with tempfile.TemporaryDirectory() as folder:
+            first, second = capture(), capture()
+            with patch("control_vision.training.extract_frames.cv2.VideoCapture", side_effect=[first, second]):
+                self.assertEqual(extract(Path("match.mp4"), Path(folder), every_seconds=1), 1)
+                image = next(Path(folder).glob("**/*.jpg"))
+                before = image.read_bytes()
+                with self.assertRaises(FileExistsError):
+                    extract(Path("match.mp4"), Path(folder), every_seconds=1)
+                self.assertEqual(image.read_bytes(), before)
+            first.release.assert_called_once()
+            second.release.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
