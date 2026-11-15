@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +12,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS videos (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), path TEXT NOT NULL, duration_s REAL, fps REAL, width INTEGER, height INTEGER, event_code TEXT, match_number TEXT, official_red INTEGER, official_blue INTEGER, red_disqualified INTEGER NOT NULL DEFAULT 0, blue_disqualified INTEGER NOT NULL DEFAULT 0, swarm_threshold INTEGER NOT NULL DEFAULT 16, pollinator_1_threshold INTEGER NOT NULL DEFAULT 4, pollinator_2_threshold INTEGER NOT NULL DEFAULT 7, scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo', analysis_status TEXT NOT NULL DEFAULT 'unprocessed');
 CREATE TABLE IF NOT EXISTS calibrations (video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE, corners_json TEXT NOT NULL, zones_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS robots (id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE, team_number INTEGER NOT NULL, alliance TEXT NOT NULL CHECK(alliance IN ('red','blue')), color_hint TEXT, seed_x INTEGER, seed_y INTEGER);
+CREATE TABLE IF NOT EXISTS robots (id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE, team_number INTEGER NOT NULL, alliance TEXT NOT NULL CHECK(alliance IN ('red','blue')), color_hint TEXT, seed_x INTEGER, seed_y INTEGER, qualification_disqualified INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS tracks (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, frame INTEGER NOT NULL, t_s REAL NOT NULL, x_ft REAL NOT NULL, y_ft REAL NOT NULL, conf REAL NOT NULL, UNIQUE(robot_id, frame));
 CREATE TABLE IF NOT EXISTS cycles (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, start_t_s REAL NOT NULL, end_t_s REAL NOT NULL, pickup_zone TEXT, scoring_zone TEXT);
 CREATE TABLE IF NOT EXISTS scoring_events (id INTEGER PRIMARY KEY, robot_id INTEGER REFERENCES robots(id) ON DELETE SET NULL, video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE, origin_robot_id INTEGER, t_s REAL NOT NULL, points INTEGER NOT NULL DEFAULT 0, confidence TEXT NOT NULL DEFAULT 'low', status TEXT NOT NULL DEFAULT 'flagged', source TEXT NOT NULL DEFAULT 'zone_crossing', event_type TEXT NOT NULL DEFAULT 'unclassified', scoring_alliance TEXT CHECK(scoring_alliance IN ('red','blue')));
@@ -25,6 +25,7 @@ GENERATED_SOURCES = frozenset({"zone_crossing", "goal_roi"})
 EVENT_STATUSES = frozenset({"confirmed", "flagged", "rejected"})
 CONFIDENCES = frozenset({"high", "medium", "low"})
 ALLIANCES = frozenset({"red", "blue"})
+MATCH_TYPES = frozenset({"qualification", "playoff"})
 
 
 def _inserted_id(cursor: sqlite3.Cursor) -> int:
@@ -115,10 +116,27 @@ class ProjectDatabase:
                 else:
                     default = " NOT NULL DEFAULT 0" if column.endswith("disqualified") else " NOT NULL DEFAULT 16" if column == "swarm_threshold" else " NOT NULL DEFAULT 4" if column == "pollinator_1_threshold" else " NOT NULL DEFAULT 7" if column == "pollinator_2_threshold" else ""
                     self.connection.execute(f"ALTER TABLE videos ADD COLUMN {column} INTEGER{default}")
+        video_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(videos)")}
+        added_match_type = "match_type" not in video_columns
+        for column, definition in (("match_type", "TEXT NOT NULL DEFAULT 'qualification'"),
+                                   ("playoff_first_disqualified", "TEXT"),
+                                   ("playoff_simultaneous_dq", "INTEGER NOT NULL DEFAULT 0"),
+                                   ("playoff_match_final", "INTEGER NOT NULL DEFAULT 0")):
+            if column not in video_columns:
+                self.connection.execute(f"ALTER TABLE videos ADD COLUMN {column} {definition}")
+        if added_match_type:
+            # The legacy alliance-DQ checkboxes were labelled playoff-only.
+            # Keep a saved alliance DQ meaningful as a playoff ruling instead
+            # of silently applying it to a qualification match.
+            self.connection.execute(
+                "UPDATE videos SET match_type='playoff' WHERE red_disqualified<>0 OR blue_disqualified<>0")
         robot_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(robots)")}
         for column in ("seed_x", "seed_y"):
             if column not in robot_columns:
                 self.connection.execute(f"ALTER TABLE robots ADD COLUMN {column} INTEGER")
+        if "qualification_disqualified" not in robot_columns:
+            self.connection.execute(
+                "ALTER TABLE robots ADD COLUMN qualification_disqualified INTEGER NOT NULL DEFAULT 0")
         cycle_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(cycles)")}
         if "confidence" not in cycle_columns:
             self.connection.execute("ALTER TABLE cycles ADD COLUMN confidence TEXT NOT NULL DEFAULT 'medium'")
@@ -356,10 +374,135 @@ class ProjectDatabase:
     def set_official_scores(self, video_id: int, red: int | None, blue: int | None,
                             disqualified: set[str] | None = None, swarm_threshold: int = 16,
                             pollinator_1_threshold: int = 4, pollinator_2_threshold: int = 7) -> None:
-        disqualified = disqualified or set()
-        self.connection.execute("UPDATE videos SET official_red=?,official_blue=?,red_disqualified=?,blue_disqualified=?,swarm_threshold=?,pollinator_1_threshold=?,pollinator_2_threshold=? WHERE id=?",
-                                (red, blue, int("red" in disqualified), int("blue" in disqualified), swarm_threshold, pollinator_1_threshold, pollinator_2_threshold, video_id))
-        self.connection.commit()
+        """Save official totals and RP thresholds.
+
+        ``disqualified`` left as None keeps the stored match ruling. A set is
+        a playoff alliance DQ and is validated like ``set_match_ruling``.
+        """
+        with self.connection:
+            if disqualified is not None:
+                ruling = self.match_ruling(video_id)
+                both = set(disqualified) == {"red", "blue"}
+                self._write_match_ruling(
+                    video_id, ruling["match_type"],
+                    qualification_disqualified_robot_ids=ruling["qualification_disqualified_robot_ids"],
+                    playoff_disqualified=set(disqualified),
+                    first_disqualified=ruling["first_disqualified"] if both else None,
+                    simultaneous_disqualification=ruling["simultaneous_disqualification"] and both,
+                    match_final=ruling["match_final"])
+            self.connection.execute("UPDATE videos SET official_red=?,official_blue=?,swarm_threshold=?,pollinator_1_threshold=?,pollinator_2_threshold=? WHERE id=?",
+                                    (red, blue, swarm_threshold, pollinator_1_threshold, pollinator_2_threshold, video_id))
+
+    def match_ruling(self, video_id: int) -> dict[str, Any]:
+        """The stored match type and referee ruling for one video."""
+        video = self.connection.execute(
+            "SELECT match_type,red_disqualified,blue_disqualified,playoff_first_disqualified,"
+            "playoff_simultaneous_dq,playoff_match_final FROM videos WHERE id=?", (video_id,)).fetchone()
+        if video is None:
+            raise ValueError(f"Unknown video {video_id}")
+        team_ids = {int(row["id"]) for row in self.connection.execute(
+            "SELECT id FROM robots WHERE video_id=? AND qualification_disqualified<>0", (video_id,))}
+        return {"match_type": video["match_type"],
+                "qualification_disqualified_robot_ids": team_ids,
+                "playoff_disqualified": {alliance for alliance in ("red", "blue")
+                                         if video[f"{alliance}_disqualified"]},
+                "first_disqualified": video["playoff_first_disqualified"],
+                "simultaneous_disqualification": bool(video["playoff_simultaneous_dq"]),
+                "match_final": bool(video["playoff_match_final"])}
+
+    def set_match_ruling(self, video_id: int, match_type: str, *,
+                         qualification_disqualified_robot_ids: Iterable[int] = (),
+                         playoff_disqualified: Iterable[str] = (),
+                         first_disqualified: str | None = None,
+                         simultaneous_disqualification: bool = False,
+                         match_final: bool = False) -> None:
+        """Save the match type and the reviewer-entered referee ruling atomically.
+
+        Qualification DQ is per team (T601); playoff DQ is per alliance, with
+        the Head Referee's chronology or simultaneous ruling for a double DQ
+        (T705). Rulings for the other match type are refused, never stored.
+        """
+        with self.connection:
+            self._write_match_ruling(
+                video_id, match_type,
+                qualification_disqualified_robot_ids=qualification_disqualified_robot_ids,
+                playoff_disqualified=playoff_disqualified, first_disqualified=first_disqualified,
+                simultaneous_disqualification=simultaneous_disqualification, match_final=match_final)
+
+    def set_match_type(self, video_id: int, match_type: str, *, clear_inapplicable: bool = False) -> None:
+        """Change the match type.
+
+        Rulings that only apply to the old type are refused with a plain
+        message unless ``clear_inapplicable`` is set, which removes them in
+        the same transaction.
+        """
+        if match_type not in MATCH_TYPES:
+            raise ValueError("Match type must be qualification or playoff")
+        with self.connection:
+            ruling = self.match_ruling(video_id)
+            playoff_ruling = bool(ruling["playoff_disqualified"] or ruling["first_disqualified"]
+                                  or ruling["simultaneous_disqualification"] or ruling["match_final"])
+            team_ruling = bool(ruling["qualification_disqualified_robot_ids"])
+            inapplicable = playoff_ruling if match_type == "qualification" else team_ruling
+            if match_type == ruling["match_type"]:
+                return
+            if inapplicable and not clear_inapplicable:
+                if match_type == "qualification":
+                    raise ValueError("This match has a playoff alliance DQ or ruling. Clear it before "
+                                     "marking the match as a qualification.")
+                raise ValueError("This match has a qualification team DQ. Clear it before marking "
+                                 "the match as a playoff.")
+            self._write_match_ruling(
+                video_id, match_type,
+                qualification_disqualified_robot_ids=(ruling["qualification_disqualified_robot_ids"]
+                                                      if match_type == "qualification" else ()),
+                playoff_disqualified=ruling["playoff_disqualified"] if match_type == "playoff" else (),
+                first_disqualified=ruling["first_disqualified"] if match_type == "playoff" else None,
+                simultaneous_disqualification=(ruling["simultaneous_disqualification"]
+                                               if match_type == "playoff" else False),
+                match_final=ruling["match_final"] if match_type == "playoff" else False)
+
+    def _write_match_ruling(self, video_id: int, match_type: str, *,
+                            qualification_disqualified_robot_ids: Iterable[int],
+                            playoff_disqualified: Iterable[str], first_disqualified: str | None,
+                            simultaneous_disqualification: bool, match_final: bool) -> None:
+        """Validate and write a ruling; the caller owns the transaction."""
+        if match_type not in MATCH_TYPES:
+            raise ValueError("Match type must be qualification or playoff")
+        raw_ids = list(qualification_disqualified_robot_ids)
+        if any(isinstance(robot_id, bool) or not isinstance(robot_id, int) for robot_id in raw_ids):
+            raise ValueError("Qualification DQ robot IDs must be integers")
+        team_ids = set(raw_ids)
+        alliances = set(playoff_disqualified)
+        if alliances - ALLIANCES:
+            raise ValueError(f"Unknown playoff DQ alliance: {sorted(alliances - ALLIANCES)}")
+        if first_disqualified is not None and first_disqualified not in ALLIANCES:
+            raise ValueError(f"Unknown first disqualified alliance: {first_disqualified}")
+        if first_disqualified is not None and alliances != ALLIANCES:
+            raise ValueError("A first-DQ ruling needs both playoff alliances disqualified")
+        if simultaneous_disqualification and (alliances != ALLIANCES or first_disqualified is not None):
+            raise ValueError("A simultaneous DQ ruling needs both alliances disqualified and no first DQ")
+        if team_ids and alliances:
+            raise ValueError("A qualification team DQ cannot be combined with a playoff alliance DQ")
+        if match_type == "qualification" and (alliances or first_disqualified is not None
+                                              or simultaneous_disqualification or match_final):
+            raise ValueError("Alliance DQ, referee DQ rulings and match final apply to playoff matches only")
+        if match_type == "playoff" and team_ids:
+            raise ValueError("A playoff DQ applies to the whole alliance; team DQ is for qualification matches")
+        if self.connection.execute("SELECT 1 FROM videos WHERE id=?", (video_id,)).fetchone() is None:
+            raise ValueError(f"Unknown video {video_id}")
+        video_robot_ids = {int(row["id"]) for row in self.connection.execute(
+            "SELECT id FROM robots WHERE video_id=?", (video_id,))}
+        if team_ids - video_robot_ids:
+            raise ValueError(f"Qualification DQ robots are not in this video: {sorted(team_ids - video_robot_ids)}")
+        self.connection.execute(
+            "UPDATE videos SET match_type=?,red_disqualified=?,blue_disqualified=?,playoff_first_disqualified=?,"
+            "playoff_simultaneous_dq=?,playoff_match_final=? WHERE id=?",
+            (match_type, int("red" in alliances), int("blue" in alliances), first_disqualified,
+             int(bool(simultaneous_disqualification)), int(bool(match_final)), video_id))
+        self.connection.execute("UPDATE robots SET qualification_disqualified=0 WHERE video_id=?", (video_id,))
+        self.connection.executemany("UPDATE robots SET qualification_disqualified=1 WHERE video_id=? AND id=?",
+                                    [(video_id, robot_id) for robot_id in sorted(team_ids)])
 
     def set_scoreboard_ocr(self, video_id: int, result: dict) -> None:
         self.connection.execute("UPDATE videos SET scoreboard_ocr_json=? WHERE id=?",
