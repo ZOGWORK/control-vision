@@ -91,9 +91,10 @@ class BiobuzzRulesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown qualification DQ robot IDs"):
             calculate_scoreboard([], self.robots,
                                  qualification_disqualified_robot_ids={999})
-        with self.assertRaisesRegex(ValueError, "must be integers"):
-            calculate_scoreboard([], self.robots,
-                                 qualification_disqualified_robot_ids={"x"})
+        for bad_ids in ({"x"}, {True}, {1.9}):
+            with self.subTest(bad_ids=bad_ids), self.assertRaisesRegex(ValueError, "must be integers"):
+                calculate_scoreboard([], self.robots,
+                                     qualification_disqualified_robot_ids=bad_ids)
         with self.assertRaisesRegex(ValueError, "cannot be combined"):
             calculate_scoreboard([], self.robots, disqualified={"red"},
                                  qualification_disqualified_robot_ids={1})
