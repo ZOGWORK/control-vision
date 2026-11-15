@@ -609,6 +609,9 @@ class MainWindow(QMainWindow):
         clean_name = name.strip()
         if clean_name in self.zones:
             QMessageBox.warning(self, "Zone name already used", "Choose a unique zone name."); return
+        if clean_name.endswith("_roi"):
+            # Names ending in _roi are reserved for image-space ROIs.
+            QMessageBox.warning(self, "Zone name reserved", "Field zone names cannot end in \"_roi\". Choose another name."); return
         self.zones[clean_name] = {"type": self.zone_type.currentText(), "points": self.field_map.draft.copy()}
         self.zone_remove_combo.addItem(clean_name)
         self.field_map.zones = self.zones; self.field_map.draft = []; self._drawing_zone = False
@@ -987,6 +990,18 @@ class MainWindow(QMainWindow):
         self.progress_label.setText(f"{stage} — {percent:.0f}% — {detail}")
 
     def processing_done(self, rows):
+        try:
+            self._store_processing_results(rows)
+        except Exception as exc:
+            logger = getattr(self, "logger", None)
+            if logger: logger.exception("Saving analysis results failed")
+            self.processing_failed(f"Could not save the analysis results: {exc}")
+            return
+        self.process_btn.setEnabled(True)
+        if self.capture: self.timer.start()
+        self._processing_active = False
+
+    def _store_processing_results(self, rows):
         (track_rows, photos, roi_events), tracking_mode = rows
         self.db.set_tracking_mode(self.video_id, tracking_mode)
         robot_ids = [seed[0] for seed in self.seed_points]
@@ -1012,9 +1027,6 @@ class MainWindow(QMainWindow):
             self.log_view.addItem("Accuracy note: optical-flow is a trail preview only. Cycle counts and movement statistics are omitted; verify every identity and position before any use as evidence.")
         self.progress_label.setText(f"Analysis complete. Samples: {len(track_rows):,}; cycle/event candidates: {len(self.events)}. Review points and statuses before reporting scores.")
         self.refresh_result_tables()
-        self.process_btn.setEnabled(True)
-        if self.capture: self.timer.start()
-        self._processing_active = False
 
     def refresh_result_tables(self):
         if not self.db or self.video_id is None: return
@@ -1343,8 +1355,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Photos exported", f"Exported {copied} robot photo(s). Photos below 200×200 pixels are skipped and listed in the run log.")
 
     def processing_failed(self, message):
-        if self.db and self.video_id is not None:
-            self.db.set_analysis_status(self.video_id, "failed")
+        try:
+            if self.db and self.video_id is not None:
+                self.db.set_analysis_status(self.video_id, "failed")
+        except Exception as exc:
+            message += f" The failed status could not be saved either: {exc}"
         self._set_results_enabled(False)
         self.progress_label.setText(message)
         self.log_view.addItem(message)
