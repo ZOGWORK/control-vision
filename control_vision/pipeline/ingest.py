@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import shutil
 import subprocess
@@ -12,6 +13,8 @@ import cv2
 # Brief: warn (never block) below 720p or 15 fps. Same rule and wording as the
 # import dialog in the app so the warning text stays consistent.
 MIN_WIDTH, MIN_HEIGHT, MIN_FPS = 1280, 720, 15.0
+# ffprobe reads only headers; a run this long means it is stuck.
+_FFPROBE_TIMEOUT_S = 30.0
 
 
 class VideoError(RuntimeError):
@@ -94,12 +97,19 @@ def _decodes_at(cap, frame_index: int) -> bool:
 def _probe_metadata(path: Path) -> dict[str, Any]:
     ffprobe = shutil.which("ffprobe")
     if ffprobe:
-        result = subprocess.run(
-            [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
-             "stream=width,height,avg_frame_rate,r_frame_rate,duration:format=duration", "-of", "json", str(path)],
-            capture_output=True, text=True, check=False,
-        )
-        if result.returncode == 0:
+        result: subprocess.CompletedProcess | None
+        try:
+            result = subprocess.run(
+                [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                 "stream=width,height,avg_frame_rate,r_frame_rate,duration:format=duration", "-of", "json", str(path)],
+                capture_output=True, text=True, check=False, timeout=_FFPROBE_TIMEOUT_S,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            # A stuck or unrunnable ffprobe must not block import; OpenCV
+            # below reads the same metadata.
+            logging.getLogger(__name__).warning("ffprobe failed for %s; using OpenCV instead", path.name, exc_info=True)
+            result = None
+        if result is not None and result.returncode == 0:
             try:
                 payload = json.loads(result.stdout)
                 stream = payload["streams"][0]
