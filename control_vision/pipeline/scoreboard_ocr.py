@@ -4,7 +4,7 @@ import re
 import logging
 import math
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import cv2
 import numpy as np
@@ -27,37 +27,187 @@ def _read_digits(engine, frame: np.ndarray, polygon: list[list[float]]) -> tuple
     crop = cv2.bitwise_and(crop, crop, mask=mask)
     # UI overlays are often small in 720p streams. Enlarging the ROI helps OCR.
     crop = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-    result = engine(crop)
+    rows = _ocr_rows(engine(crop))
+    rows.sort(key=lambda row: float(row[0][:, 0].mean()))
+    text = " ".join(row[1] for row in rows)
+    line = _score_line(rows)
+    if not line:
+        return None, 0.0, text
+    # Prefer reading the score's whole line at once; fall back to merging the
+    # separate detections when that does not give a plausible score.
+    value, confidence, line_text = _recognise_line(engine, crop, line)
+    if value is not None:
+        return value, confidence, line_text
+    value, confidence = _merge_line(line)
+    return value, confidence, text
+
+
+# FTC scores fit in three digits; a longer merged reading is not one score.
+_MAX_SCORE_DIGITS = 3
+# Two character slots from different detections are the same glyph read
+# twice when their horizontal extents overlap by at least this fraction of
+# the narrower one. Detection boxes are drawn wider than the text, so boxes
+# of neighbouring glyphs can overlap too: on a real match video neighbouring
+# glyphs overlapped by up to 35%, and a repeated reading of one glyph by 43%
+# or more. A repeated reading that agrees on the digit needs only the lower
+# overlap; a disagreeing one (one glyph read as 1 and as 7) needs the higher.
+_SAME_DIGIT_OVERLAP = 0.4
+_SAME_GLYPH_OVERLAP = 0.5
+# Two detections are on the same text line when their vertical extents
+# overlap by at least this fraction of the shorter one.
+_SAME_LINE_OVERLAP = 0.5
+# Margin above and below the score line, as a fraction of its height, when
+# the whole line is recognised at once. On a real match video margins of 0
+# to 15% read every checked frame; 30% or more began to lose a lone "0".
+_LINE_MARGIN = 0.1
+
+
+class _Token(NamedTuple):
+    """One OCR detection with digits: its box extent, text and confidence."""
+    x0: float
+    x1: float
+    y0: float
+    y1: float
+    text: str
+    confidence: float
+
+
+class _Glyph(NamedTuple):
+    """One digit of a detection, at its share of the detection's box."""
+    x0: float
+    x1: float
+    char: str
+    confidence: float
+    token: int
+
+
+def _ocr_rows(result) -> list[tuple[np.ndarray, str, float]]:
+    """(box points, text, confidence) for each OCR detection that has a box."""
     raw = result[0] if isinstance(result, tuple) else result
-    records = []
+    rows = []
     if raw and hasattr(raw[0], "txts"):
         output = raw[0]
-        boxes = getattr(output, "boxes", ()) or ()
-        for box, text, confidence in zip(boxes, output.txts, output.scores):
-            records.append((float(np.asarray(box)[:, 0].mean()), str(text), float(confidence)))
+        # Newer RapidOCR releases return the boxes as one numpy array.
+        boxes = getattr(output, "boxes", None)
+        for box, text, confidence in zip(() if boxes is None else boxes, output.txts, output.scores):
+            rows.append((np.asarray(box, dtype=np.float64).reshape(-1, 2), str(text), float(confidence)))
     else:
         for row in raw or []:
             if len(row) >= 3:
-                box, text, confidence = row[0], str(row[1]), float(row[2])
-                records.append((float(np.asarray(box)[:, 0].mean()), text, confidence))
-    records.sort(key=lambda item: item[0])
-    # PaddleOCR commonly returns one record per character on large score
-    # overlays. Join spatially ordered digits before converting to a score.
-    tokens = [(x, re.sub(r"\D", "", text), confidence, text)
-              for x, text, confidence in records if re.sub(r"\D", "", text)]
-    tokens = [token for token in tokens if len(token[1]) <= 3]
+                rows.append((np.asarray(row[0], dtype=np.float64).reshape(-1, 2), str(row[1]), float(row[2])))
+    return rows
+
+
+def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+    """Overlap of two intervals as a fraction of the shorter one."""
+    shorter = min(a1 - a0, b1 - b0)
+    if shorter <= 0:
+        return 0.0
+    return max(0.0, min(a1, b1) - max(a0, b0)) / shorter
+
+
+def _plausible_score(digit_text: str) -> int | None:
+    """The score these digits show, or None if they cannot be one score.
+
+    A reading longer than three digits is not a plausible score, and scores
+    are not shown zero-padded, so a leading zero means a digit before it was
+    not read (103 read as "03").
+    """
+    if not digit_text or len(digit_text) > _MAX_SCORE_DIGITS or (len(digit_text) > 1 and digit_text[0] == "0"):
+        return None
+    return int(digit_text)
+
+
+def _score_line(rows: list[tuple[np.ndarray, str, float]]) -> list[_Token]:
+    """The digit detections on the text line that shows the score.
+
+    Detections with digits are grouped into text lines by vertical overlap
+    and the line with the tallest text is taken, since the score is the
+    largest text in its scoreboard area. Detections with more than three
+    digits (team numbers) are ignored.
+    """
+    tokens = []
+    for points, token_text, confidence in rows:
+        digits = re.sub(r"\D", "", token_text)
+        if not digits or len(digits) > _MAX_SCORE_DIGITS:
+            continue
+        x0, y0 = points.min(axis=0)
+        x1, y1 = points.max(axis=0)
+        tokens.append(_Token(float(x0), float(x1), float(y0), float(y1), re.sub(r"\s", "", token_text), confidence))
     if not tokens:
-        return None, 0.0, " ".join(record[1] for record in records)
-    digit_text = "".join(token[1] for token in tokens)
-    if len(digit_text) > 3:
-        # The user-drawn crop contains extraneous digits. Prefer the most
-        # confident OCR token rather than accidentally reading a team number.
-        best = max(tokens, key=lambda token: (token[2], len(token[1])))
-        digit_text = best[1]
-        confidence = best[2]
+        return []
+    lines: list[list[_Token]] = []
+    for token in sorted(tokens, key=lambda item: (item.y0 + item.y1) / 2):
+        for line in lines:
+            if _overlap(line[0].y0, line[0].y1, token.y0, token.y1) >= _SAME_LINE_OVERLAP:
+                line.append(token)
+                break
+        else:
+            lines.append([token])
+    return max(lines, key=lambda items: (max(item.y1 - item.y0 for item in items),
+                                         max(item.confidence for item in items)))
+
+
+def _merge_line(line: list[_Token]) -> tuple[int | None, float]:
+    """Merge the digit detections of one text line into a score, left to right.
+
+    OCR often splits one score into several detections ("1", "0", "3"), and
+    sometimes reports the same glyphs twice ("1", "03" and an overlapping
+    "3" for 103). Each detection's box is split evenly across its characters
+    and the digit glyphs are read left to right; a glyph that overlaps one
+    already taken from another detection is the same glyph read twice, and
+    the more confident reading of it is kept. The confidence is the lowest
+    confidence of the detections the score was read from.
+    """
+    glyphs = []
+    for number, token in enumerate(line):
+        width = (token.x1 - token.x0) / len(token.text)
+        for position, char in enumerate(token.text):
+            if char.isdigit():
+                start = token.x0 + position * width
+                glyphs.append(_Glyph(start, start + width, char, token.confidence, number))
+    kept: list[_Glyph] = []
+    for glyph in sorted(glyphs, key=lambda item: (item.x0 + item.x1) / 2):
+        previous = kept[-1] if kept else None
+        # Slots of one detection tile its box, so only another detection's overlap.
+        if previous is not None:
+            needed = _SAME_DIGIT_OVERLAP if previous.char == glyph.char else _SAME_GLYPH_OVERLAP
+            if _overlap(previous.x0, previous.x1, glyph.x0, glyph.x1) >= needed:
+                if glyph.confidence > previous.confidence:
+                    kept[-1] = glyph
+                continue
+        kept.append(glyph)
+    value = _plausible_score("".join(glyph.char for glyph in kept))
+    if value is None:
+        return None, 0.0
+    return value, min(line[number].confidence for number in {glyph.token for glyph in kept})
+
+
+def _recognise_line(engine, crop: np.ndarray, line: list[_Token]) -> tuple[int | None, float, str]:
+    """Recognise the score's whole text line in one pass, without detection.
+
+    Detection on its own misses or splits glyphs: on a real match video it
+    found only the "3" of 73 and the "1" and "8" of 180. The recogniser reads
+    a strip across the ROI at the score line's height (with a small margin)
+    as one line of text, which is the usual way to read a known text line.
+    """
+    top, bottom = min(token.y0 for token in line), max(token.y1 for token in line)
+    margin = _LINE_MARGIN * (bottom - top)
+    y0, y1 = max(0, int(top - margin)), min(crop.shape[0], int(math.ceil(bottom + margin)))
+    if y1 <= y0:
+        return None, 0.0, ""
+    result = engine(crop[y0:y1], use_det=False, use_cls=False)
+    raw = result[0] if isinstance(result, tuple) else result
+    if not raw:
+        return None, 0.0, ""
+    if hasattr(raw, "txts"):
+        texts, scores = list(raw.txts or ()), list(raw.scores or ())
     else:
-        confidence = sum(token[2] for token in tokens) / len(tokens)
-    return int(digit_text), confidence, " ".join(record[1] for record in records)
+        texts, scores = [str(raw[0][0])], [float(raw[0][1])]
+    if not texts:
+        return None, 0.0, ""
+    text = str(texts[0])
+    return _plausible_score(re.sub(r"\D", "", text)), float(scores[0]), text
 
 
 # Fewest frames that must agree before a later, higher reading counts as the
@@ -233,10 +383,12 @@ def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list
 
     The default of one sample per second is deliberate. On a real 720p match
     video each sampled frame took about 3 s to read, so the 12 s tail took
-    35-46 s at 1 fps, 73 s at 2 fps and 151 s at 4 fps, and the denser
-    sampling caught more frames where OCR drops digits from the clean final
-    screen (103 read as 3), which made the blue proposal wrong (3) at both
-    2 and 4 fps rather than better.
+    35-46 s at 1 fps, 73 s at 2 fps and 151 s at 4 fps. Reading each score
+    line whole adds one recognition pass per area (about 0.2-0.3 s). Before
+    that pass, denser sampling caught more frames where OCR dropped digits
+    from the clean final screen (103 read as 3) and made the blue proposal
+    wrong at 2 and 4 fps; with it, every clean final-screen frame of that
+    video read correctly at 4 fps too, so denser sampling now only costs time.
     """
     try:
         from rapidocr_onnxruntime import RapidOCR
