@@ -50,7 +50,8 @@ class CoreScoringTests(unittest.TestCase):
                  "event_alliance": "red", "scoring_alliance": "blue"}
         board = calculate_scoreboard([event], self.robots)
         self.assertEqual(board["alliance_points"], {"red": 0, "blue": 5})
-        self.assertEqual(board["team_points"][1], 5)
+        # A red robot is not credited points the reviewer assigned to blue.
+        self.assertEqual(board["team_points"][1], 0)
 
     def test_one_shot_event_and_robot_iterators_score_once(self):
         board = calculate_scoreboard(iter([{"robot_id": 1, "status": "confirmed", "points": 5}]),
@@ -152,8 +153,9 @@ class CoreScoringTests(unittest.TestCase):
                     "load": {"type": "loading_zone", "points": [[0, 0], [2, 0], [2, 2], [0, 2]]},
                     "goal": {"type": scoring_type, "points": [[8, 8], [10, 8], [10, 10], [8, 10]]},
                 }
-                rows = [(1, 0, 0.0, 1.0, 1.0, 0.9), (1, 1, 1.0, 4.0, 4.0, 0.9),
-                        (1, 2, 2.0, 9.0, 9.0, 0.9)]
+                # 8 fps: 1 s in the loading zone, 1 s in transit, 1 s in the goal.
+                positions = [(1.0, 1.0)] * 8 + [(4.0, 4.0)] * 8 + [(9.0, 9.0)] * 8
+                rows = [(1, frame, frame / 8, x, y, 0.9) for frame, (x, y) in enumerate(positions)]
                 cycles, events = count_zone_cycles(rows, zones)
                 self.assertEqual(len(cycles), 1)
                 self.assertEqual(events[0]["status"], "flagged")
