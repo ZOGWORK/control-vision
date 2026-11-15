@@ -33,8 +33,11 @@ class WorkerDispatchTests(unittest.TestCase):
             worker.run()
         args = tracker.call_args.args
         self.assertEqual(args[:5], (Path("match.mp4"), [], [(1, 20, 30)], {1: "red"}, 8.0))
-        self.assertTrue(callable(args[5]))
-        self.assertTrue(callable(args[6]))
+        # Position 6 is cancel() (no arguments); position 7 is
+        # progress(stage, percent, detail). Swapping them must fail here.
+        import inspect
+        self.assertEqual(len(inspect.signature(args[5]).parameters), 0)
+        self.assertEqual(len(inspect.signature(args[6]).parameters), 3)
         self.assertIs(args[7], logger)
         self.assertEqual(args[8], photos_dir)
 
@@ -260,9 +263,9 @@ class SeedMatchingTests(unittest.TestCase):
                     goal_roi=[[0, 0], [100, 0], [100, 100], [0, 100]],
                 )
 
-        self.assertEqual(len(events), 2)
-        self.assertAlmostEqual(events[0]["t_s"], 0.5)
-        self.assertGreaterEqual(events[1]["t_s"], 1.0)
+        # A was in the ROI on the first frame, so only B's arrival is flagged.
+        self.assertEqual(len(events), 1)
+        self.assertGreaterEqual(events[0]["t_s"], 1.0)
 
     def test_moving_roi_element_does_not_create_second_candidate(self):
         import numpy as np
@@ -304,7 +307,42 @@ class SeedMatchingTests(unittest.TestCase):
                             logging.getLogger("roi-motion-test"),
                             goal_roi=[[0, 0], [100, 0], [100, 100], [0, 100]],
                         )
-                self.assertEqual(len(events), 1)
+                # The element was present from the first frame and only moved.
+                self.assertEqual(events, [])
+
+    def test_element_in_roi_on_first_frame_is_not_an_arrival(self):
+        import numpy as np
+        from types import SimpleNamespace
+
+        class Capture:
+            reads = 0
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else 35
+            def read(self):
+                self.reads += 1
+                return (True, np.zeros((100, 100, 3), dtype=np.uint8)) if self.reads <= 35 else (False, None)
+            def release(self): pass
+
+        def detect(*args, **kwargs):
+            robot = SimpleNamespace(cls=[0], xyxy=np.array([[10, 10, 30, 50]]), conf=[0.95], id=[1])
+            ball = SimpleNamespace(cls=[1], xyxy=np.array([[40, 40, 50, 50]]), conf=[0.9], id=[10])
+            return [SimpleNamespace(boxes=[robot, ball])]
+
+        with tempfile.TemporaryDirectory() as folder:
+            model_path = Path(folder) / "robot.onnx"
+            model_path.touch()
+            with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=Capture()), \
+                 patch("ultralytics.YOLO", return_value=SimpleNamespace(track=detect)):
+                _, _, events = track_video(
+                    Path("match.mp4"), model_path,
+                    [[0, 0], [100, 0], [100, 100], [0, 100]], [(1, 20, 50)],
+                    30.0, lambda: False, lambda *_: None,
+                    logging.getLogger("roi-baseline-test"),
+                    goal_roi=[[0, 0], [100, 0], [100, 100], [0, 100]],
+                )
+        self.assertEqual(events, [])
 
     def test_assigns_one_to_one_by_minimum_total_distance(self):
         seeds = [(10, 100, 100), (20, 200, 100)]
@@ -733,6 +771,69 @@ class VideoIngestTests(unittest.TestCase):
         self.assertEqual(metadata["duration_s"], 10)
         self.assertEqual(metadata["warnings"], [])
         self.assertTrue(capture.released)
+
+
+class AppStateTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        from PySide6.QtWidgets import QApplication
+        from control_vision.app.main_window import MainWindow
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        self.app = QApplication.instance() or QApplication([])
+        self.window = MainWindow()
+
+    def tearDown(self):
+        self.window.db = None
+        self.window.close()
+
+    def test_failed_project_creation_drops_closed_database(self):
+        from unittest.mock import Mock
+        old_db = Mock()
+        self.window.db, self.window.project_id = old_db, 7
+        with patch("control_vision.app.main_window.QFileDialog.getExistingDirectory", return_value="locked"), \
+             patch("PySide6.QtWidgets.QInputDialog.getText", return_value=("New", True)), \
+             patch("control_vision.app.main_window.ProjectDatabase", side_effect=OSError("read-only folder")), \
+             patch("control_vision.app.main_window.QMessageBox.critical") as shown:
+            self.window.new_project()
+        old_db.close.assert_called()
+        self.assertIsNone(self.window.db)
+        self.assertIsNone(self.window.project_id)
+        self.assertIn("read-only folder", shown.call_args.args[2])
+
+    def test_selecting_corners_again_starts_a_new_calibration(self):
+        self.window.corners = [[0, 0], [10, 0], [10, 10], [0, 10]]
+        self.window.video_path = Path("match.mp4")
+        with patch("control_vision.app.main_window.cv2.VideoCapture") as capture:
+            capture.return_value.read.return_value = (False, None)
+            self.window.select_corner()
+            self.assertIn("corner 1 of 4", self.window.statusBar().currentMessage())
+            self.window.canvas_click(5, 5)
+        self.assertEqual(self.window.corners, [[5, 5]])
+
+    def test_review_controls_need_a_new_selection_after_each_review(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            try:
+                project_id = db.add_project("review")
+                video_id = db.add_video(project_id, Path(folder) / "match.mp4",
+                                        {"duration_s": 150, "fps": 30, "width": 1280, "height": 720})
+                robot_id = db.add_robot(video_id, 123, "red", 10, 10)
+                db.set_analysis_status(video_id, "ready")
+                first = db.add_scoring_event(robot_id, 10.0)
+                second = db.add_scoring_event(robot_id, 20.0)
+                self.window.db, self.window.project_id, self.window.video_id = db, project_id, video_id
+                self.window.refresh_result_tables()
+                self.window.review_table.setCurrentCell(0, 0)
+                self.window.review_robot.setCurrentIndex(self.window.review_robot.findData(robot_id))
+                self.window.review_selected("confirmed")
+                self.assertEqual(self.window.review_table.currentRow(), -1)
+                self.window.review_selected("confirmed")
+                statuses = {row["id"]: (row["status"], row["robot_id"]) for row in db.events_for_video(video_id)}
+                self.assertEqual(statuses[first], ("confirmed", robot_id))
+                self.assertEqual(statuses[second], ("flagged", robot_id))
+            finally:
+                db.close()
 
 
 class PreviewPhotoTests(unittest.TestCase):
