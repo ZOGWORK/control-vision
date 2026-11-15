@@ -16,7 +16,7 @@ The command refuses to start unless:
 - Both the train and val splits contain labeled robots.
 - No identical image file appears in more than one of train, val, and holdout.
 - No folder directly under `images/train`, `images/val`, or `images/holdout` appears in more than one of them. `extract_frames` writes one such folder per video, so this catches frames from one match placed in two splits.
-- `split_manifest.csv` exists at the dataset root and passes `python -m control_vision.training.split_manifest` (see `docs/DATASET_SPLITS.md`). This is checked first, before images are decoded and before training starts. The manifest lists every image under `images/`, so move `images/unlabeled` out of the dataset first. `train` and `val` in `data.yaml` must be `images/train` and `images/val`, and the manifest must list every image in them (the manifest accepts `.bmp`, `.jpeg`, `.jpg`, `.png`, `.tif`, `.tiff`, and `.webp`).
+- `split_manifest.csv` exists at the dataset root and passes `python -m control_vision.training.split_manifest` (see `docs/DATASET_SPLITS.md`). This is checked first, before images are decoded and before training starts. The manifest lists every image under `images/`, so move `images/unlabeled` out of the dataset first. `train` and `val` in `data.yaml` must be `images/train` and `images/val`, and the manifest must list every image in them. The manifest audit and training read the same image types (Ultralytics' list, including `.jpg`, `.png`, `.webp`, `.avif`, and `.jp2`).
 
 ### Exploratory runs without a manifest
 
