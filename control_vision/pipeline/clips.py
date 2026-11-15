@@ -162,7 +162,12 @@ def thumbnail(path: Path):
             raise OSError("PNG encoding failed")
         cache.write_bytes(data.tobytes())
     except OSError as exc:
-        cache.unlink(missing_ok=True)
+        try:
+            cache.unlink(missing_ok=True)
+        except OSError:
+            # A partial cache that cannot be removed fails to decode next
+            # time, so the clip is decoded again; never fail the refresh.
+            pass
         logging.getLogger(__name__).warning(
             "Could not cache the thumbnail for %s (%s); it will be decoded again on the next refresh.", path, exc)
     return frame
