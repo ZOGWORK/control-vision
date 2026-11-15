@@ -62,7 +62,7 @@ class TrainingDatasetTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         for split in ("train", "val"):
             (self.root / "images" / split).mkdir(parents=True)
             (self.root / "labels" / split).mkdir(parents=True)
@@ -240,7 +240,7 @@ class ModelPublishingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.models = self.root / "models"
         self.exported = self.root / "trained.onnx"
         self.exported.write_bytes(b"trained model bytes")
