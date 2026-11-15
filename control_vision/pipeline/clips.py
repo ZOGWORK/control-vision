@@ -119,8 +119,41 @@ def create_highlight(video: Path, output: Path, event_time_s: float, ffmpeg_path
     return start, end
 
 
+# Width of the cached clip thumbnail; the clip list shows it at 120 px.
+_THUMBNAIL_WIDTH = 240
+
+
+def thumbnail_cache_path(path: Path) -> Path:
+    return path.with_name(path.name + ".thumb.png")
+
+
 def thumbnail(path: Path):
+    """First frame of a clip, small, cached as a PNG beside the clip.
+
+    Decoding a clip's first frame can take seconds (AV1 sources on a busy
+    CPU took about 5.7 s each), and the clip list is rebuilt after every
+    review action. The cache is used only while it is at least as new as
+    the clip, so a regenerated clip gets a new thumbnail.
+    """
+    cache = thumbnail_cache_path(path)
+    try:
+        if cache.is_file() and cache.stat().st_mtime_ns >= path.stat().st_mtime_ns:
+            cached = cv2.imread(str(cache))
+            if cached is not None:
+                return cached
+    except OSError:
+        pass
     cap = cv2.VideoCapture(str(path))
     ok, frame = cap.read()
     cap.release()
-    return frame if ok else None
+    if not ok:
+        return None
+    height, width = frame.shape[:2]
+    if width > _THUMBNAIL_WIDTH:
+        frame = cv2.resize(frame, (_THUMBNAIL_WIDTH, max(1, round(height * _THUMBNAIL_WIDTH / width))),
+                           interpolation=cv2.INTER_AREA)
+    try:
+        cv2.imwrite(str(cache), frame)
+    except cv2.error:
+        logging.getLogger(__name__).warning("Could not cache the thumbnail for %s", path)
+    return frame
