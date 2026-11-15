@@ -31,7 +31,8 @@ def count_zone_cycles(track_rows: list[tuple], zones: dict, debounce_s: float = 
                     last_zone, last_change = current_zone, float(t_s)
             if state == "EMPTY" and current_zone in pickup_names:
                 state, pickup_zone, pickup_time = "AT_PICKUP", current_zone, float(t_s)
-            elif state == "AT_PICKUP" and current_zone in scoring_names and float(t_s) > pickup_time:
+            elif (state == "AT_PICKUP" and pickup_time is not None and current_zone in scoring_names
+                  and float(t_s) > pickup_time):
                 end_time = float(t_s)
                 cycles.append({"robot_id": robot_id, "start_t_s": pickup_time, "end_t_s": end_time,
                                "pickup_zone": pickup_zone, "scoring_zone": current_zone, "confidence": "medium"})
