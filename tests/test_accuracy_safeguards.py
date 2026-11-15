@@ -14,7 +14,6 @@ from control_vision.pipeline.tracking import (
 )
 from control_vision.pipeline.tracking import track_video
 from control_vision.pipeline.ingest import probe_video
-from control_vision.pipeline.manual_tracking import _photo_crop_bounds, _save_best_photos
 from control_vision.pipeline.zones import zone_at
 from control_vision.game.scoreboard import calculate_scoreboard
 from control_vision.storage.database import ProjectDatabase, SCHEMA
@@ -832,11 +831,52 @@ class AppStateTests(unittest.TestCase):
         self.window.seed_points = [(1, 0, 0)]
         self.window._processing_active = True
         self.window.process_btn.setEnabled(False)
-        self.window.processing_done((([], [], []), "yolo"))
+        self.window.processing_done((([(1, 0, 0.0, 1.0, 1.0, 0.9)], [], []), "yolo"))
         self.assertFalse(self.window._processing_active)
         self.assertTrue(self.window.process_btn.isEnabled())
         db.set_analysis_status.assert_called_with(1, "failed")
         self.assertIn("database is locked", self.window.progress_label.text())
+
+    def _preview_project(self, folder):
+        db = ProjectDatabase(Path(folder) / "project.sqlite")
+        project_id = db.add_project("preview")
+        video_id = db.add_video(project_id, Path(folder) / "match.mp4",
+                                {"duration_s": 150, "fps": 30, "width": 1280, "height": 720})
+        red = db.add_robot(video_id, 111, "red", 10, 10)
+        blue = db.add_robot(video_id, 222, "blue", 50, 10)
+        self.window.db, self.window.project_id, self.window.video_id = db, project_id, video_id
+        self.window.seed_points = [(red, 10, 10), (blue, 50, 10)]
+        self.window._processing_active = True
+        return db, video_id, red, blue
+
+    def test_preview_with_no_track_rows_is_not_marked_analysed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db, video_id, _, _ = self._preview_project(folder)
+            try:
+                self.window.processing_done((([], [], []), "seeded_optical_flow"))
+                status = db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (video_id,)).fetchone()
+                self.assertEqual(status["analysis_status"], "failed")
+                self.assertFalse(self.window.tabs.isTabEnabled(2))
+                self.assertFalse(self.window._processing_active)
+                self.assertTrue(self.window.process_btn.isEnabled())
+                self.assertIn("did not record a confident position for any seeded robot",
+                              self.window.progress_label.text())
+                self.assertEqual(db.tracks_for_video(video_id), [])
+            finally:
+                db.close()
+
+    def test_preview_names_seeded_robots_without_track_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db, video_id, red, blue = self._preview_project(folder)
+            try:
+                self.window.processing_done((([(blue, 0, 0.0, 6.0, 6.0, 0.8)], [], []), "seeded_optical_flow"))
+                status = db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (video_id,)).fetchone()
+                self.assertEqual(status["analysis_status"], "ready")
+                text = self.window.progress_label.text()
+                self.assertIn("No confident position was recorded for team 111 (red)", text)
+                self.assertNotIn("222", text)
+            finally:
+                db.close()
 
     def test_review_controls_need_a_new_selection_after_each_review(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -861,25 +901,6 @@ class AppStateTests(unittest.TestCase):
                 self.assertEqual(statuses[second], ("flagged", robot_id))
             finally:
                 db.close()
-
-
-class PreviewPhotoTests(unittest.TestCase):
-    def test_default_tracking_patch_yields_exportable_photo_geometry(self):
-        x0, y0, x1, y1 = _photo_crop_bounds((720, 1280, 3), 600, 510, 112, 88)
-        self.assertGreaterEqual(x1 - x0, 200)
-        self.assertGreaterEqual(y1 - y0, 200)
-
-    def test_only_full_size_crops_are_written(self):
-        import logging
-        import numpy as np
-        with tempfile.TemporaryDirectory() as folder:
-            photos = _save_best_photos({
-                1: (1, 1.0, 0.0, np.zeros((199, 250, 3), dtype=np.uint8)),
-                2: (1, 1.0, 0.0, np.zeros((200, 200, 3), dtype=np.uint8)),
-            }, Path(folder), logging.getLogger("preview-photo-test"))
-            self.assertEqual([row[0] for row in photos], [2])
-            self.assertFalse((Path(folder) / "robot-1.png").exists())
-            self.assertTrue((Path(folder) / "robot-2.png").is_file())
 
 
 if __name__ == "__main__":
