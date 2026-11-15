@@ -104,13 +104,13 @@ def debounced_zone_labels(samples: Sequence[Sample], zones: Mapping[str, Mapping
     continuously for at least ``debounce_s`` of track time before the
     debounced zone switches. The switch is backdated to the sample where the
     candidate was first seen, so entry times do not depend on history. The
-    very first zone obeys the same rule; samples before any zone is
-    confirmed are labelled None. A tracking gap longer than ``max_gap_s``
-    restarts the candidate's dwell (it was not observed during the gap).
+    debounced zone starts as "no zone", so the very first zone obeys the
+    same dwell rule. A tracking gap longer than ``max_gap_s`` restarts the
+    candidate's dwell (it was not observed during the gap).
     """
     labels: list[str | None] = []
-    has_stable, stable = False, None
-    has_candidate: bool = False
+    stable: str | None = None
+    has_candidate = False
     candidate: str | None = None
     candidate_start = 0
     previous_t: float | None = None
@@ -118,12 +118,12 @@ def debounced_zone_labels(samples: Sequence[Sample], zones: Mapping[str, Mapping
         raw = zone_at(x_ft, y_ft, zones)
         gap = previous_t is not None and max_gap_s is not None and t_s - previous_t > max_gap_s
         previous_t = t_s
-        if has_stable and raw == stable:
+        if raw == stable:
             has_candidate = False
         elif not has_candidate or raw != candidate or gap:
             has_candidate, candidate, candidate_start = True, raw, index
         if has_candidate and t_s - samples[candidate_start][0] >= debounce_s - 1e-9:
-            has_stable, stable, has_candidate = True, candidate, False
+            stable, has_candidate = candidate, False
             for earlier in range(candidate_start, index):
                 labels[earlier] = stable
         labels.append(stable)
