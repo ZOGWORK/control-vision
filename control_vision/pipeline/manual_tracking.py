@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -96,7 +96,8 @@ def track_seeded_video(video_path: Path, corners: list[list[float]],
     features: dict[int, np.ndarray | None] = {}
     templates: dict[int, np.ndarray | None] = {}
     last_quality = {rid: 0.0 for rid in robot_ids}
-    rows, best_photos = [], {}
+    rows: list[tuple[int, int, float, float, float, float]] = []
+    best_photos: dict[int, tuple[float, float, float, np.ndarray]] = {}
     sampled = 0
     frame_index = 0
     prev_gray = None
@@ -121,13 +122,15 @@ def track_seeded_video(video_path: Path, corners: list[list[float]],
                     x0, y0 = max(0, round(x - patch_width / 2)), max(0, round(y - patch_height))
                     x1, y1 = min(gray.shape[1], round(x + patch_width / 2)), min(gray.shape[0], round(y + 3))
                     templates[rid] = gray[y0:y1, x0:x1].copy() if x1 > x0 and y1 > y0 else None
-                    last_quality[rid] = 1.0 if features[rid] is not None and len(features[rid]) >= 4 else 0.25
+                    seeded_points = features[rid]
+                    last_quality[rid] = 1.0 if seeded_points is not None and len(seeded_points) >= 4 else 0.25
                 else:
                     observed = None
                     quality = 0.0
                     old_points = features.get(rid)
                     if old_points is not None and len(old_points) >= 4:
-                        new_points, status, errors = cv2.calcOpticalFlowPyrLK(
+                        # OpenCV stubs type nextPts as UMat; passing None asks OpenCV to allocate it.
+                        new_points, status, errors = cv2.calcOpticalFlowPyrLK(  # type: ignore[call-overload]
                             prev_gray, gray, old_points, None, winSize=(21, 21), maxLevel=3,
                             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03))
                         if new_points is not None and status is not None:
@@ -196,8 +199,9 @@ def track_seeded_video(video_path: Path, corners: list[list[float]],
     return rows, photo_rows, []
 
 
-def _save_best_photos(best_photos, photos_dir, logger):
-    photo_rows = []
+def _save_best_photos(best_photos: dict[int, tuple[float, float, float, np.ndarray]],
+                      photos_dir: Path | None, logger: logging.Logger) -> list[tuple[int, Path, float]]:
+    photo_rows: list[tuple[int, Path, float]] = []
     if photos_dir is None:
         return photo_rows
     photos_dir.mkdir(parents=True, exist_ok=True)
