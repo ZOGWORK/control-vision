@@ -47,12 +47,28 @@ class FrozenEntryPointTests(unittest.TestCase):
                 self.assertEqual(os.environ["YOLO_OFFLINE"], "true")
             run_gui.assert_called_once()
 
-    def test_source_run_leaves_ultralytics_settings_alone(self):
+    def test_source_run_also_disables_ultralytics_autoinstall(self):
+        # From source, auto-install would pip-install into the user's
+        # environment in the middle of processing.
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("YOLO_AUTOINSTALL", None)
+            os.environ.pop("YOLO_OFFLINE", None)
             with mock.patch("control_vision.app.main_window.run"):
                 self.assertEqual(entry.main([]), 0)
-            self.assertNotIn("YOLO_AUTOINSTALL", os.environ)
+            self.assertEqual(os.environ["YOLO_AUTOINSTALL"], "false")
+            self.assertEqual(os.environ["YOLO_OFFLINE"], "true")
+
+    def test_user_environment_settings_win(self):
+        with mock.patch.dict(os.environ, {"YOLO_AUTOINSTALL": "true", "YOLO_OFFLINE": "false"}, clear=False):
+            with mock.patch("control_vision.app.main_window.run"):
+                self.assertEqual(entry.main([]), 0)
+            self.assertEqual((os.environ["YOLO_AUTOINSTALL"], os.environ["YOLO_OFFLINE"]), ("true", "false"))
+
+    def test_source_run_still_runs_python_style_arguments_as_the_app(self):
+        # Only the frozen executable refuses -m/-c; from source they are app arguments.
+        with mock.patch("control_vision.app.main_window.run") as run_gui:
+            self.assertEqual(entry.main(["-c", "x"]), 0)
+        run_gui.assert_called_once()
 
 
 class SourceSmokeTest(unittest.TestCase):
