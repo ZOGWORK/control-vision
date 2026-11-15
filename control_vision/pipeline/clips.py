@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 
 FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html"
@@ -136,12 +137,15 @@ def thumbnail(path: Path):
     the clip, so a regenerated clip gets a new thumbnail.
     """
     cache = thumbnail_cache_path(path)
+    # Encode and decode in memory with Python file I/O: cv2.imread/imwrite
+    # cannot open non-ASCII Windows paths, and imwrite reports failure by
+    # returning False rather than raising.
     try:
         if cache.is_file() and cache.stat().st_mtime_ns >= path.stat().st_mtime_ns:
-            cached = cv2.imread(str(cache))
+            cached = cv2.imdecode(np.fromfile(cache, dtype=np.uint8), cv2.IMREAD_COLOR)
             if cached is not None:
                 return cached
-    except OSError:
+    except (OSError, ValueError):
         pass
     cap = cv2.VideoCapture(str(path))
     ok, frame = cap.read()
@@ -152,8 +156,13 @@ def thumbnail(path: Path):
     if width > _THUMBNAIL_WIDTH:
         frame = cv2.resize(frame, (_THUMBNAIL_WIDTH, max(1, round(height * _THUMBNAIL_WIDTH / width))),
                            interpolation=cv2.INTER_AREA)
+    encoded, data = cv2.imencode(".png", frame)
     try:
-        cv2.imwrite(str(cache), frame)
-    except cv2.error:
-        logging.getLogger(__name__).warning("Could not cache the thumbnail for %s", path)
+        if not encoded:
+            raise OSError("PNG encoding failed")
+        cache.write_bytes(data.tobytes())
+    except OSError as exc:
+        cache.unlink(missing_ok=True)
+        logging.getLogger(__name__).warning(
+            "Could not cache the thumbnail for %s (%s); it will be decoded again on the next refresh.", path, exc)
     return frame
