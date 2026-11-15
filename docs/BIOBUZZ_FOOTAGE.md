@@ -3,7 +3,7 @@
 - Training-set sweep, completed Tue Nov 10, 2026.
 - Scope: BIOBUZZ only (2026–27 season).
 - DECODE (2025–26) footage deliberately excluded.
-- No videos were downloaded.
+- The initial URL sweep did not download footage. Later local testing downloaded five Ri30H match clips and one WA Salk Q3 clip; no footage or extracted frames are committed.
 
 ## Coverage at a glance
 
@@ -11,14 +11,16 @@
 - **~300+ matches** in the footage (rough estimate)
 - Full-day livestreams: 16 (plus 1 team highlights reel)
 - Clipped single matches: 6 (FUN Robot in 30 Hours)
-- Ground truth: official scores for all of these events are published
-  on FIRST Events (ftc-events.firstinspires.org), so no hand-labeling
-  is needed for verification.
+- Official final scores are published on FIRST Events (ftc-events.firstinspires.org).
+  They validate aggregate score comparisons only. Robot detections, identities,
+  trajectories, and individual scoring cycles still require hand-labeled truth.
 
-## Camera angle — UNVERIFIED for every video
+## Camera angle and local sample status
 
-- A text fetch cannot show camera angle.
-- Do not assume fixed full-field vs handheld for any video below.
+- The downloaded Ri30H and WA Salk Q3 samples were visually inspected as fixed cameras. The Ri30H angle has notable human/field occlusion; distant robots are small in the WA Salk view.
+- WA Salk Q3 source: [FTC Quality Control match clip](https://www.youtube.com/watch?v=EFLYcMxrTOM); [official FIRST event result](https://ftc-events.firstinspires.org/2026/USWASAM1/qualifications) is red 180, blue 103.
+- Local frame extraction produced 577 **unlabeled** frames across those six clips. They are not a training set until boxes are labeled and an event-separated split is prepared.
+- All other listed URLs still need camera-angle screening.
 - FiM AV (Michigan) qualifier streams are normally fixed full-field
   cameras, but that is the usual pattern, not a verified fact here.
 - Confirm by watching a few minutes of each stream before training.
