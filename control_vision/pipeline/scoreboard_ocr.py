@@ -233,9 +233,10 @@ def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list
 
     The default of one sample per second is deliberate. On a real 720p match
     video each sampled frame took about 3 s to read, so the 12 s tail took
-    35-46 s at 1 fps and 73 s at 2 fps, and the denser sampling caught more
-    frames where OCR drops digits from the clean final screen (103 read as 3),
-    which made the blue proposal wrong rather than better.
+    35-46 s at 1 fps, 73 s at 2 fps and 151 s at 4 fps, and the denser
+    sampling caught more frames where OCR drops digits from the clean final
+    screen (103 read as 3), which made the blue proposal wrong (3) at both
+    2 and 4 fps rather than better.
     """
     try:
         from rapidocr_onnxruntime import RapidOCR
