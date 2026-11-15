@@ -1,7 +1,14 @@
+# Build the Windows one-folder release, run its smoke test and zip it.
+# Requires a clean tracked tree so SOURCE.txt names the exact source commit.
+param(
+    # Seconds the frozen smoke test may take before it is stopped.
+    [int]$SmokeTimeoutSeconds = 900
+)
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $repoRoot
 try {
+    $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
     $python = if ($env:CONTROL_VISION_PYTHON) { $env:CONTROL_VISION_PYTHON }
               elseif (Test-Path -LiteralPath (Join-Path $repoRoot ".venv\Scripts\python.exe")) {
                   Join-Path $repoRoot ".venv\Scripts\python.exe"
@@ -15,6 +22,7 @@ try {
         throw "Could not determine the source commit."
     }
     $releaseDir = Join-Path $repoRoot "build\release"
+    if (Test-Path -LiteralPath $releaseDir) { Remove-Item -LiteralPath $releaseDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
     @"
 Control Vision corresponding source
@@ -63,20 +71,40 @@ FFmpeg build and its linked libraries is provided with any public binary.
     $exe = Join-Path $repoRoot "dist\ControlVision\ControlVision.exe"
     if (-not (Test-Path -LiteralPath $exe)) { throw "PyInstaller did not produce ControlVision.exe." }
     $packageDir = Split-Path -Parent $exe
+
+    # The same notices are inside _internal; copy them beside the executable
+    # so they are visible to anyone who opens the folder.
     Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $packageDir
     $licenseDir = Join-Path $packageDir "licenses"
     New-Item -ItemType Directory -Force -Path $licenseDir | Out-Null
-    Copy-Item -LiteralPath (Join-Path $repoRoot "licenses\GPL-3.0.txt") -Destination $licenseDir
+    Copy-Item -Path (Join-Path $repoRoot "licenses\*.txt") -Destination $licenseDir
+    Copy-Item -LiteralPath (Join-Path $releaseDir "licenses\python-packages") -Destination $licenseDir -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "docs\THIRD_PARTY_NOTICES.md") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $releaseDir "SOURCE.txt") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $releaseDir "FFMPEG_LICENSE.txt") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $releaseDir "FFMPEG_BUILD.txt") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $releaseDir "FFMPEG_SOURCE.txt") -Destination $packageDir
+    foreach ($name in "SOURCE.txt", "FFMPEG_LICENSE.txt", "FFMPEG_BUILD.txt", "FFMPEG_SOURCE.txt") {
+        Copy-Item -LiteralPath (Join-Path $releaseDir $name) -Destination $packageDir
+    }
+    $buildSeconds = [math]::Round($buildTimer.Elapsed.TotalSeconds, 1)
+
+    # The executable is windowed, so wait on the process explicitly and read
+    # the JSON report it writes instead of console output.
+    $smokeReport = Join-Path $repoRoot "build\smoke-report.json"
+    if (Test-Path -LiteralPath $smokeReport) { Remove-Item -LiteralPath $smokeReport -Force }
     $previousQtPlatform = $env:QT_QPA_PLATFORM
     $env:QT_QPA_PLATFORM = "offscreen"
     try {
-        & $exe --smoke-test
-        if ($LASTEXITCODE -ne 0) { throw "Frozen application smoke test failed with exit code $LASTEXITCODE." }
+        $smokeTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        $process = Start-Process -FilePath $exe -ArgumentList @("--smoke-test", "--report", "`"$smokeReport`"") `
+            -PassThru -NoNewWindow
+        $null = $process.Handle  # Keep the handle so ExitCode is available after exit.
+        if (-not $process.WaitForExit($SmokeTimeoutSeconds * 1000)) {
+            Stop-Process -Id $process.Id -Force
+            throw "Frozen application smoke test did not finish within $SmokeTimeoutSeconds s."
+        }
+        $smokeSeconds = [math]::Round($smokeTimer.Elapsed.TotalSeconds, 1)
+        if (Test-Path -LiteralPath $smokeReport) { Get-Content -LiteralPath $smokeReport | Write-Output }
+        if ($process.ExitCode -ne 0) {
+            throw "Frozen application smoke test failed with exit code $($process.ExitCode)."
+        }
     } finally {
         if ($null -eq $previousQtPlatform) {
             Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
@@ -84,7 +112,21 @@ FFmpeg build and its linked libraries is provided with any public binary.
             $env:QT_QPA_PLATFORM = $previousQtPlatform
         }
     }
-    Write-Output "Verified build output: $exe"
+
+    $zip = Join-Path $repoRoot "dist\ControlVision-windows-x64-$($commit.Substring(0, 12)).zip"
+    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+    & (Join-Path $env:SystemRoot "System32\tar.exe") -a -c -f $zip -C (Join-Path $repoRoot "dist") ControlVision
+    if ($LASTEXITCODE -ne 0) { throw "Could not create $zip." }
+    $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+    "$zipHash  $(Split-Path -Leaf $zip)" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
+    $files = @(Get-ChildItem -LiteralPath $packageDir -Recurse -File)
+    $folderBytes = ($files | Measure-Object -Property Length -Sum).Sum
+    Write-Output ("Verified build output: {0}" -f $exe)
+    Write-Output ("Source commit: {0}" -f $commit)
+    Write-Output ("Build time: {0} s; frozen smoke test: {1} s" -f $buildSeconds, $smokeSeconds)
+    Write-Output ("Folder: {0} files, {1:N1} MiB" -f $files.Count, ($folderBytes / 1MB))
+    Write-Output ("Zip: {0} ({1:N1} MiB)" -f $zip, ((Get-Item -LiteralPath $zip).Length / 1MB))
+    Write-Output ("Zip SHA-256: {0}" -f $zipHash)
 } finally {
     Pop-Location
 }
