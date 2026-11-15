@@ -9,6 +9,8 @@ from typing import Callable
 import cv2
 
 from control_vision.pipeline.homography import matrix_from_corners, project_point
+from control_vision.pipeline.identity_recovery import IdentityRecovery
+from control_vision.pipeline.manual_tracking import _alliance_mask
 from control_vision.pipeline.zones import point_in_polygon
 
 
@@ -90,6 +92,50 @@ def _match_initial_seeds(seed_points, detections, assigned_robot_ids, assigned_t
     return best
 
 
+TRACKER_CONFIG = Path(__file__).resolve().parents[1] / "config" / "botsort.yaml"
+
+
+def _alliance_fractions(frame, bbox) -> tuple[float, float] | None:
+    """Fractions of red and blue alliance-colour pixels inside a detector box."""
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = (int(round(value)) for value in bbox)
+    x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+    if x2 - x1 < 4 or y2 - y1 < 4:
+        return None
+    hsv = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+    area = float((x2 - x1) * (y2 - y1))
+    return (cv2.countNonZero(_alliance_mask(hsv, "red")) / area,
+            cv2.countNonZero(_alliance_mask(hsv, "blue")) / area)
+
+
+def _tracker_config(base: dict, confidence_threshold: float, gmc_method: str | None = None,
+                    reid_model_path: Path | None = None) -> dict:
+    """Return the BoT-SORT settings for one run.
+
+    In Ultralytics 8.4 BYTETracker/BOTSORT, detections scoring at least
+    ``track_high_thresh`` take part in the first association, and only those
+    can start a track, when they also reach ``new_track_thresh``. Detections
+    above ``track_low_thresh`` but below ``track_high_thresh`` can only extend
+    an already tracked object in the second, IoU-only association. The detector
+    call already drops anything below the user's confidence, so with fixed 0.25
+    thresholds a robot detected at 0.22 under a 0.20 setting could never start
+    a track. Both thresholds follow the user's setting; the low threshold stays
+    below it so the two association stages keep their order.
+    """
+    if not 0.0 < confidence_threshold < 1.0:
+        raise ValueError(f"Detection confidence must be between 0 and 1, not {confidence_threshold}.")
+    config = dict(base)
+    config["track_high_thresh"] = confidence_threshold
+    config["new_track_thresh"] = confidence_threshold
+    config["track_low_thresh"] = min(float(base.get("track_low_thresh", 0.1)), confidence_threshold / 2)
+    if gmc_method is not None:
+        config["gmc_method"] = gmc_method
+    if reid_model_path is not None:
+        config["with_reid"] = True
+        config["model"] = str(reid_model_path.resolve())
+    return config
+
+
 def track_video(
     video_path: Path,
     model_path: Path,
@@ -103,11 +149,17 @@ def track_video(
     confidence_threshold: float = 0.25,
     goal_roi: list[list[float]] | None = None,
     reid_model_path: str | None = None,
+    gmc_method: str | None = None,
+    alliances: dict[int, str] | None = None,
 ) -> tuple[list[tuple[int, int, float, float, float, float]], list[tuple[int, Path, float]], list[dict]]:
     """Run local YOLO tracking at the requested sampling rate and map robot footpoints.
 
     Each seed is (database robot id, seed x pixel, seed y pixel). Seeds are associated
-    to the closest detector track in the first sample; afterward tracker IDs persist.
+    to the closest detector track in the opening window; afterward tracker IDs persist.
+    When a seeded robot's track ends, ``IdentityRecovery`` may re-link it to one
+    new track under strict one-to-one gating; otherwise the robot stays lost.
+    ``gmc_method`` overrides the configured BoT-SORT global motion compensation.
+    ``alliances`` maps robot id to "red" or "blue"; re-linking is off without it.
     """
     if not model_path.is_file():
         raise RuntimeError(f"YOLO11n model was not found at {model_path}. Add a trained local model in Settings.")
@@ -126,26 +178,29 @@ def track_video(
         raise RuntimeError(f"Could not read the frame rate from {video_path.name}.")
     stride = max(1, round(fps / sample_fps))
     sampled_total = max(1, total_frames // stride)
-    tracker_cfg = Path(__file__).resolve().parents[1] / "config" / "botsort.yaml"
+    reid_path = Path(reid_model_path) if reid_model_path else None
+    if reid_path is not None and not reid_path.is_file():
+        cap.release()
+        raise RuntimeError(f"Configured ReID model was not found at {reid_path}.")
     tracker_override = None
-    if reid_model_path:
-        reid_path = Path(reid_model_path)
-        if not reid_path.is_file():
-            cap.release()
-            raise RuntimeError(f"Configured ReID model was not found at {reid_path}.")
-        try:
-            import yaml
-            config = yaml.safe_load(tracker_cfg.read_text(encoding="utf-8"))
-            config["with_reid"] = True
-            config["model"] = str(reid_path.resolve())
-            tracker_override = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8", delete=False)
-            yaml.safe_dump(config, tracker_override)
-            tracker_override.close()
-            tracker_cfg = Path(tracker_override.name)
-            logger.info("BoT-SORT appearance ReID enabled using local model: %s", reid_path)
-        except Exception as exc:
-            cap.release()
-            raise RuntimeError(f"Could not configure the local ReID model: {exc}") from exc
+    try:
+        import yaml
+        config = _tracker_config(yaml.safe_load(TRACKER_CONFIG.read_text(encoding="utf-8")),
+                                 confidence_threshold, gmc_method, reid_path)
+        tracker_override = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8", delete=False)
+        yaml.safe_dump(config, tracker_override)
+        tracker_override.close()
+        tracker_cfg = Path(tracker_override.name)
+    except Exception as exc:
+        cap.release()
+        if tracker_override:
+            Path(tracker_override.name).unlink(missing_ok=True)
+        raise RuntimeError(f"Could not configure the tracker: {exc}") from exc
+    logger.info("BoT-SORT thresholds: high %.2f, new track %.2f, low %.2f; global motion compensation: %s",
+                config["track_high_thresh"], config["new_track_thresh"], config["track_low_thresh"],
+                config.get("gmc_method"))
+    if reid_path is not None:
+        logger.info("BoT-SORT appearance ReID enabled using local model: %s", reid_path)
     else:
         logger.warning("BoT-SORT appearance ReID is disabled; using motion and overlap association only.")
     try:
@@ -157,6 +212,14 @@ def track_video(
             Path(tracker_override.name).unlink(missing_ok=True)
         raise
     seed_to_track: dict[int, int] = {}
+    recovery_alliances = {rid: str(value).strip().lower() for rid, value in (alliances or {}).items()}
+    recovery = IdentityRecovery(alliances=recovery_alliances)
+    if not alliances:
+        logger.warning("No robot alliances were given, so lost robots are not re-linked to new tracks.")
+    recoveries = 0
+    # Field rows of tracks no robot owns yet, so a re-linked track keeps the
+    # positions it recorded between its birth and the re-link.
+    unowned_rows: dict[int, list[tuple[int, float, float, float, float]]] = {}
     identities_seeded = False
     seed_assignment_deadline_s = 3.0
     robot_ids = [seed[0] for seed in seed_points]
@@ -221,21 +284,61 @@ def track_video(
             if not identities_seeded and detections and t_s <= seed_assignment_deadline_s:
                 max_distance = max(60.0, min(frame.shape[:2]) * 0.22)
                 matches = _match_initial_seeds(seed_points, detections, set(seed_to_track),
-                                               set(seed_to_track.values()), max_distance)
+                                               recovery.ever_assigned, max_distance)
                 for robot_id, (track_id, distance) in matches.items():
                     seed_to_track[robot_id] = track_id
+                    recovery.note_assignment(track_id)
                     logger.info("Seeded robot %d to detector track %d at %.1f px from click", robot_id, track_id, distance)
                 identities_seeded = len(seed_to_track) == len(robot_ids)
                 if matches:
                     logger.info("Seeded %d of %d identities during initial %.1fs window", len(seed_to_track), len(robot_ids), seed_assignment_deadline_s)
+            visible: dict[int, tuple[float, float] | None] = {}
+            boxes_by_track = {det[0]: det[4] for det in detections if det[0] >= 0}
+            for tid, x, y, conf, _ in detections:
+                if tid < 0:
+                    continue
+                x_ft, y_ft = project_point(matrix, x, y)
+                in_field = 0 <= x_ft <= 12 and 0 <= y_ft <= 12
+                visible[tid] = (x_ft, y_ft) if in_field else None
+                if in_field and tid not in recovery.ever_assigned:
+                    unowned_rows.setdefault(tid, []).append((frame_index, t_s, x_ft, y_ft, conf))
+            recovery.observe_tracks(t_s, visible)
+            if seed_to_track:
+                owned = set(seed_to_track.values())
+                colours = {}
+                if any(tid not in visible for tid in owned):
+                    # Only needed while a seeded robot is missing.
+                    for tid in visible:
+                        if tid not in owned:
+                            fractions = _alliance_fractions(frame, boxes_by_track[tid])
+                            if fractions is not None:
+                                colours[tid] = fractions
+                for item in recovery.recover(t_s, visible, seed_to_track, logger, colours):
+                    seed_to_track[item.robot_id] = item.new_track_id
+                    recovery.apply(item)
+                    recoveries += 1
+                    # The current frame is recorded below like any owned track.
+                    backfill = [row for row in unowned_rows.pop(item.new_track_id, []) if row[0] != frame_index]
+                    rows.extend((item.robot_id, *row) for row in backfill)
+                    logger.info("Recovered robot %d at %.2fs: track %d -> new track %d after %.2fs missing; first "
+                                "footpoint %.2f ft from last position (gate %.2f ft); %d earlier positions kept",
+                                item.robot_id, t_s, item.old_track_id, item.new_track_id, item.absence_s,
+                                item.distance_ft, item.gate_ft, len(backfill))
+            for tid in [tid for tid, buffered in unowned_rows.items()
+                        if tid in recovery.ever_assigned or t_s - buffered[-1][1] > recovery.rules.max_absence_s]:
+                # Keep only buffers that could still be re-linked.
+                del unowned_rows[tid]
             for tid, x, y, conf, bbox in detections:
                 robot_id = next((rid for rid, assigned in seed_to_track.items() if assigned == tid), None)
                 if robot_id is None:
                     continue
-                x_ft, y_ft = project_point(matrix, x, y)
-                if not (0 <= x_ft <= 12 and 0 <= y_ft <= 12):
+                position = visible.get(tid)
+                if position is None:
                     logger.info("Track %s outside calibrated field at %.2fs; skipped", robot_id, t_s)
                     continue
+                x_ft, y_ft = position
+                colour = _alliance_fractions(frame, bbox) if recovery.wants_colour(robot_id) else None
+                recovery.observe_robot(robot_id, t_s, x_ft, y_ft, colour)
                 rows.append((robot_id, frame_index, t_s, x_ft, y_ft, conf))
                 robot_positions.append((robot_id, x, y))
                 x1, y1, x2, y2 = bbox
@@ -317,7 +420,11 @@ def track_video(
             rows.append((row[0], row[1], row[2], sum(r[3] for r in neighbors) / len(neighbors),
                          sum(r[4] for r in neighbors) / len(neighbors), row[5]))
     rows.sort(key=lambda row: (row[1], row[0]))
-    logger.info("Sampled frames: %d; mapped track points: %d", sampled, len(rows))
+    logger.info("Sampled frames: %d; mapped track points: %d; identity recoveries: %d", sampled, len(rows), recoveries)
+    for robot_id in robot_ids:
+        reference = recovery.colour_reference(robot_id)
+        if reference is not None:
+            logger.info("Robot %d own alliance-colour reference: %.3f", robot_id, reference)
     if len(seed_to_track) < len(robot_ids):
         logger.warning("Only %d of %d robot identities were safely matched within %.1fs. Unmatched seeds are omitted instead of guessed.",
                        len(seed_to_track), len(robot_ids), seed_assignment_deadline_s)
