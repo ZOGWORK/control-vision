@@ -50,7 +50,8 @@ class CoreScoringTests(unittest.TestCase):
                  "event_alliance": "red", "scoring_alliance": "blue"}
         board = calculate_scoreboard([event], self.robots)
         self.assertEqual(board["alliance_points"], {"red": 0, "blue": 5})
-        self.assertEqual(board["team_points"][1], 5)
+        # A red robot is not credited points the reviewer assigned to blue.
+        self.assertEqual(board["team_points"][1], 0)
 
     def test_one_shot_event_and_robot_iterators_score_once(self):
         board = calculate_scoreboard(iter([{"robot_id": 1, "status": "confirmed", "points": 5}]),
