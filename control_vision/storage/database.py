@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,11 @@ CREATE TABLE IF NOT EXISTS clips (id INTEGER PRIMARY KEY, scoring_event_id INTEG
 CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, path TEXT NOT NULL, t_s REAL NOT NULL);
 """
 
-_UNCHANGED = object()
+_UNCHANGED: Any = object()
+GENERATED_SOURCES = frozenset({"zone_crossing", "goal_roi"})
+EVENT_STATUSES = frozenset({"confirmed", "flagged", "rejected"})
+CONFIDENCES = frozenset({"high", "medium", "low"})
+ALLIANCES = frozenset({"red", "blue"})
 
 
 def _inserted_id(cursor: sqlite3.Cursor) -> int:
@@ -29,7 +34,7 @@ def _inserted_id(cursor: sqlite3.Cursor) -> int:
     return int(row_id)
 
 
-def _match_preserved_events(events: list[dict], preserved: list[sqlite3.Row]) -> dict[int, int]:
+def _match_preserved_events(events: list[dict], preserved: Sequence[Any]) -> dict[int, int]:
     """Match same-source candidates by maximum count, then minimum time error."""
     matched: dict[int, int] = {}
     keys = {(event.get("robot_id") if event.get("robot_id") is not None else 0,
@@ -82,7 +87,20 @@ class ProjectDatabase:
         self.path = path
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
-        self.connection.executescript(SCHEMA)
+        try:
+            self.connection.executescript(SCHEMA)
+            # One explicit transaction: SQLite DDL is transactional, so a
+            # failure part-way leaves the old schema intact for a clean retry.
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._migrate()
+            self.connection.commit()
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            self.connection.close()
+            raise
+
+    def _migrate(self) -> None:
         video_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(videos)")}
         added_analysis_status = "analysis_status" not in video_columns
         for column in ("official_red", "official_blue", "red_disqualified", "blue_disqualified",
@@ -111,7 +129,8 @@ class ProjectDatabase:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN scoring_alliance TEXT")
         if "video_id" not in event_columns:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE")
-            self.connection.execute("UPDATE scoring_events SET video_id=(SELECT video_id FROM robots WHERE robots.id=scoring_events.robot_id) WHERE robot_id IS NOT NULL")
+        # Idempotent backfill for robot-owned events that predate video_id.
+        self.connection.execute("UPDATE scoring_events SET video_id=(SELECT video_id FROM robots WHERE robots.id=scoring_events.robot_id) WHERE video_id IS NULL AND robot_id IS NOT NULL")
         if "origin_robot_id" not in event_columns:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN origin_robot_id INTEGER")
         if added_analysis_status:
@@ -123,7 +142,6 @@ class ProjectDatabase:
                 "OR EXISTS (SELECT 1 FROM cycles c JOIN robots r ON r.id=c.robot_id WHERE r.video_id=videos.id) "
                 "OR EXISTS (SELECT 1 FROM scoring_events e WHERE e.video_id=videos.id)"
             )
-        self.connection.commit()
 
     def add_project(self, name: str) -> int:
         cursor = self.connection.execute("INSERT INTO projects(name) VALUES (?)", (name,))
@@ -202,6 +220,9 @@ class ProjectDatabase:
                 raise ValueError("A cycle belongs to a robot outside this analysis")
             if any(event.get("robot_id") is not None and int(event["robot_id"]) not in target_ids for event in events):
                 raise ValueError("A generated event belongs to a robot outside this analysis")
+            unsupported = {event.get("source", "zone_crossing") for event in events} - GENERATED_SOURCES
+            if unsupported:
+                raise ValueError(f"Unsupported generated event source: {sorted(unsupported)}")
             video_id = next(iter(video_ids))
             self.connection.execute(
                 f"DELETE FROM scoring_events WHERE robot_id IN ({placeholders}) "
@@ -225,6 +246,22 @@ class ProjectDatabase:
                 "WHERE video_id=? AND origin_robot_id IS NOT NULL", (video_id,),
             ).fetchall()
             matched = _match_preserved_events(events, preserved)
+            # Legacy reviewed events predate origin_robot_id. Match them by
+            # their credited robot with the same one-to-one 0.5 s rule.
+            unmatched = [index for index in range(len(events))
+                         if index not in matched and events[index].get("robot_id") is not None]
+            legacy_rows = [{"id": int(row["id"]), "origin_robot_id": row["robot_id"],
+                            "source": row["source"], "t_s": row["t_s"]}
+                           for row in self.connection.execute(
+                               "SELECT id,robot_id,source,t_s FROM scoring_events WHERE video_id=? "
+                               "AND origin_robot_id IS NULL AND robot_id IS NOT NULL "
+                               "AND status IN ('confirmed','rejected')", (video_id,))]
+            legacy_matched = _match_preserved_events([events[index] for index in unmatched], legacy_rows)
+            for local_index, row_id in legacy_matched.items():
+                index = unmatched[local_index]
+                matched[index] = row_id
+                self.connection.execute("UPDATE scoring_events SET origin_robot_id=? WHERE id=?",
+                                        (events[index]["robot_id"], row_id))
             used_retained_ids: set[int] = set(matched.values())
             for index, event in enumerate(events):
                 source = event.get("source", "zone_crossing")
@@ -233,8 +270,8 @@ class ProjectDatabase:
                 retained_id = matched.get(index)
                 retained = {"id": retained_id} if retained_id is not None else None
                 if not retained and candidate_robot_id is not None:
-                    # Legacy reviewed events predate origin_robot_id. An exact,
-                    # unique timestamp match preserves them after reassignment.
+                    # A legacy reviewed event reassigned to another robot keeps
+                    # only an exact, unique timestamp match.
                     legacy = self.connection.execute(
                         "SELECT id,robot_id FROM scoring_events WHERE video_id=? AND origin_robot_id IS NULL "
                         "AND source=? AND status IN ('confirmed','rejected') AND ABS(t_s-?)<0.001",
@@ -263,21 +300,39 @@ class ProjectDatabase:
         return event_ids
 
     def add_scoring_event(self, robot_id: int, t_s: float, source: str = "manual") -> int:
+        robot = self.connection.execute("SELECT video_id FROM robots WHERE id=?", (robot_id,)).fetchone()
+        if robot is None:
+            raise ValueError(f"Unknown robot {robot_id}")
         cursor = self.connection.execute(
             "INSERT INTO scoring_events(robot_id,video_id,t_s,points,confidence,status,source,event_type) VALUES (?,?,?,0,'low','flagged',?,'unclassified')",
-            (robot_id, self.connection.execute("SELECT video_id FROM robots WHERE id=?", (robot_id,)).fetchone()[0] if robot_id is not None else None, t_s, source),
+            (robot_id, robot["video_id"], t_s, source),
         )
         self.connection.commit()
         return _inserted_id(cursor)
 
-    def review_event(self, event_id: int, status: str, points: int, robot_id: int | None | object = _UNCHANGED, event_type: str = "unclassified", confidence: str = "low", scoring_alliance: str | None = None) -> None:
+    def review_event(self, event_id: int, status: str, points: int, robot_id: int | None | object = _UNCHANGED,
+                     event_type: str = _UNCHANGED, confidence: str = _UNCHANGED,
+                     scoring_alliance: str | None = _UNCHANGED) -> None:
+        """Review an event. Fields left unspecified keep their stored values."""
+        if status not in EVENT_STATUSES:
+            raise ValueError(f"Unsupported event status: {status}")
+        if confidence is not _UNCHANGED and confidence not in CONFIDENCES:
+            raise ValueError(f"Unsupported confidence: {confidence}")
+        if scoring_alliance is not _UNCHANGED and scoring_alliance is not None and scoring_alliance not in ALLIANCES:
+            raise ValueError(f"Unsupported scoring alliance: {scoring_alliance}")
         with self.connection:
-            event = self.connection.execute("SELECT video_id,robot_id FROM scoring_events WHERE id=?", (event_id,)).fetchone()
+            event = self.connection.execute("SELECT video_id,robot_id,event_type,confidence,scoring_alliance FROM scoring_events WHERE id=?", (event_id,)).fetchone()
             if event is None:
                 raise ValueError(f"Unknown scoring event {event_id}")
             video_id = event["video_id"]
             if robot_id is _UNCHANGED:
                 robot_id = event["robot_id"]
+            if event_type is _UNCHANGED:
+                event_type = event["event_type"]
+            if confidence is _UNCHANGED:
+                confidence = event["confidence"]
+            if scoring_alliance is _UNCHANGED:
+                scoring_alliance = event["scoring_alliance"]
             if robot_id is not None:
                 robot = self.connection.execute("SELECT video_id FROM robots WHERE id=?", (robot_id,)).fetchone()
                 if robot is None:
