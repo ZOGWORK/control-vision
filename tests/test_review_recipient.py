@@ -69,6 +69,15 @@ class ReviewRecipientDatabaseTests(unittest.TestCase):
         self.db.review_event(event_id, "confirmed", 5)
         self.assertEqual(_totals(self.db, self.video), {"red": 0, "blue": 5})
 
+    def test_zero_point_hive_tip_still_needs_a_recipient(self):
+        # HIVE TIPs count toward POLLINATOR Ranking Points whatever their points.
+        event_id = _unattributed_event(self.db, self.robots[1001])
+        for event_type in ("hive_tip_auto", "hive_tip_teleop"):
+            with self.subTest(event_type=event_type), self.assertRaisesRegex(ValueError, "attributed robot"):
+                self.db.review_event(event_id, "confirmed", 0, None, event_type, "high", None)
+        self.db.review_event(event_id, "confirmed", 0, None, "hive_tip_teleop", "high", "red")
+        self.assertEqual(self.event(event_id)["status"], "confirmed")
+
     def test_zero_points_and_rejections_need_no_recipient(self):
         zero = _unattributed_event(self.db, self.robots[1001], 10.0)
         rejected = _unattributed_event(self.db, self.robots[1001], 20.0)
