@@ -39,10 +39,12 @@ def _disqualified(video: Mapping[str, Any]) -> set[str]:
 def _scoreboard(video: Mapping[str, Any], robots: list[dict[str, Any]], events: list[dict[str, Any]],
                 qualification_disqualified_robot_ids: set[int] | None = None) -> dict:
     """The single scoreboard every exported number is derived from."""
+    # Pass team DQ only when present so callers on an older scoreboard keep working.
+    team_dq = ({"qualification_disqualified_robot_ids": qualification_disqualified_robot_ids}
+               if qualification_disqualified_robot_ids else {})
     return calculate_scoreboard(events, robots, _int_setting(video, "swarm_threshold", 16),
                                 _int_setting(video, "pollinator_1_threshold", 4),
-                                _int_setting(video, "pollinator_2_threshold", 7), _disqualified(video),
-                                qualification_disqualified_robot_ids)
+                                _int_setting(video, "pollinator_2_threshold", 7), _disqualified(video), **team_dq)
 
 
 def _lookup(points: Mapping[Any, Any], robot_id: int) -> int:
