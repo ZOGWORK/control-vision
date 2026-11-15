@@ -1,0 +1,29 @@
+name: Frame extractor
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  extractor:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements-extract.txt
+          python -m pip install mypy==2.4.1
+      - name: Typecheck
+        run: python -m mypy --ignore-missing-imports --check-untyped-defs control_vision/training/extract_frames.py
+      - name: Test
+        run: python -m unittest discover -s tests -p test_frame_extraction.py -v
+      - name: Build source bytecode
+        run: python -m compileall -q control_vision/training/extract_frames.py
