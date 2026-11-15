@@ -364,26 +364,28 @@ class ExportTests(unittest.TestCase):
     def test_scout_export_accepts_sqlite_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             db = ProjectDatabase(Path(directory) / "event.db")
-            project = db.add_project("event")
-            video_id = db.add_video(project, Path(directory) / "videos" / "Q2.mp4",
-                                    {"duration_s": 150.0, "fps": 30.0, "width": 1280, "height": 720}, "TEST", "Q2")
-            red = db.add_robot(video_id, 1001, "red", 50, 60)
-            db.add_robot(video_id, 2002, "blue", 70, 80)
-            scored = db.add_scoring_event(red, 12.0)
-            db.review_event(scored, "confirmed", 5, red, "nectar_floor", "high")
-            foul = db.add_scoring_event(red, 30.0)
-            db.review_event(foul, "confirmed", 15, red, "major_foul", "high", "blue")
-            pending = db.add_scoring_event(red, 50.0)
-            for event_id in (scored, foul, pending):
-                db.add_clip(event_id, Path(directory) / "clips" / f"clip_{event_id}.mp4", 0.0, 6.0)
-            db.set_official_scores(video_id, 5, 15)
-            db.replace_tracks([(red, frame, frame * DT, 1.0, 1.0, 0.9) for frame in range(8)], [red])
-            video = db.connection.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
-            target = Path(directory) / "scout.json"
-            export_scout_json(target, video, db.robots_for_video(video_id), db.tracks_for_video(video_id),
-                              db.cycles_for_video(video_id), db.events_for_video(video_id),
-                              db.clips_for_video(video_id), db.photos_for_video(video_id), ZONES)
-            db.close()
+            try:
+                project = db.add_project("event")
+                video_id = db.add_video(project, Path(directory) / "videos" / "Q2.mp4",
+                                        {"duration_s": 150.0, "fps": 30.0, "width": 1280, "height": 720}, "TEST", "Q2")
+                red = db.add_robot(video_id, 1001, "red", 50, 60)
+                db.add_robot(video_id, 2002, "blue", 70, 80)
+                scored = db.add_scoring_event(red, 12.0)
+                db.review_event(scored, "confirmed", 5, red, "nectar_floor", "high")
+                foul = db.add_scoring_event(red, 30.0)
+                db.review_event(foul, "confirmed", 15, red, "major_foul", "high", "blue")
+                pending = db.add_scoring_event(red, 50.0)
+                for event_id in (scored, foul, pending):
+                    db.add_clip(event_id, Path(directory) / "clips" / f"clip_{event_id}.mp4", 0.0, 6.0)
+                db.set_official_scores(video_id, 5, 15)
+                db.replace_tracks([(red, frame, frame * DT, 1.0, 1.0, 0.9) for frame in range(8)], [red])
+                video = db.connection.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
+                target = Path(directory) / "scout.json"
+                export_scout_json(target, video, db.robots_for_video(video_id), db.tracks_for_video(video_id),
+                                  db.cycles_for_video(video_id), db.events_for_video(video_id),
+                                  db.clips_for_video(video_id), db.photos_for_video(video_id), ZONES)
+            finally:
+                db.close()
             payload = json.loads(target.read_text(encoding="utf-8"))
         self.assertEqual(payload["video"], "Q2.mp4")
         self.assertEqual(payload["official_alliance_scores"], {"red": 5, "blue": 15})
