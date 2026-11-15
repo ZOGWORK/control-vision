@@ -18,14 +18,12 @@ from typing import Any, BinaryIO, Callable, Iterator
 import cv2
 import numpy as np
 
-from control_vision.training import split_manifest
-from control_vision.training.split_manifest import validate_split_manifest
+# IMAGE_SUFFIXES is Ultralytics' image list, shared with the manifest audit so
+# it covers every image that is trained on. Decoding is checked below on the
+# actual training machine before an image enters a dataset hash or split.
+from control_vision.training.split_manifest import IMAGE_SUFFIXES, validate_split_manifest
 
 
-# Ultralytics 8.4.210 data.utils.IMG_FORMATS; decoding is checked below on
-# the actual training machine before an image enters a dataset hash or split.
-IMAGE_SUFFIXES = {".avif", ".bmp", ".dng", ".heic", ".heif", ".jp2", ".jpeg",
-                  ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+")
 MIN_OPSET = 12
@@ -234,24 +232,17 @@ def training_split_provenance(root: Path, config: dict, exploratory: bool = Fals
         raise ValueError(f"{MANIFEST_NAME} is missing from the dataset root {root}; release training needs it "
                          f"(see docs/DATASET_SPLITS.md), or pass --exploratory-without-manifest for an "
                          f"unverified local run")
-    trained: dict[str, int] = {}
     for split in ("train", "val"):
         images_dir = _split_images_dir(root, config, split)
         if images_dir != (root / "images" / split).resolve():
             raise ValueError(f"{split} in data.yaml must be images/{split} so {MANIFEST_NAME} covers the "
                              f"images that are trained on (got {images_dir})")
-        trained[split] = sum(1 for path in images_dir.rglob("*")
-                             if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
+    # The audit rejects any image under images/ that the manifest does not list,
+    # using the same IMAGE_SUFFIXES that select training images.
     try:
         audit = validate_split_manifest(root, manifest)
     except ValueError as exc:
         raise ValueError(f"{MANIFEST_NAME}: {exc}") from None
-    for split, count in trained.items():
-        # The manifest audit only sees its own image types; every trained image must be listed.
-        if audit["images"][split] != count:
-            raise ValueError(f"{MANIFEST_NAME}: images/{split} has {count} image(s) but the manifest lists "
-                             f"{audit['images'][split]}; manifest images must be "
-                             f"{', '.join(sorted(split_manifest.IMAGE_SUFFIXES))}")
     return {"mode": AUDITED, "manifest_sha256": audit["manifest_sha256"], "matches": audit["matches"],
             "events": audit["events"], "holdout_events": audit["holdout_events"], "images": audit["images"]}
 
