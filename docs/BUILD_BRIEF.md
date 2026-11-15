@@ -164,7 +164,7 @@
 ## Project structure
 
 - control_vision/
-- main.py (entry point).
+- `__main__.py` (entry point).
 - app/ (PySide6 windows, one file per screen).
 - pipeline/ (ingest, detect, track, homography, zones, cycles, scoring, clips).
 - training/ (dataset tools, training scripts, ONNX export).
@@ -371,7 +371,7 @@
 - Scores are in the video descriptions = free ground truth.
 - Biggest chunk: Michigan FiM AV qualifiers (~200+ matches).
 - Ground truth: official scores on ftc-events.firstinspires.org.
-- No hand-labeling needed for verification.
+- Official scores cover aggregate totals only. Detections, identities, trajectories, and individual cycles still need hand-labeled truth on a holdout sample.
 - Camera angle is UNVERIFIED for every video.
 - Watch a few minutes of each before training.
 - Confirm fixed full-field view.
@@ -439,7 +439,7 @@
 
 ## Repo and workflow
 
-- Repo: ZOGWORK/control-vision, private. Created Nov 10, 2026.
+- Repo: ZOGWORK/control-vision, public as of Nov 13, 2026 (see Working with two agents). Created Nov 10, 2026.
 - URL: https://github.com/ZOGWORK/control-vision
 - README, this brief, and the footage list are already on main.
 - Every change via PR once building starts.
@@ -467,7 +467,7 @@
 
 ## Appendix — BIOBUZZ footage list (26 URLs)
 
-- No videos were downloaded. Download with yt-dlp as needed.
+- The initial URL sweep did not download footage. Later local testing downloaded five Ri30H match clips and one WA Salk Q3 clip (577 unlabeled frames extracted); no footage or frames are committed. Download more with yt-dlp as needed; see `docs/BIOBUZZ_FOOTAGE.md`.
 - Ground truth for every event: official scores on ftc-events.firstinspires.org.
 
 ### Michigan qualifiers (FiM AV)

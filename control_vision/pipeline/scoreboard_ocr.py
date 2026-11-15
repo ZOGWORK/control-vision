@@ -4,7 +4,7 @@ import re
 import logging
 import math
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import cv2
 import numpy as np
@@ -27,60 +27,349 @@ def _read_digits(engine, frame: np.ndarray, polygon: list[list[float]]) -> tuple
     crop = cv2.bitwise_and(crop, crop, mask=mask)
     # UI overlays are often small in 720p streams. Enlarging the ROI helps OCR.
     crop = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-    result = engine(crop)
+    rows = _ocr_rows(engine(crop))
+    rows.sort(key=lambda row: float(row[0][:, 0].mean()))
+    text = " ".join(row[1] for row in rows)
+    line = _score_line(rows)
+    if not line:
+        return None, 0.0, text
+    # Prefer reading the score's whole line at once; fall back to merging the
+    # separate detections when that does not give a plausible score.
+    value, confidence, line_text = _recognise_line(engine, crop, line)
+    if value is not None:
+        return value, confidence, line_text
+    value, confidence = _merge_line(line)
+    return value, confidence, text
+
+
+# FTC scores fit in three digits; a longer merged reading is not one score.
+_MAX_SCORE_DIGITS = 3
+# Two character slots from different detections are the same glyph read
+# twice when their horizontal extents overlap by at least this fraction of
+# the narrower one. Detection boxes are drawn wider than the text, so boxes
+# of neighbouring glyphs can overlap too: on a real match video neighbouring
+# glyphs overlapped by up to 35%, and a repeated reading of one glyph by 43%
+# or more. A repeated reading that agrees on the digit needs only the lower
+# overlap; a disagreeing one (one glyph read as 1 and as 7) needs the higher.
+_SAME_DIGIT_OVERLAP = 0.4
+_SAME_GLYPH_OVERLAP = 0.5
+# Two detections are on the same text line when their vertical extents
+# overlap by at least this fraction of the shorter one.
+_SAME_LINE_OVERLAP = 0.5
+# Margin above and below the score line, as a fraction of its height, when
+# the whole line is recognised at once. On a real match video margins of 0
+# to 15% read every checked frame; 30% or more began to lose a lone "0".
+_LINE_MARGIN = 0.1
+
+
+class _Token(NamedTuple):
+    """One OCR detection with digits: its box extent, text and confidence."""
+    x0: float
+    x1: float
+    y0: float
+    y1: float
+    text: str
+    confidence: float
+
+
+class _Glyph(NamedTuple):
+    """One digit of a detection, at its share of the detection's box."""
+    x0: float
+    x1: float
+    char: str
+    confidence: float
+    token: int
+
+
+def _ocr_rows(result) -> list[tuple[np.ndarray, str, float]]:
+    """(box points, text, confidence) for each OCR detection that has a box."""
     raw = result[0] if isinstance(result, tuple) else result
-    records = []
+    rows = []
     if raw and hasattr(raw[0], "txts"):
         output = raw[0]
-        boxes = getattr(output, "boxes", ()) or ()
-        for box, text, confidence in zip(boxes, output.txts, output.scores):
-            records.append((float(np.asarray(box)[:, 0].mean()), str(text), float(confidence)))
+        # Newer RapidOCR releases return the boxes as one numpy array.
+        boxes = getattr(output, "boxes", None)
+        for box, text, confidence in zip(() if boxes is None else boxes, output.txts, output.scores):
+            rows.append((np.asarray(box, dtype=np.float64).reshape(-1, 2), str(text), float(confidence)))
     else:
         for row in raw or []:
             if len(row) >= 3:
-                box, text, confidence = row[0], str(row[1]), float(row[2])
-                records.append((float(np.asarray(box)[:, 0].mean()), text, confidence))
-    records.sort(key=lambda item: item[0])
-    # PaddleOCR commonly returns one record per character on large score
-    # overlays. Join spatially ordered digits before converting to a score.
-    tokens = [(x, re.sub(r"\D", "", text), confidence, text)
-              for x, text, confidence in records if re.sub(r"\D", "", text)]
-    tokens = [token for token in tokens if len(token[1]) <= 3]
+                rows.append((np.asarray(row[0], dtype=np.float64).reshape(-1, 2), str(row[1]), float(row[2])))
+    return rows
+
+
+def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+    """Overlap of two intervals as a fraction of the shorter one."""
+    shorter = min(a1 - a0, b1 - b0)
+    if shorter <= 0:
+        return 0.0
+    return max(0.0, min(a1, b1) - max(a0, b0)) / shorter
+
+
+def _plausible_score(digit_text: str) -> int | None:
+    """The score these digits show, or None if they cannot be one score.
+
+    A reading longer than three digits is not a plausible score, and scores
+    are not shown zero-padded, so a leading zero means a digit before it was
+    not read (103 read as "03").
+    """
+    if not digit_text or len(digit_text) > _MAX_SCORE_DIGITS or (len(digit_text) > 1 and digit_text[0] == "0"):
+        return None
+    return int(digit_text)
+
+
+def _score_line(rows: list[tuple[np.ndarray, str, float]]) -> list[_Token]:
+    """The digit detections on the text line that shows the score.
+
+    Detections with digits are grouped into text lines by vertical overlap
+    and the line with the tallest text is taken, since the score is the
+    largest text in its scoreboard area. Detections with more than three
+    digits (team numbers) are ignored.
+    """
+    tokens = []
+    for points, token_text, confidence in rows:
+        digits = re.sub(r"\D", "", token_text)
+        if not digits or len(digits) > _MAX_SCORE_DIGITS:
+            continue
+        x0, y0 = points.min(axis=0)
+        x1, y1 = points.max(axis=0)
+        tokens.append(_Token(float(x0), float(x1), float(y0), float(y1), re.sub(r"\s", "", token_text), confidence))
     if not tokens:
-        return None, 0.0, " ".join(record[1] for record in records)
-    digit_text = "".join(token[1] for token in tokens)
-    if len(digit_text) > 3:
-        # The user-drawn crop contains extraneous digits. Prefer the most
-        # confident OCR token rather than accidentally reading a team number.
-        best = max(tokens, key=lambda token: (token[2], len(token[1])))
-        digit_text = best[1]
-        confidence = best[2]
+        return []
+    lines: list[list[_Token]] = []
+    for token in sorted(tokens, key=lambda item: (item.y0 + item.y1) / 2):
+        for line in lines:
+            if _overlap(line[0].y0, line[0].y1, token.y0, token.y1) >= _SAME_LINE_OVERLAP:
+                line.append(token)
+                break
+        else:
+            lines.append([token])
+    return max(lines, key=lambda items: (max(item.y1 - item.y0 for item in items),
+                                         max(item.confidence for item in items)))
+
+
+def _merge_line(line: list[_Token]) -> tuple[int | None, float]:
+    """Merge the digit detections of one text line into a score, left to right.
+
+    OCR often splits one score into several detections ("1", "0", "3"), and
+    sometimes reports the same glyphs twice ("1", "03" and an overlapping
+    "3" for 103). Each detection's box is split evenly across its characters
+    and the digit glyphs are read left to right; a glyph that overlaps one
+    already taken from another detection is the same glyph read twice, and
+    the more confident reading of it is kept. The confidence is the lowest
+    confidence of the detections the score was read from.
+    """
+    glyphs = []
+    for number, token in enumerate(line):
+        width = (token.x1 - token.x0) / len(token.text)
+        for position, char in enumerate(token.text):
+            if char.isdigit():
+                start = token.x0 + position * width
+                glyphs.append(_Glyph(start, start + width, char, token.confidence, number))
+    kept: list[_Glyph] = []
+    for glyph in sorted(glyphs, key=lambda item: (item.x0 + item.x1) / 2):
+        previous = kept[-1] if kept else None
+        # Slots of one detection tile its box, so only another detection's overlap.
+        if previous is not None:
+            needed = _SAME_DIGIT_OVERLAP if previous.char == glyph.char else _SAME_GLYPH_OVERLAP
+            if _overlap(previous.x0, previous.x1, glyph.x0, glyph.x1) >= needed:
+                if glyph.confidence > previous.confidence:
+                    kept[-1] = glyph
+                continue
+        kept.append(glyph)
+    value = _plausible_score("".join(glyph.char for glyph in kept))
+    if value is None:
+        return None, 0.0
+    return value, min(line[number].confidence for number in {glyph.token for glyph in kept})
+
+
+def _recognise_line(engine, crop: np.ndarray, line: list[_Token]) -> tuple[int | None, float, str]:
+    """Recognise the score's whole text line in one pass, without detection.
+
+    Detection on its own misses or splits glyphs: on a real match video it
+    found only the "3" of 73 and the "1" and "8" of 180. The recogniser reads
+    a strip across the ROI at the score line's height (with a small margin)
+    as one line of text, which is the usual way to read a known text line.
+    """
+    top, bottom = min(token.y0 for token in line), max(token.y1 for token in line)
+    margin = _LINE_MARGIN * (bottom - top)
+    y0, y1 = max(0, int(top - margin)), min(crop.shape[0], int(math.ceil(bottom + margin)))
+    if y1 <= y0:
+        return None, 0.0, ""
+    result = engine(crop[y0:y1], use_det=False, use_cls=False)
+    raw = result[0] if isinstance(result, tuple) else result
+    if not raw:
+        return None, 0.0, ""
+    if hasattr(raw, "txts"):
+        texts, scores = list(raw.txts or ()), list(raw.scores or ())
     else:
-        confidence = sum(token[2] for token in tokens) / len(tokens)
-    return int(digit_text), confidence, " ".join(record[1] for record in records)
+        texts, scores = [str(raw[0][0])], [float(raw[0][1])]
+    if not texts:
+        return None, 0.0, ""
+    text = str(texts[0])
+    return _plausible_score(re.sub(r"\D", "", text)), float(scores[0]), text
+
+
+# Fewest frames that must agree before a later, higher reading counts as the
+# score having progressed rather than as a misread.
+_MIN_PROGRESSION_FRAMES = 3
+
+
+def _support(items: list[dict]) -> dict[int, float]:
+    votes: dict[int, float] = {}
+    for item in items:
+        votes[int(item["value"])] = votes.get(int(item["value"]), 0.0) + max(0.0, float(item["confidence"]))
+    return votes
+
+
+def _vote(items: list[dict]) -> int:
+    """Value with the most confidence-weighted readings; later frames break ties."""
+    votes = _support(items)
+    last_seen = {int(item["value"]): index for index, item in enumerate(items)}
+    return max(votes, key=lambda value: (round(votes[value], 9), last_seen[value]))
+
+
+def _is_partial(reading: int, value: int) -> bool:
+    """True when ``reading`` looks like ``value`` with some digits not read.
+
+    On a results screen that is still fading in over the field, OCR drops
+    digits from either end: real footage read a final 180 as 8 and 18, and a
+    final 103 as 3. So a reading is partial when its digits are a shorter,
+    contiguous run of the higher value's digits (so it is also lower).
+    """
+    shown, full = str(reading), str(value)
+    return len(shown) < len(full) and shown in full
+
+
+def _revealed_final(valid: list[dict]) -> tuple[int, int] | None:
+    """Find a final value that the end of the window rises into through partial readings.
+
+    Looks for the longest run of frames reaching to the end of the window in
+    which every reading is either its highest value or a partial reading of
+    it. The run must start with a partial reading (the screen is being
+    revealed, not a high outlier followed by lower readings), and no partial
+    value may be read on as many frames as a stable score needs: a value held
+    that long is a real reading, not a passing frame. Returns the final value
+    and the index where the run starts, or None.
+    """
+    found: tuple[int, int] | None = None
+    for start in range(len(valid) - 1, -1, -1):
+        values = [int(item["value"]) for item in valid[start:]]
+        top = max(values)
+        if all(value == top or _is_partial(value, top) for value in values):
+            found = (top, start)
+    if found is None:
+        return None
+    top, start = found
+    if int(valid[start]["value"]) == top:
+        return None
+    counts: dict[int, int] = {}
+    for item in valid:
+        counts[int(item["value"])] = counts.get(int(item["value"]), 0) + 1
+    partials = {int(item["value"]) for item in valid[start:] if item["value"] != top}
+    if any(counts[value] >= _MIN_PROGRESSION_FRAMES for value in partials):
+        return None
+    return found
 
 
 def _consensus(samples: list[dict]) -> dict:
+    """Vote the proposed score over the sampled frames.
+
+    Every readable frame votes for its value, weighted by OCR confidence, so
+    one misread frame cannot outvote many agreeing frames. Scores only rise
+    during a match, so a higher value that first appears later in the tail
+    window and then holds a weighted majority of every frame from that point
+    on (with at least three frames) is treated as the score progressing to its
+    final value; earlier lower frames then do not vote against it.
+
+    The final results screen often fades in at the very end of a video, so
+    its first frames read with digits missing (180 read as 8, then 18). When
+    the window ends by rising through such passing partial readings into a
+    higher value (see ``_revealed_final``), that value is proposed and the
+    partial readings before it do not vote against it. Partial readings after
+    it still count against its agreement, and the confidence stays capped by
+    how few frames read the full value, so a short reveal is proposed with
+    low confidence and flagged. The result is a proposal only and must be
+    reviewed.
+    """
     valid = [item for item in samples if item["value"] is not None]
     if not valid:
-        return {"value": None, "confidence": 0.0, "agreement": 0.0, "samples": len(samples)}
-    # Scores are monotonic during ordinary match play. Keep the largest
-    # observed reading as a proposal, but lower its confidence when the final
-    # samples do not corroborate it; a reviewer must accept it explicitly.
-    recent = valid[-3:]
-    winner = max(item["value"] for item in valid)
-    chosen = [item for item in recent if item["value"] == winner]
-    agreement = len(chosen) / len(recent)
-    evidence = chosen or [next(item for item in reversed(valid) if item["value"] == winner)]
-    recognition = sum(item["confidence"] for item in evidence) / len(evidence)
+        return {"value": None, "confidence": 0.0, "agreement": 0.0, "samples": len(samples), "flagged": True}
+    winner = _vote(valid)
+    window = valid
+    first_seen: dict[int, int] = {}
+    for index, item in enumerate(valid):
+        first_seen.setdefault(int(item["value"]), index)
+    for value, index in sorted(first_seen.items(), key=lambda pair: pair[1]):
+        if value <= winner:
+            continue
+        tail = valid[index:]
+        if sum(1 for item in tail if item["value"] == value) < _MIN_PROGRESSION_FRAMES:
+            continue
+        if _vote(tail) == value:
+            winner, window = value, tail
+    superseded: list[dict] = []
+    revealed = _revealed_final(valid)
+    if revealed is not None and revealed[0] >= winner:
+        winner, start = revealed
+        reveal = valid[start:]
+        first_full = next(index for index, item in enumerate(reveal) if item["value"] == winner)
+        superseded, window = reveal[:first_full], reveal[first_full:]
+    votes = _support(window)
+    chosen = [item for item in window if item["value"] == winner]
+    total = sum(votes.values())
+    agreement = votes[winner] / total if total > 0 else len(chosen) / len(window)
+    recognition = sum(item["confidence"] for item in chosen) / len(chosen)
     # Recognition confidence is not the same as temporal evidence. Cap the
     # displayed confidence until at least three frames corroborate the score.
-    confidence = recognition * agreement * min(1.0, len(recent) / 3.0)
+    confidence = recognition * agreement * min(1.0, len(chosen) / 3.0)
+    superseded_ids = {id(item) for item in superseded}
+    outvoted = sorted({int(item["value"]) for item in valid
+                       if item["value"] != winner and id(item) not in superseded_ids})
+    later_lower = valid[-1]["value"] < winner
     return {"value": int(winner), "confidence": round(confidence, 4),
             "recognition_confidence": round(recognition, 4),
             "agreement": round(agreement, 4), "samples": len(valid),
-            "uncorroborated_prior_high": not chosen,
-            "later_lower_reading": valid[-1]["value"] < winner}
+            "supporting_samples": len(chosen),
+            "outvoted_values": outvoted,
+            "superseded_partial_values": sorted({int(item["value"]) for item in superseded}),
+            "uncorroborated_prior_high": any(value > winner for value in outvoted),
+            "later_lower_reading": later_lower,
+            # Needs a closer look than an ordinary review: few frames read
+            # this value, frames it rests on read something else, or the
+            # video ends on a lower reading.
+            "flagged": bool(len(chosen) < _MIN_PROGRESSION_FRAMES or len(chosen) < len(window) or later_lower)}
+
+
+RAPIDOCR_REQUIREMENT = "rapidocr-onnxruntime==1.4.4"
+# Stop sampling only after this many frame reads fail in a row; a single
+# undecodable frame is skipped and logged.
+_MAX_CONSECUTIVE_READ_FAILURES = 5
+_MIN_ROI_AREA_PX = 16.0
+
+
+def _validate_roi(name: str, polygon) -> np.ndarray:
+    try:
+        points = np.asarray(polygon, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"The {name} scoreboard area is not valid. Draw it again around the score digits.") from exc
+    if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] != 2:
+        raise ValueError(f"The {name} scoreboard area is missing or has fewer than three points. "
+                         "Draw it again around the score digits.")
+    if not np.all(np.isfinite(points)):
+        raise ValueError(f"The {name} scoreboard area is not valid. Draw it again around the score digits.")
+    if abs(cv2.contourArea(points.astype(np.float32))) < _MIN_ROI_AREA_PX:
+        raise ValueError(f"The {name} scoreboard area is too small. Draw it again around the score digits.")
+    return points
+
+
+def _check_roi_in_frame(name: str, points: np.ndarray, frame: np.ndarray) -> None:
+    height, width = frame.shape[:2]
+    x0, y0 = points.min(axis=0)
+    x1, y1 = points.max(axis=0)
+    if x1 <= 0 or y1 <= 0 or x0 >= width or y0 >= height:
+        raise ValueError(f"The {name} scoreboard area is outside the video frame ({width}×{height}). "
+                         "Draw it again around the score digits.")
 
 
 def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list[list[float]],
@@ -91,13 +380,26 @@ def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list
 
     RapidOCR bundles its ONNX OCR models. Results are proposals only; callers
     must keep these separate from confirmed scoring events and official scores.
+
+    The default of one sample per second is deliberate. On a real 720p match
+    video each sampled frame took about 3 s to read, so the 12 s tail took
+    35-46 s at 1 fps, 73 s at 2 fps and 151 s at 4 fps. Reading each score
+    line whole adds one recognition pass per area (about 0.2-0.3 s). Before
+    that pass, denser sampling caught more frames where OCR dropped digits
+    from the clean final screen (103 read as 3) and made the blue proposal
+    wrong at 2 and 4 fps; with it, every clean final-screen frame of that
+    video read correctly at 4 fps too, so denser sampling now only costs time.
     """
     try:
         from rapidocr_onnxruntime import RapidOCR
     except ImportError as exc:
-        raise RuntimeError("Local RapidOCR models are not installed. Reinstall the app with the pinned requirements.") from exc
+        raise RuntimeError("Scoreboard OCR needs the rapidocr-onnxruntime package, which is not installed. "
+                           f"Install it with: python -m pip install {RAPIDOCR_REQUIREMENT}") from exc
     if not math.isfinite(sample_fps) or sample_fps <= 0 or not math.isfinite(tail_seconds) or tail_seconds <= 0:
         raise ValueError("OCR sample rate and tail window must be positive and finite.")
+    red_points = _validate_roi("red", red_roi)
+    blue_points = _validate_roi("blue", blue_roi)
+    logger = logging.getLogger(__name__)
     cap = cv2.VideoCapture(str(video_path))
     try:
         if not cap.isOpened():
@@ -114,20 +416,40 @@ def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list
         red_samples, blue_samples = [], []
         frame_index = start_frame
         target_count = max(1, (frame_count - start_frame) // stride)
+        consecutive_failures = 0
+        skipped_frames: list[int] = []
+        rois_checked = False
         while frame_index < frame_count:
             if cancel and cancel():
                 raise InterruptedError("Scoreboard OCR was cancelled.")
             try:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
                 ok, frame = cap.read()
-                if not ok:
+            except Exception:
+                logger.warning("Could not read scoreboard frame %s in %s", frame_index, video_path.name, exc_info=True)
+                ok, frame = False, None
+            if not ok or frame is None:
+                consecutive_failures += 1
+                skipped_frames.append(frame_index)
+                logger.warning("Skipped undecodable scoreboard frame %s in %s", frame_index, video_path.name)
+                if consecutive_failures >= _MAX_CONSECUTIVE_READ_FAILURES:
+                    logger.warning("Stopped scoreboard OCR in %s after %d unreadable frames in a row",
+                                   video_path.name, consecutive_failures)
                     break
-                t_s = frame_index / fps
+                frame_index += stride
+                continue
+            consecutive_failures = 0
+            if not rois_checked:
+                _check_roi_in_frame("red", red_points, frame)
+                _check_roi_in_frame("blue", blue_points, frame)
+                rois_checked = True
+            t_s = frame_index / fps
+            try:
                 red_value, red_conf, red_text = _read_digits(engine, frame, red_roi)
                 blue_value, blue_conf, blue_text = _read_digits(engine, frame, blue_roi)
             except Exception:
-                logging.getLogger(__name__).warning("Skipped unreadable scoreboard frame %s in %s",
-                                                    frame_index, video_path.name, exc_info=True)
+                logger.warning("Skipped unreadable scoreboard frame %s in %s",
+                               frame_index, video_path.name, exc_info=True)
                 frame_index += stride
                 continue
             red_samples.append({"t_s": round(t_s, 3), "value": red_value, "confidence": round(red_conf, 4), "text": red_text})
@@ -137,7 +459,11 @@ def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list
             frame_index += stride
     finally:
         cap.release()
+    if not red_samples:
+        raise RuntimeError(f"Scoreboard OCR could not read any frame in the last {tail_seconds:g} s of "
+                           f"{video_path.name}. Check that the video plays to the final results screen.")
     return {"source": "scoreboard_ocr", "window_start_s": round(start_t, 3),
             "frames_sampled": len(red_samples),
+            "frames_skipped": len(skipped_frames),
             "red": _consensus(red_samples), "blue": _consensus(blue_samples),
             "red_samples": red_samples, "blue_samples": blue_samples}
