@@ -25,7 +25,10 @@ def write_image(path: Path, image: np.ndarray, params: Sequence[int] = ()) -> bo
     try:
         path.write_bytes(data.tobytes())
     except OSError:
-        path.unlink(missing_ok=True)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
         return False
     return True
 
