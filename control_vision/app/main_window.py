@@ -1341,8 +1341,10 @@ class MainWindow(QMainWindow):
         if item: self.seek(round(float(item.data(Qt.ItemDataRole.UserRole)) / max(self.duration, 0.001) * 1000))
 
     def add_manual_event(self):
-        if not self.db or self.video_id is None or self.review_robot.currentData() is None:
+        if not self.db or self.video_id is None or self.review_robot.count() <= 1:
             QMessageBox.information(self, "Set up robot identities", "Seed at least one robot before adding a scoring event."); return
+        if self.review_robot.currentData() is None:
+            QMessageBox.information(self, "Choose a robot", "Choose the attributed robot in Review before adding an event at the current video time."); return
         self.db.add_scoring_event(int(self.review_robot.currentData()), self.current_time)
         self.refresh_result_tables()
         self.statusBar().showMessage(f"Added a flagged scoring candidate at {self.current_time:.2f}s. Classify it after reviewing the video.")
@@ -1352,7 +1354,10 @@ class MainWindow(QMainWindow):
         if row < 0 or not self.db: return
         event_id = self.review_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
         robot_id = self.review_robot.currentData()
-        self.db.review_event(event_id, status, self.review_points.value(), robot_id, self.review_type.currentData(), self.review_confidence.currentText(), self.review_alliance.currentData())
+        try:
+            self.db.review_event(event_id, status, self.review_points.value(), robot_id, self.review_type.currentData(), self.review_confidence.currentText(), self.review_alliance.currentData())
+        except ValueError as exc:
+            QMessageBox.warning(self, "Review not saved", str(exc)); return
         self.refresh_result_tables()
 
     def review_type_changed(self, index: int):
