@@ -353,17 +353,17 @@ class ScoreConsensusTests(unittest.TestCase):
         self.assertEqual(_consensus(rows)["value"], 100)
 
     def test_ocr_does_not_lower_score_after_later_misreads(self):
+        # OCR votes over frames: a lower misread in the last frame is outvoted
+        # by the agreeing earlier frames and is flagged for review.
         samples = [{"t_s": float(index), "value": value, "confidence": .9}
-                   for index, value in enumerate((100, 90, 90))]
+                   for index, value in enumerate((100, 100, 100, 90))]
         result = _consensus(samples)
         self.assertEqual(result["value"], 100)
         self.assertTrue(result["later_lower_reading"])
-        self.assertAlmostEqual(result["agreement"], 1 / 3, places=4)
-        self.assertLess(result["confidence"], .4)
-        later = _consensus(samples + [{"t_s": 3.0, "value": 90, "confidence": .9}])
-        self.assertEqual(later["value"], 100)
-        self.assertEqual(later["confidence"], 0)
-        self.assertTrue(later["uncorroborated_prior_high"])
+        self.assertEqual(result["outvoted_values"], [90])
+        self.assertFalse(result["uncorroborated_prior_high"])
+        self.assertAlmostEqual(result["agreement"], 3 / 4, places=4)
+        self.assertAlmostEqual(result["confidence"], .9 * .75, places=4)
 
     def test_disqualification_does_not_resolve_flagged_evidence(self):
         result = calculate_scoreboard(
@@ -655,6 +655,41 @@ class VideoIngestTests(unittest.TestCase):
                 window.close()
                 db.close()
 
+    def test_probe_warnings_are_shown_without_blocking_import(self):
+        import os
+        import numpy as np
+        from PySide6.QtWidgets import QApplication
+        from control_vision.app.main_window import MainWindow
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QApplication.instance() or QApplication([])
+        warning = "match.mp4 may be truncated: video frames stop decoding near 90.0 s although the file reports 120.0 s."
+        with tempfile.TemporaryDirectory() as folder:
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            project_id = db.add_project("import")
+            window = MainWindow()
+            window.db, window.project_id = db, project_id
+            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+            class Capture:
+                def read(self): return True, frame
+                def release(self): pass
+
+            try:
+                with patch("control_vision.app.main_window.QFileDialog.getOpenFileName", return_value=("match.mp4", "")), \
+                     patch("control_vision.app.main_window.QInputDialog.getText", side_effect=[("EV", True), ("Q3", True)]), \
+                     patch("control_vision.app.main_window.probe_video", return_value={"duration_s": 90, "width": 1280, "height": 720, "fps": 30, "warnings": [warning]}), \
+                     patch("control_vision.app.main_window.cv2.VideoCapture", return_value=Capture()), \
+                     patch("control_vision.app.main_window.QMessageBox.warning") as shown:
+                    window.import_video()
+                self.assertIsNotNone(window.video_id)
+                self.assertIn(warning, shown.call_args.args[2])
+                self.assertIn(warning, window.progress_label.text())
+                self.assertEqual(window.duration, 90)
+            finally:
+                window.close()
+                db.close()
+
     def test_unreadable_first_frame_is_not_saved_in_project(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
@@ -677,6 +712,12 @@ class VideoIngestTests(unittest.TestCase):
             def get(self, prop):
                 import cv2
                 return {cv2.CAP_PROP_FRAME_COUNT: 300, cv2.CAP_PROP_FPS: 30}[prop]
+            def isOpened(self):
+                return True
+            def set(self, prop, value):
+                return True
+            def read(self):
+                return True, object()
             def release(self):
                 self.released = True
 
@@ -690,6 +731,7 @@ class VideoIngestTests(unittest.TestCase):
              patch("control_vision.pipeline.ingest.cv2.VideoCapture", return_value=capture):
             metadata = probe_video(Path("playable.mp4"))
         self.assertEqual(metadata["duration_s"], 10)
+        self.assertEqual(metadata["warnings"], [])
         self.assertTrue(capture.released)
 
 
