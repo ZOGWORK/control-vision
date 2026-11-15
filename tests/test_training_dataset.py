@@ -13,10 +13,14 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from control_vision.training.train_yolo import (check_onnx_model, class_names, dataset_hash, model_version_state,
-                                                publish_model_artifacts, reserve_model_version,
+from control_vision.training.train_yolo import (IMAGE_SUFFIXES, check_onnx_model, class_names, dataset_hash,
+                                                model_version_state, publish_model_artifacts, reserve_model_version,
                                                 training_split_provenance, validate_dataset, validation_metrics)
 from control_vision.training.extract_frames import extract
+
+# Ultralytics 8.4.210 data.utils.IMG_FORMATS: every image type training reads.
+TRAINED_SUFFIXES = {".avif", ".bmp", ".dng", ".heic", ".heif", ".jp2", ".jpeg",
+                    ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp"}
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -231,11 +235,20 @@ class TrainingDatasetTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, f"{split} in data.yaml must be images/{split}"):
                     training_split_provenance(self.root, {**self.config, split: "images/extra"})
 
-    def test_trained_image_type_outside_manifest_audit_is_refused(self):
-        self._manifest("USWASAM1:Q2")
-        (self.root / "images" / "train" / "extra.avif").write_bytes(b"not audited")
-        with self.assertRaisesRegex(ValueError, r"images/train has 2 image\(s\) but the manifest lists 1"):
-            training_split_provenance(self.root, self.config)
+    def test_manifest_audit_covers_every_trained_image_type(self):
+        self.assertEqual(IMAGE_SUFFIXES, TRAINED_SUFFIXES)
+        for suffix in sorted(TRAINED_SUFFIXES):
+            with self.subTest(suffix=suffix):
+                self._manifest("USWASAM1:Q2")
+                extra = self.root / "images" / "train" / f"extra{suffix}"
+                extra.write_bytes(suffix.encode())
+                (self.root / "labels" / "train" / "extra.txt").write_text("", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "split_manifest.csv: 1 image\\(s\\) are absent"):
+                    training_split_provenance(self.root, self.config)
+                with (self.root / "split_manifest.csv").open("a", encoding="utf-8") as stream:
+                    stream.write(f"images/train/extra{suffix},train,USWASAM1:Q1,team video,team-owned\n")
+                self.assertEqual(training_split_provenance(self.root, self.config)["images"]["train"], 2)
+                extra.unlink()
 
     def test_dataset_hash_covers_split_files_and_yaml_only(self):
         self.data.write_text("names: [robot]\n", encoding="utf-8")
