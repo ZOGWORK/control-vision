@@ -29,9 +29,11 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
     events = list(events)
     robots = list(robots)
     disqualified = disqualified or set()
+    raw_ids = list(qualification_disqualified_robot_ids or ())
+    if any(isinstance(robot_id, (bool, float)) for robot_id in raw_ids):
+        raise ValueError("Qualification DQ robot IDs must be integers")
     try:
-        qualification_disqualified = {int(robot_id) for robot_id in
-                                       (qualification_disqualified_robot_ids or set())}
+        qualification_disqualified = {int(robot_id) for robot_id in raw_ids}
     except (TypeError, ValueError) as error:
         raise ValueError("Qualification DQ robot IDs must be integers") from error
     if disqualified and qualification_disqualified:
