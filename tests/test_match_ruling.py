@@ -148,6 +148,10 @@ class MatchRulingDatabaseTests(unittest.TestCase):
         self.db.set_match_type(self.video, "playoff", clear_inapplicable=True)
         self.db.set_match_ruling(self.video, "playoff", playoff_disqualified={"red", "blue"},
                                  first_disqualified="red")
+        # Saving scores or thresholds alone never touches the playoff ruling.
+        self.db.set_official_scores(self.video, 60, 45, swarm_threshold=18)
+        ruling = self.db.match_ruling(self.video)
+        self.assertEqual((ruling["playoff_disqualified"], ruling["first_disqualified"]), ({"red", "blue"}, "red"))
         self.db.set_official_scores(self.video, 50, 40, {"red"})
         ruling = self.db.match_ruling(self.video)
         self.assertEqual((ruling["playoff_disqualified"], ruling["first_disqualified"]), ({"red"}, None))
