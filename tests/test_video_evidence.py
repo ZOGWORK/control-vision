@@ -87,6 +87,19 @@ class VideoEvidenceTests(unittest.TestCase):
             metadata = probe_video(Path("match.webm"))
         self.assertEqual(metadata["fps"], 25.0)
 
+    def test_hung_or_unrunnable_ffprobe_falls_back_to_opencv(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as folder:
+            video = _write_video(Path(folder) / "match.avi", frames=60, fps=30.0, size=(1280, 720))
+            for failure in (subprocess.TimeoutExpired(["ffprobe"], 30), PermissionError(13, "denied")):
+                def run(command, **kwargs):
+                    self.assertIn("timeout", kwargs)
+                    raise failure
+                with patch("control_vision.pipeline.ingest.shutil.which", return_value="ffprobe"),                      patch("control_vision.pipeline.ingest.subprocess.run", side_effect=run),                      self.assertLogs("control_vision.pipeline.ingest", "WARNING"):
+                    metadata = probe_video(video)
+                self.assertAlmostEqual(metadata["duration_s"], 2.0, places=3)
+                self.assertEqual(metadata["fps"], 30.0)
+
     def test_invalid_ffprobe_rate_does_not_import_video(self):
         result = SimpleNamespace(returncode=0, stdout=(
             '{"streams":[{"avg_frame_rate":"0/1","duration":"10",'
