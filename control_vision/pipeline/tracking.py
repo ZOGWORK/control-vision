@@ -140,9 +140,10 @@ def _no_seed_match_message(seed_points, closest_tracked: dict[int, float], close
                            gate_px: float | None, deadline_s: float) -> str:
     """Explain why no seed matched, separating tracked from untracked detections.
 
-    Seeds can only match detections the tracker has given an ID. A robot the
-    detector sees below the tracker's track-start threshold never gets one,
-    so moving the click closer cannot help it.
+    Seeds can only match detections the tracker has given an ID. The tracker's
+    track-start threshold follows the detection confidence setting, so a
+    detection without an ID was too weak or too brief to start a track;
+    lowering the confidence can help it, moving the click cannot.
     """
     gate = "" if gate_px is None else f" (a match needs one within {gate_px:.0f} px)"
     parts = []
@@ -152,15 +153,19 @@ def _no_seed_match_message(seed_points, closest_tracked: dict[int, float], close
         if tracked is not None:
             nearest = f"nearest tracked robot {tracked:.0f} px away{gate}"
         elif untracked is not None:
-            nearest = (f"a robot was detected {untracked:.0f} px away, but its detection confidence stayed "
-                       "below the tracker's threshold for starting a track")
+            nearest = (f"a robot was detected {untracked:.0f} px away, but the tracker never started a "
+                       "track for it")
         else:
             nearest = "no robot detected"
         parts.append(f"seed at ({seed_x:.0f}, {seed_y:.0f}): {nearest}")
+    hint = ""
+    if any(robot_id not in closest_tracked and robot_id in closest_untracked for robot_id, _, _ in seed_points):
+        hint = (" For a robot detected without a track, you can also lower the detection confidence in Settings: "
+                "the tracker then starts tracks from weaker detections, at the cost of more false detections.")
     return (f"No seeded robot was matched to a tracked robot in the first {deadline_s:.0f} seconds, so no "
             f"positions could be recorded and processing stopped early ({'; '.join(parts)}). Seed robots that "
-            "are clearly visible at the start of the video and click near each robot's floor contact point. "
-            "A robot the model detects only with low confidence cannot be tracked; it needs a better-trained model.")
+            "are clearly visible at the start of the video and click near each robot's floor contact point."
+            + hint)
 
 
 def track_video(
