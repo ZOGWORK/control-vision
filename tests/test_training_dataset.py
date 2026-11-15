@@ -177,6 +177,15 @@ class TrainingDatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Q7-ffff.*images/holdout"):
             validate_dataset(self.data, self.config, 1)
 
+    def test_holdout_copy_of_training_image_is_rejected(self):
+        holdout = self.root / "images" / "holdout"
+        holdout.mkdir()
+        (holdout / "copy.jpg").write_bytes((self.root / "images" / "train" / "one.jpg").read_bytes())
+        with self.assertRaisesRegex(ValueError, "Identical image appears in train and holdout: copy.jpg"):
+            validate_dataset(self.data, self.config, 1)
+        (holdout / "copy.jpg").write_bytes(self._image(250))
+        self.assertEqual(validate_dataset(self.data, self.config, 1), self.root)
+
     def test_distinct_video_folders_are_accepted(self):
         self._source_sample("train", "Q1-aaaa", "000000060", 140)
         self._source_sample("val", "Q2-bbbb", "000000060", 200)
