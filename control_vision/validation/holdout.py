@@ -817,8 +817,15 @@ def write_output(path: Path, text: str, replace: bool = False) -> None:
                 raise
             except OSError:
                 # No hard links on this volume: fall back to exclusive create.
-                with path.open("x", encoding="utf-8") as stream:
-                    stream.write(text)
+                # FileExistsError from open("x") leaves someone else's file alone;
+                # a failed write removes only the file this call created.
+                stream = path.open("x", encoding="utf-8")
+                try:
+                    with stream:
+                        stream.write(text)
+                except BaseException:
+                    path.unlink(missing_ok=True)
+                    raise
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -862,8 +869,21 @@ def main(argv: list[str] | None = None) -> int:
     data = json.dumps(report, indent=2)
     if args.output:
         output = args.output.resolve()
-        if output in {path.resolve() for path in paths}:
-            parser.error(f"--output {output} is one of the holdout cases; refusing to overwrite it")
+        # Inputs are never replaced, even with --force.
+        protected = {path.resolve() for path in paths}
+        for path in (args.holdout_list, args.project):
+            if path is not None:
+                protected.add(path.resolve())
+        for case in report.get("cases", []) if not args.make_template else []:
+            inputs = case["inputs"]
+            protected.update(Path(inputs[name]["path"]) for name in ("case", "project_db", "video"))
+            protected.update(Path(clip["path"]) for clip in inputs["clips"])
+        manifest = (report.get("summary", {}).get("training_disjointness", {}).get("manifest")
+                    if not args.make_template else None)
+        if manifest:
+            protected.add(Path(manifest))
+        if output in {path.resolve() for path in protected}:
+            parser.error(f"--output {output} is an input to this run; refusing to overwrite it")
         if output.exists() and not args.force:
             parser.error(f"--output {output} already exists; pass --force to replace it")
         write_output(output, replace=args.force, text=data + "\n")
