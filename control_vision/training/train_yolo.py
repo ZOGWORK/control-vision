@@ -29,7 +29,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+")
 MIN_OPSET = 12
 SUPPORTED_CLASSES = (["robot"], ["robot", "pollen", "nectar"])
-HASHED_SPLITS = ("train", "val", "holdout")
 # Import name, pip distribution name. Checked before any training starts.
 TRAINING_PACKAGES = (("yaml", "PyYAML"), ("ultralytics", "ultralytics"),
                      ("onnx", "onnx"), ("onnxruntime", "onnxruntime"))
@@ -116,7 +115,8 @@ def _split_images_dir(root: Path, config: dict, split: str) -> Path:
 
 def _split_dirs(root: Path, config: dict) -> dict[str, Path]:
     """Image folders for train, val, and (when present) images/holdout."""
-    dirs = {split: _split_images_dir(root, config, split) for split in ("train", "val")}
+    root = root.resolve()
+    dirs ={split: _split_images_dir(root, config, split) for split in ("train", "val")}
     holdout = (root / "images" / "holdout").resolve()
     if holdout.is_dir() and holdout not in dirs.values():
         dirs["holdout"] = holdout
@@ -137,6 +137,7 @@ def _check_source_folders(split_dirs: dict[str, Path]) -> None:
 
 def dataset_hash(root: Path, config: dict, data_file: Path) -> str:
     """SHA-256 of the split images, their labels, and data.yaml (not images/unlabeled)."""
+    root = root.resolve()
     entries: list[tuple[str, Path]] = []
     for images_dir in _split_dirs(root, config).values():
         labels_dir = root / "labels" / images_dir.name
