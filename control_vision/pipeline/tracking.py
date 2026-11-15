@@ -148,8 +148,14 @@ def track_video(
             raise RuntimeError(f"Could not configure the local ReID model: {exc}") from exc
     else:
         logger.warning("BoT-SORT appearance ReID is disabled; using motion and overlap association only.")
-    model = YOLO(str(model_path), task="detect")
-    matrix = matrix_from_corners(corners)
+    try:
+        model = YOLO(str(model_path), task="detect")
+        matrix = matrix_from_corners(corners)
+    except Exception:
+        cap.release()
+        if tracker_override:
+            Path(tracker_override.name).unlink(missing_ok=True)
+        raise
     seed_to_track: dict[int, int] = {}
     identities_seeded = False
     seed_assignment_deadline_s = 3.0
@@ -165,6 +171,7 @@ def track_video(
     stable_roi_count = 0
     stable_roi_positions: list[tuple[float, float]] = []
     stable_roi_track_ids: set[int] = set()
+    roi_baseline_set = False
     pending_roi_count = 0
     pending_roi_since: float | None = None
     try:
@@ -244,6 +251,13 @@ def track_video(
             current_roi_count = len(roi_balls)
             current_roi_positions = [(ball[0], ball[1]) for ball in roi_balls]
             current_roi_track_ids = {ball[3] for ball in roi_balls if ball[3] >= 0}
+            if goal_roi and not roi_baseline_set:
+                # Elements already in the ROI on the first analysed frame were
+                # there before the video started; they are not arrivals.
+                stable_roi_count = current_roi_count
+                stable_roi_positions = current_roi_positions
+                stable_roi_track_ids = current_roi_track_ids
+                roi_baseline_set = True
             new_roi_balls = _unmatched_roi_detections(
                 roi_balls, stable_roi_positions, stable_roi_track_ids)
             if (current_roi_count == stable_roi_count and not current_roi_track_ids

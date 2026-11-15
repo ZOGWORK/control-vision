@@ -2,7 +2,9 @@ import unittest
 import sqlite3
 import tempfile
 import logging
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits
@@ -12,7 +14,6 @@ from control_vision.pipeline.tracking import (
 )
 from control_vision.pipeline.tracking import track_video
 from control_vision.pipeline.ingest import probe_video
-from control_vision.pipeline.manual_tracking import _photo_crop_bounds, _save_best_photos
 from control_vision.pipeline.zones import zone_at
 from control_vision.game.scoreboard import calculate_scoreboard
 from control_vision.storage.database import ProjectDatabase, SCHEMA
@@ -31,13 +32,39 @@ class WorkerDispatchTests(unittest.TestCase):
             worker.run()
         args = tracker.call_args.args
         self.assertEqual(args[:5], (Path("match.mp4"), [], [(1, 20, 30)], {1: "red"}, 8.0))
-        self.assertTrue(callable(args[5]))
-        self.assertTrue(callable(args[6]))
+        # Position 6 is cancel() (no arguments); position 7 is
+        # progress(stage, percent, detail). Swapping them must fail here.
+        import inspect
+        self.assertEqual(len(inspect.signature(args[5]).parameters), 0)
+        self.assertEqual(len(inspect.signature(args[6]).parameters), 3)
         self.assertIs(args[7], logger)
         self.assertEqual(args[8], photos_dir)
 
 
 class SeedMatchingTests(unittest.TestCase):
+    def test_failed_model_initialization_releases_video(self):
+        class Capture:
+            released = False
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else 90
+            def release(self): self.released = True
+
+        capture = Capture()
+        def fail_model(*args, **kwargs):
+            raise RuntimeError("bad model")
+        with tempfile.TemporaryDirectory() as directory:
+            model_path = Path(directory) / "robot.onnx"
+            model_path.write_bytes(b"placeholder")
+            with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=capture), \
+                 patch.dict(sys.modules, {"ultralytics": SimpleNamespace(YOLO=fail_model)}):
+                with self.assertRaisesRegex(RuntimeError, "bad model"):
+                    track_video(Path("match.mp4"), model_path, [[0, 0], [1, 0], [1, 1], [0, 1]],
+                                [(1, 0, 0)], 8.0, lambda: False, lambda *_: None,
+                                logging.getLogger("model-init-test"))
+        self.assertTrue(capture.released)
+
     def test_repeated_model_inference_errors_fail_before_replacing_results(self):
         import numpy as np
         from types import SimpleNamespace
@@ -235,9 +262,9 @@ class SeedMatchingTests(unittest.TestCase):
                     goal_roi=[[0, 0], [100, 0], [100, 100], [0, 100]],
                 )
 
-        self.assertEqual(len(events), 2)
-        self.assertAlmostEqual(events[0]["t_s"], 0.5)
-        self.assertGreaterEqual(events[1]["t_s"], 1.0)
+        # A was in the ROI on the first frame, so only B's arrival is flagged.
+        self.assertEqual(len(events), 1)
+        self.assertGreaterEqual(events[0]["t_s"], 1.0)
 
     def test_moving_roi_element_does_not_create_second_candidate(self):
         import numpy as np
@@ -279,7 +306,42 @@ class SeedMatchingTests(unittest.TestCase):
                             logging.getLogger("roi-motion-test"),
                             goal_roi=[[0, 0], [100, 0], [100, 100], [0, 100]],
                         )
-                self.assertEqual(len(events), 1)
+                # The element was present from the first frame and only moved.
+                self.assertEqual(events, [])
+
+    def test_element_in_roi_on_first_frame_is_not_an_arrival(self):
+        import numpy as np
+        from types import SimpleNamespace
+
+        class Capture:
+            reads = 0
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else 35
+            def read(self):
+                self.reads += 1
+                return (True, np.zeros((100, 100, 3), dtype=np.uint8)) if self.reads <= 35 else (False, None)
+            def release(self): pass
+
+        def detect(*args, **kwargs):
+            robot = SimpleNamespace(cls=[0], xyxy=np.array([[10, 10, 30, 50]]), conf=[0.95], id=[1])
+            ball = SimpleNamespace(cls=[1], xyxy=np.array([[40, 40, 50, 50]]), conf=[0.9], id=[10])
+            return [SimpleNamespace(boxes=[robot, ball])]
+
+        with tempfile.TemporaryDirectory() as folder:
+            model_path = Path(folder) / "robot.onnx"
+            model_path.touch()
+            with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=Capture()), \
+                 patch("ultralytics.YOLO", return_value=SimpleNamespace(track=detect)):
+                _, _, events = track_video(
+                    Path("match.mp4"), model_path,
+                    [[0, 0], [100, 0], [100, 100], [0, 100]], [(1, 20, 50)],
+                    30.0, lambda: False, lambda *_: None,
+                    logging.getLogger("roi-baseline-test"),
+                    goal_roi=[[0, 0], [100, 0], [100, 100], [0, 100]],
+                )
+        self.assertEqual(events, [])
 
     def test_assigns_one_to_one_by_minimum_total_distance(self):
         seeds = [(10, 100, 100), (20, 200, 100)]
@@ -328,17 +390,17 @@ class ScoreConsensusTests(unittest.TestCase):
         self.assertEqual(_consensus(rows)["value"], 100)
 
     def test_ocr_does_not_lower_score_after_later_misreads(self):
+        # OCR votes over frames: a lower misread in the last frame is outvoted
+        # by the agreeing earlier frames and is flagged for review.
         samples = [{"t_s": float(index), "value": value, "confidence": .9}
-                   for index, value in enumerate((100, 90, 90))]
+                   for index, value in enumerate((100, 100, 100, 90))]
         result = _consensus(samples)
         self.assertEqual(result["value"], 100)
         self.assertTrue(result["later_lower_reading"])
-        self.assertAlmostEqual(result["agreement"], 1 / 3, places=4)
-        self.assertLess(result["confidence"], .4)
-        later = _consensus(samples + [{"t_s": 3.0, "value": 90, "confidence": .9}])
-        self.assertEqual(later["value"], 100)
-        self.assertEqual(later["confidence"], 0)
-        self.assertTrue(later["uncorroborated_prior_high"])
+        self.assertEqual(result["outvoted_values"], [90])
+        self.assertFalse(result["uncorroborated_prior_high"])
+        self.assertAlmostEqual(result["agreement"], 3 / 4, places=4)
+        self.assertAlmostEqual(result["confidence"], .9 * .75, places=4)
 
     def test_disqualification_does_not_resolve_flagged_evidence(self):
         result = calculate_scoreboard(
@@ -349,6 +411,14 @@ class ScoreConsensusTests(unittest.TestCase):
         self.assertFalse(result["match_resolved"])
         self.assertEqual(result["ranking_points"]["blue"]["WIN_TIE"], 0)
         self.assertEqual(result["ranking_points"]["red"]["total"], 0)
+
+    def test_rejecting_every_candidate_resolves_zero_zero_tie(self):
+        result = calculate_scoreboard([{"status": "rejected"}], [])
+        self.assertTrue(result["match_resolved"])
+        self.assertEqual(result["alliance_points"], {"red": 0, "blue": 0})
+        self.assertEqual(result["ranking_points"]["red"]["WIN_TIE"], 1)
+        self.assertEqual(result["ranking_points"]["blue"]["WIN_TIE"], 1)
+        self.assertFalse(calculate_scoreboard([], [])["match_resolved"])
 
     def test_disqualified_robots_have_no_exported_video_points(self):
         robots = [{"id": 1, "team_number": 1234, "alliance": "red"},
@@ -402,7 +472,7 @@ class DatabaseMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "old-project.sqlite"
             old_schema = SCHEMA.replace(
-                ", scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo', analysis_status TEXT NOT NULL DEFAULT 'ready'", "").replace(
+                ", scoreboard_ocr_json TEXT, tracking_mode TEXT NOT NULL DEFAULT 'yolo', analysis_status TEXT NOT NULL DEFAULT 'unprocessed'", "").replace(
                 ", origin_robot_id INTEGER", "")
             connection = sqlite3.connect(path)
             connection.executescript(old_schema)
@@ -414,7 +484,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(db.connection.execute(
                 "SELECT tracking_mode FROM videos WHERE id=?", (video_id,)).fetchone()[0], "yolo")
             self.assertEqual(db.connection.execute(
-                "SELECT analysis_status FROM videos WHERE id=?", (video_id,)).fetchone()[0], "ready")
+                "SELECT analysis_status FROM videos WHERE id=?", (video_id,)).fetchone()[0], "unprocessed")
             db.set_tracking_mode(video_id, "seeded_optical_flow")
             self.assertEqual(db.connection.execute(
                 "SELECT tracking_mode FROM videos WHERE id=?", (video_id,)).fetchone()[0], "seeded_optical_flow")
@@ -590,6 +660,73 @@ class ShutdownTests(unittest.TestCase):
 
 
 class VideoIngestTests(unittest.TestCase):
+    def test_imported_video_has_no_reviewable_results(self):
+        import os
+        import numpy as np
+        from PySide6.QtWidgets import QApplication
+        from control_vision.app.main_window import MainWindow
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as folder:
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            project_id = db.add_project("import")
+            window = MainWindow()
+            window.db, window.project_id = db, project_id
+            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+            class Capture:
+                def read(self): return True, frame
+                def release(self): pass
+
+            try:
+                with patch("control_vision.app.main_window.QFileDialog.getOpenFileName", return_value=("match.mp4", "")), \
+                     patch("control_vision.app.main_window.QInputDialog.getText", side_effect=[("EV", True), ("Q3", True)]), \
+                     patch("control_vision.app.main_window.probe_video", return_value={"duration_s": 120, "width": 1280, "height": 720, "fps": 30}), \
+                     patch("control_vision.app.main_window.cv2.VideoCapture", return_value=Capture()):
+                    window.import_video()
+                self.assertIsNotNone(window.video_id)
+                self.assertFalse(window.tabs.isTabEnabled(2))
+                self.assertFalse(window.tabs.isTabEnabled(6))
+            finally:
+                window.close()
+                db.close()
+
+    def test_probe_warnings_are_shown_without_blocking_import(self):
+        import os
+        import numpy as np
+        from PySide6.QtWidgets import QApplication
+        from control_vision.app.main_window import MainWindow
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QApplication.instance() or QApplication([])
+        warning = "match.mp4 may be truncated: video frames stop decoding near 90.0 s although the file reports 120.0 s."
+        with tempfile.TemporaryDirectory() as folder:
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            project_id = db.add_project("import")
+            window = MainWindow()
+            window.db, window.project_id = db, project_id
+            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+            class Capture:
+                def read(self): return True, frame
+                def release(self): pass
+
+            try:
+                with patch("control_vision.app.main_window.QFileDialog.getOpenFileName", return_value=("match.mp4", "")), \
+                     patch("control_vision.app.main_window.QInputDialog.getText", side_effect=[("EV", True), ("Q3", True)]), \
+                     patch("control_vision.app.main_window.probe_video", return_value={"duration_s": 90, "width": 1280, "height": 720, "fps": 30, "warnings": [warning]}), \
+                     patch("control_vision.app.main_window.cv2.VideoCapture", return_value=Capture()), \
+                     patch("control_vision.app.main_window.QMessageBox.warning") as shown:
+                    window.import_video()
+                self.assertIsNotNone(window.video_id)
+                self.assertIn(warning, shown.call_args.args[2])
+                self.assertIn(warning, window.progress_label.text())
+                self.assertEqual(window.duration, 90)
+            finally:
+                window.close()
+                db.close()
+
     def test_unreadable_first_frame_is_not_saved_in_project(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
@@ -612,6 +749,12 @@ class VideoIngestTests(unittest.TestCase):
             def get(self, prop):
                 import cv2
                 return {cv2.CAP_PROP_FRAME_COUNT: 300, cv2.CAP_PROP_FPS: 30}[prop]
+            def isOpened(self):
+                return True
+            def set(self, prop, value):
+                return True
+            def read(self):
+                return True, object()
             def release(self):
                 self.released = True
 
@@ -625,26 +768,139 @@ class VideoIngestTests(unittest.TestCase):
              patch("control_vision.pipeline.ingest.cv2.VideoCapture", return_value=capture):
             metadata = probe_video(Path("playable.mp4"))
         self.assertEqual(metadata["duration_s"], 10)
+        self.assertEqual(metadata["warnings"], [])
         self.assertTrue(capture.released)
 
 
-class PreviewPhotoTests(unittest.TestCase):
-    def test_default_tracking_patch_yields_exportable_photo_geometry(self):
-        x0, y0, x1, y1 = _photo_crop_bounds((720, 1280, 3), 600, 510, 112, 88)
-        self.assertGreaterEqual(x1 - x0, 200)
-        self.assertGreaterEqual(y1 - y0, 200)
+class AppStateTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        from PySide6.QtWidgets import QApplication
+        from control_vision.app.main_window import MainWindow
 
-    def test_only_full_size_crops_are_written(self):
-        import logging
-        import numpy as np
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        self.app = QApplication.instance() or QApplication([])
+        self.window = MainWindow()
+
+    def tearDown(self):
+        self.window.db = None
+        self.window.close()
+
+    def test_failed_project_creation_drops_closed_database(self):
+        from unittest.mock import Mock
+        old_db = Mock()
+        self.window.db, self.window.project_id = old_db, 7
+        with patch("control_vision.app.main_window.QFileDialog.getExistingDirectory", return_value="locked"), \
+             patch("PySide6.QtWidgets.QInputDialog.getText", return_value=("New", True)), \
+             patch("control_vision.app.main_window.ProjectDatabase", side_effect=OSError("read-only folder")), \
+             patch("control_vision.app.main_window.QMessageBox.critical") as shown:
+            self.window.new_project()
+        old_db.close.assert_called()
+        self.assertIsNone(self.window.db)
+        self.assertIsNone(self.window.project_id)
+        self.assertIn("read-only folder", shown.call_args.args[2])
+
+    def test_selecting_corners_again_starts_a_new_calibration(self):
+        self.window.corners = [[0, 0], [10, 0], [10, 10], [0, 10]]
+        self.window.video_path = Path("match.mp4")
+        with patch("control_vision.app.main_window.cv2.VideoCapture") as capture:
+            capture.return_value.read.return_value = (False, None)
+            self.window.select_corner()
+            self.assertIn("corner 1 of 4", self.window.statusBar().currentMessage())
+            self.window.canvas_click(5, 5)
+        self.assertEqual(self.window.corners, [[5, 5]])
+
+    def test_field_zone_names_cannot_use_the_roi_suffix(self):
+        from unittest.mock import Mock
+        self.window.db, self.window.video_id = Mock(), 1
+        self.window._drawing_zone = True
+        self.window.field_map.draft = [[0, 0], [2, 0], [2, 2]]
+        with patch("control_vision.app.main_window.QInputDialog.getText", return_value=("pickup_roi", True)), \
+             patch("control_vision.app.main_window.QMessageBox.warning") as shown:
+            self.window.finish_zone()
+        self.assertNotIn("pickup_roi", self.window.zones)
+        self.window.db.save_calibration.assert_not_called()
+        self.assertIn("_roi", shown.call_args.args[2])
+
+    def test_error_while_saving_results_releases_processing_state(self):
+        import sqlite3
+        from unittest.mock import Mock
+        db = Mock()
+        db.replace_tracks.side_effect = sqlite3.OperationalError("database is locked")
+        self.window.db, self.window.video_id = db, 1
+        self.window.seed_points = [(1, 0, 0)]
+        self.window._processing_active = True
+        self.window.process_btn.setEnabled(False)
+        self.window.processing_done((([(1, 0, 0.0, 1.0, 1.0, 0.9)], [], []), "yolo"))
+        self.assertFalse(self.window._processing_active)
+        self.assertTrue(self.window.process_btn.isEnabled())
+        db.set_analysis_status.assert_called_with(1, "failed")
+        self.assertIn("database is locked", self.window.progress_label.text())
+
+    def _preview_project(self, folder):
+        db = ProjectDatabase(Path(folder) / "project.sqlite")
+        project_id = db.add_project("preview")
+        video_id = db.add_video(project_id, Path(folder) / "match.mp4",
+                                {"duration_s": 150, "fps": 30, "width": 1280, "height": 720})
+        red = db.add_robot(video_id, 111, "red", 10, 10)
+        blue = db.add_robot(video_id, 222, "blue", 50, 10)
+        self.window.db, self.window.project_id, self.window.video_id = db, project_id, video_id
+        self.window.seed_points = [(red, 10, 10), (blue, 50, 10)]
+        self.window._processing_active = True
+        return db, video_id, red, blue
+
+    def test_preview_with_no_track_rows_is_not_marked_analysed(self):
         with tempfile.TemporaryDirectory() as folder:
-            photos = _save_best_photos({
-                1: (1, 1.0, 0.0, np.zeros((199, 250, 3), dtype=np.uint8)),
-                2: (1, 1.0, 0.0, np.zeros((200, 200, 3), dtype=np.uint8)),
-            }, Path(folder), logging.getLogger("preview-photo-test"))
-            self.assertEqual([row[0] for row in photos], [2])
-            self.assertFalse((Path(folder) / "robot-1.png").exists())
-            self.assertTrue((Path(folder) / "robot-2.png").is_file())
+            db, video_id, _, _ = self._preview_project(folder)
+            try:
+                self.window.processing_done((([], [], []), "seeded_optical_flow"))
+                status = db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (video_id,)).fetchone()
+                self.assertEqual(status["analysis_status"], "failed")
+                self.assertFalse(self.window.tabs.isTabEnabled(2))
+                self.assertFalse(self.window._processing_active)
+                self.assertTrue(self.window.process_btn.isEnabled())
+                self.assertIn("did not record a confident position for any seeded robot",
+                              self.window.progress_label.text())
+                self.assertEqual(db.tracks_for_video(video_id), [])
+            finally:
+                db.close()
+
+    def test_preview_names_seeded_robots_without_track_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db, video_id, red, blue = self._preview_project(folder)
+            try:
+                self.window.processing_done((([(blue, 0, 0.0, 6.0, 6.0, 0.8)], [], []), "seeded_optical_flow"))
+                status = db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (video_id,)).fetchone()
+                self.assertEqual(status["analysis_status"], "ready")
+                text = self.window.progress_label.text()
+                self.assertIn("No confident position was recorded for team 111 (red)", text)
+                self.assertNotIn("222", text)
+            finally:
+                db.close()
+
+    def test_review_controls_need_a_new_selection_after_each_review(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = ProjectDatabase(Path(folder) / "project.sqlite")
+            try:
+                project_id = db.add_project("review")
+                video_id = db.add_video(project_id, Path(folder) / "match.mp4",
+                                        {"duration_s": 150, "fps": 30, "width": 1280, "height": 720})
+                robot_id = db.add_robot(video_id, 123, "red", 10, 10)
+                db.set_analysis_status(video_id, "ready")
+                first = db.add_scoring_event(robot_id, 10.0)
+                second = db.add_scoring_event(robot_id, 20.0)
+                self.window.db, self.window.project_id, self.window.video_id = db, project_id, video_id
+                self.window.refresh_result_tables()
+                self.window.review_table.setCurrentCell(0, 0)
+                self.window.review_robot.setCurrentIndex(self.window.review_robot.findData(robot_id))
+                self.window.review_selected("confirmed")
+                self.assertEqual(self.window.review_table.currentRow(), -1)
+                self.window.review_selected("confirmed")
+                statuses = {row["id"]: (row["status"], row["robot_id"]) for row in db.events_for_video(video_id)}
+                self.assertEqual(statuses[first], ("confirmed", robot_id))
+                self.assertEqual(statuses[second], ("flagged", robot_id))
+            finally:
+                db.close()
 
 
 if __name__ == "__main__":

@@ -245,6 +245,19 @@ class PreviewDialog(QDialog):
         self.finished.connect(lambda _: self.player.stop())
 
 
+def missing_robot_labels(robots, robot_ids, track_rows) -> list[str]:
+    """Labels of seeded robots that have no track rows, in seed order."""
+    tracked = {int(row[0]) for row in track_rows}
+    by_id = {int(robot["id"]): robot for robot in robots}
+    labels = []
+    for robot_id in robot_ids:
+        if int(robot_id) in tracked:
+            continue
+        robot = by_id.get(int(robot_id))
+        labels.append(f"team {robot['team_number']} ({robot['alliance']})" if robot else f"robot {robot_id}")
+    return labels
+
+
 def _video_switch_blocked(window) -> bool:
     if getattr(window, "_processing_active", False) or getattr(window, "_ocr_active", False):
         QMessageBox.information(window, "Analysis in progress",
@@ -397,13 +410,13 @@ class MainWindow(QMainWindow):
         self.read_scoreboard_btn = QPushButton("Read final scoreboard from video")
         self.use_ocr_btn = QPushButton("Use OCR reading in score comparison")
         self.use_ocr_btn.setEnabled(False)
-        self.scoreboard_ocr_status = QLabel("Scoreboard OCR uses user-drawn red and blue ROIs and a multi-frame vote. Review the proposal before using it.")
+        self.scoreboard_ocr_status = QLabel("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
         self.scoreboard_ocr_status.setWordWrap(True)
         ocr_row = QHBoxLayout(); ocr_row.addWidget(self.read_scoreboard_btn); ocr_row.addWidget(self.use_ocr_btn)
         export_layout.addLayout(ocr_row); export_layout.addWidget(self.scoreboard_ocr_status)
         self.score_compare = QLabel("Video totals include confirmed events only."); export_layout.addWidget(self.score_compare)
         rp_row = QHBoxLayout()
-        self.disq_red = QCheckBox("Red disqualified"); self.disq_blue = QCheckBox("Blue disqualified")
+        self.disq_red = QCheckBox("Red alliance DQ (playoff)"); self.disq_blue = QCheckBox("Blue alliance DQ (playoff)")
         self.swarm_threshold = QSpinBox(); self.swarm_threshold.setRange(0, 999); self.swarm_threshold.setValue(16)
         self.pollinator_1_threshold = QSpinBox(); self.pollinator_1_threshold.setRange(0, 99); self.pollinator_1_threshold.setValue(4)
         self.pollinator_2_threshold = QSpinBox(); self.pollinator_2_threshold.setRange(0, 99); self.pollinator_2_threshold.setValue(7)
@@ -567,7 +580,7 @@ class MainWindow(QMainWindow):
         self._mode = name; self.canvas.roi_points = []
         if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
         alliance = "red" if "red" in name else "blue"
-        self.statusBar().showMessage(f"Outline the full {alliance} score digits, including their baselines. Click at least three corners, then double-click to save.")
+        self.statusBar().showMessage(f"On the final results screen, outline only the {alliance} score digits. Click at least three corners, then double-click to save.")
 
     def finish_roi(self):
         if self._mode not in {"roi", "scoreboard_red_roi", "scoreboard_blue_roi"}: return
@@ -609,6 +622,9 @@ class MainWindow(QMainWindow):
         clean_name = name.strip()
         if clean_name in self.zones:
             QMessageBox.warning(self, "Zone name already used", "Choose a unique zone name."); return
+        if clean_name.endswith("_roi"):
+            # Names ending in _roi are reserved for image-space ROIs.
+            QMessageBox.warning(self, "Zone name reserved", "Field zone names cannot end in \"_roi\". Choose another name."); return
         self.zones[clean_name] = {"type": self.zone_type.currentText(), "points": self.field_map.draft.copy()}
         self.zone_remove_combo.addItem(clean_name)
         self.field_map.zones = self.zones; self.field_map.draft = []; self._drawing_zone = False
@@ -658,6 +674,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Project ready: {name.strip()}")
             self.refresh_home()
         except Exception as exc:
+            # The previous database is already closed; never keep using it.
+            if self.db: self.db.close()
+            self.db, self.project_id = None, None
             QMessageBox.critical(self, "Could not create project", str(exc))
 
     def open_project(self):
@@ -708,7 +727,7 @@ class MainWindow(QMainWindow):
         self.official_red.clear()
         self.official_blue.clear()
         self.use_ocr_btn.setEnabled(False)
-        self.scoreboard_ocr_status.setText("Scoreboard OCR uses user-drawn red and blue ROIs and a multi-frame vote. Review the proposal before using it.")
+        self.scoreboard_ocr_status.setText("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
         self.disq_red.setChecked(False); self.disq_blue.setChecked(False)
         self.swarm_threshold.setValue(16); self.pollinator_1_threshold.setValue(4); self.pollinator_2_threshold.setValue(7)
         self.cycles_table.setRowCount(0)
@@ -716,7 +735,7 @@ class MainWindow(QMainWindow):
         self.review_table.setRowCount(0)
         self.scoring_table.setRowCount(0)
         self.clip_list.clear()
-        self._set_results_enabled(True)
+        self._set_results_enabled(False)
         self.progress_label.setText("Project opened. Load or import a match video to begin.")
         self.slider.setValue(0)
         self.refresh_result_tables()
@@ -748,8 +767,10 @@ class MainWindow(QMainWindow):
             "SELECT analysis_status FROM videos WHERE id=?", (self.video_id,)).fetchone()
         if row and row["analysis_status"] == "ready":
             return True
-        QMessageBox.warning(self, "Analysis unavailable",
-                            "The last analysis did not finish. Process this video successfully before reviewing or exporting results.")
+        message = ("Process this video before reviewing or exporting results."
+                   if row and row["analysis_status"] == "unprocessed"
+                   else "The last analysis did not finish. Process this video successfully before reviewing or exporting results.")
+        QMessageBox.warning(self, "Analysis unavailable", message)
         return False
 
     def import_video(self):
@@ -763,11 +784,7 @@ class MainWindow(QMainWindow):
         path = Path(selected)
         try:
             metadata = probe_video(path)
-            video_warnings = []
-            if metadata["width"] < 1280 or metadata["height"] < 720:
-                video_warnings.append(f"Resolution is {metadata['width']}×{metadata['height']}; 1280×720 or higher is recommended.")
-            if metadata["fps"] < 15:
-                video_warnings.append(f"Frame rate is {metadata['fps']:.1f} fps; 15 fps or higher is recommended.")
+            video_warnings = list(metadata.get("warnings", []))
             if video_warnings:
                 QMessageBox.warning(self, "Video quality warning", "\n".join(video_warnings) + "\n\nYou can still import this video.")
             event_code, ok = QInputDialog.getText(self, "Match details", "Event code (optional)")
@@ -786,7 +803,7 @@ class MainWindow(QMainWindow):
         self.corners.clear(); self.seed_points.clear(); self.robot_labels.clear(); self.tracks.clear(); self.zones.clear(); self.cycles.clear(); self.events = []
         self.zone_remove_combo.clear(); self.official_red.clear(); self.official_blue.clear()
         self.use_ocr_btn.setEnabled(False)
-        self.scoreboard_ocr_status.setText("Draw red and blue scoreboard ROIs, then run OCR to propose the final video scoreboard values.")
+        self.scoreboard_ocr_status.setText("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
         self.disq_red.setChecked(False); self.disq_blue.setChecked(False)
         self.swarm_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["swarm_leave_park_points"]))
         self.pollinator_1_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["pollinator_1_hive_tips"]))
@@ -794,16 +811,13 @@ class MainWindow(QMainWindow):
         self.canvas.roi_points = []
         self.canvas.named_rois = {}
         self.field_map.zones = {}; self.field_map.tracks = {}; self.field_map.update()
-        self._set_results_enabled(True)
+        self._set_results_enabled(False)
         self.duration = float(metadata["duration_s"])
         self.capture = cv2.VideoCapture(str(path))
         self.canvas.show_frame(frame)
         self.slider.setValue(0)
-        warnings = []
-        if metadata["width"] < 1280 or metadata["height"] < 720: warnings.append("below 720p")
-        if metadata["fps"] < 15: warnings.append("below 15 fps")
         message = f"{path.name}: {metadata['width']}×{metadata['height']}, {metadata['fps']:.2f} fps, {self.duration:.1f} s"
-        if warnings: message += " — warning: " + " and ".join(warnings)
+        if video_warnings: message += " — warning: " + " ".join(video_warnings)
         self.progress_label.setText(message)
         self.statusBar().showMessage("Video imported. Select the field corners in this order: top-left, top-right, bottom-right, bottom-left.")
         self.refresh_home()
@@ -874,7 +888,8 @@ class MainWindow(QMainWindow):
         self.robot_labels = [f"{row['team_number']} ({row['alliance']})" for row in robots]
         self.canvas.show_frame(frame, [(int(x), int(y), str(index + 1)) for index, (x, y) in enumerate(self.corners)])
         self.refresh_home()
-        self.progress_label.setText(f"Loaded {path.name}. Corners: {len(self.corners)}/4; seeded identities: {len(self.seed_points)}.")
+        warning_note = (" Warning: " + " ".join(metadata["warnings"])) if metadata.get("warnings") else ""
+        self.progress_label.setText(f"Loaded {path.name}. Corners: {len(self.corners)}/4; seeded identities: {len(self.seed_points)}.{warning_note}")
         rows = self.db.connection.execute("SELECT robot_id,t_s,x_ft,y_ft FROM tracks WHERE robot_id IN (SELECT id FROM robots WHERE video_id=?) ORDER BY frame", (self.video_id,)).fetchall() if results_available else []
         track_by_id = {}
         for row in rows: track_by_id.setdefault(row["robot_id"], []).append((row["t_s"], row["x_ft"], row["y_ft"]))
@@ -882,12 +897,16 @@ class MainWindow(QMainWindow):
         self.field_map.tracks = self.tracks; self.field_map.current_time = 0; self.field_map.update()
         self.refresh_result_tables()
         if not results_available:
-            self.progress_label.setText("The last analysis did not finish. Saved results are hidden until this video is processed successfully.")
+            self.progress_label.setText((
+                "This video has not been processed. Set up the field and run analysis to create results."
+                if video["analysis_status"] == "unprocessed"
+                else "The last analysis did not finish. Saved results are hidden until this video is processed successfully."
+            ) + warning_note)
 
     def select_corner(self):
         if self.video_path is None: return
         self._mode = "corner"
-        self.statusBar().showMessage(f"Click corner {len(self.corners)+1} of 4 in order (top-left, top-right, bottom-right, bottom-left).")
+        self.statusBar().showMessage(f"Click corner {len(self.corners) % 4 + 1} of 4 in order (top-left, top-right, bottom-right, bottom-left).")
 
     def seed_robot(self):
         if self.video_path is None: return
@@ -898,6 +917,9 @@ class MainWindow(QMainWindow):
 
     def canvas_click(self, x, y):
         if self._mode == "corner":
+            if len(self.corners) >= 4:
+                # Selecting corners again starts a new calibration.
+                self.corners.clear()
             self.corners.append([x, y]); self._mode = None
             annotations = [(int(cx), int(cy), f"{i+1}") for i, (cx, cy) in enumerate(self.corners)]
             if self.video_path:
@@ -911,7 +933,10 @@ class MainWindow(QMainWindow):
                     self.field_map.update()
                     self.progress_label.setText(f"Calibration saved. Four-corner interpolation residual: {reprojection_error_px(self.corners):.2f} px (this is not an independent accuracy check).")
                 except Exception as exc:
-                    QMessageBox.warning(self, "Invalid calibration", str(exc)); self.corners.clear()
+                    self.corners.clear()
+                    self.progress_label.setText(f"Calibration not saved: {exc} Use Calibrate to select the 4 corners again.")
+                    if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
+                    QMessageBox.warning(self, "Invalid calibration", str(exc))
         elif self._mode == "robot":
             dialog = IdentityDialog(self)
             if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -978,6 +1003,28 @@ class MainWindow(QMainWindow):
         self.progress_label.setText(f"{stage} — {percent:.0f}% — {detail}")
 
     def processing_done(self, rows):
+        (track_rows, _, _), tracking_mode = rows
+        if not track_rows:
+            # The seeded preview suspends uncertain tracks and may record
+            # nothing; an empty run must not be presented as an analysis.
+            method = "The seeded preview" if tracking_mode == "seeded_optical_flow" else "Tracking"
+            self.processing_failed(
+                f"{method} did not record a confident position for any seeded robot, so no results were saved "
+                "and this video is not analysed. Seed each robot on a clear frame where it is fully visible, "
+                "or use a trained YOLO model.")
+            return
+        try:
+            self._store_processing_results(rows)
+        except Exception as exc:
+            logger = getattr(self, "logger", None)
+            if logger: logger.exception("Saving analysis results failed")
+            self.processing_failed(f"Could not save the analysis results: {exc}")
+            return
+        self.process_btn.setEnabled(True)
+        if self.capture: self.timer.start()
+        self._processing_active = False
+
+    def _store_processing_results(self, rows):
         (track_rows, photos, roi_events), tracking_mode = rows
         self.db.set_tracking_mode(self.video_id, tracking_mode)
         robot_ids = [seed[0] for seed in self.seed_points]
@@ -1001,11 +1048,15 @@ class MainWindow(QMainWindow):
         self.log_view.addItem(f"{tracking_method} complete: {len(track_rows):,} mapped robot samples; {len(self.cycles)} zone-trip cycles; {len(photos)} robot photos")
         if tracking_mode == "seeded_optical_flow":
             self.log_view.addItem("Accuracy note: optical-flow is a trail preview only. Cycle counts and movement statistics are omitted; verify every identity and position before any use as evidence.")
-        self.progress_label.setText(f"Analysis complete. Samples: {len(track_rows):,}; cycle/event candidates: {len(self.events)}. Review points and statuses before reporting scores.")
+        message = f"Analysis complete. Samples: {len(track_rows):,}; cycle/event candidates: {len(self.events)}. Review points and statuses before reporting scores."
+        missing = missing_robot_labels(self.db.robots_for_video(self.video_id), robot_ids, track_rows)
+        if missing:
+            note = ("No confident position was recorded for " + ", ".join(missing) +
+                    "; their trails and statistics are empty.")
+            self.log_view.addItem(note)
+            message += " " + note
+        self.progress_label.setText(message)
         self.refresh_result_tables()
-        self.process_btn.setEnabled(True)
-        if self.capture: self.timer.start()
-        self._processing_active = False
 
     def refresh_result_tables(self):
         if not self.db or self.video_id is None: return
@@ -1046,6 +1097,9 @@ class MainWindow(QMainWindow):
             for col, value in enumerate(display): self.stats_table.setItem(row_index, col, QTableWidgetItem(str(value)))
         flagged = [event for event in self.events if event["status"] == "flagged"]
         self.review_table.setRowCount(len(flagged))
+        # The review controls describe one event; require a fresh selection
+        # after every rebuild so stale values are never applied to another row.
+        self.review_table.setCurrentCell(-1, -1)
         clips_by_event = {row["scoring_event_id"]: row for row in self.db.clips_for_video(self.video_id)}
         for row_index, event in enumerate(flagged):
             clip = clips_by_event.get(event["id"])
@@ -1140,7 +1194,8 @@ class MainWindow(QMainWindow):
                                      self.pollinator_2_threshold.value(), disqualified)
         totals = board["alliance_points"]
         flagged_count = sum(event["status"] == "flagged" for event in events)
-        state = "UNREVIEWED — final score pending" if flagged_count else "Reviewed" if any(event["status"] == "confirmed" for event in events) else "No scoring events confirmed"
+        state = ("UNREVIEWED — final score pending" if flagged_count else
+                 "Reviewed" if board["match_resolved"] else "No scoring events reviewed")
         parts = [f"{state}. Video total — red {totals['red']}, blue {totals['blue']}, match {sum(totals.values())}; flagged events: {flagged_count}."]
         for alliance, edit in (("red", self.official_red), ("blue", self.official_blue)):
             raw = edit.text().strip()
@@ -1190,7 +1245,7 @@ class MainWindow(QMainWindow):
 
     def show_scoreboard_ocr(self, result: dict | None):
         if not result:
-            self.scoreboard_ocr_status.setText("Scoreboard OCR uses user-drawn red and blue ROIs and a multi-frame vote. Review the proposal before using it.")
+            self.scoreboard_ocr_status.setText("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
             self.use_ocr_btn.setEnabled(False)
             return
         red, blue = result.get("red", {}), result.get("blue", {})
@@ -1199,6 +1254,10 @@ class MainWindow(QMainWindow):
             score = value.get("value")
             if score is None: return f"{alliance}: no readable score"
             note = "; later OCR read lower—verify the video" if value.get("later_lower_reading") else ""
+            if value.get("uncorroborated_prior_high"):
+                note += f"; higher reading {max(value.get('outvoted_values') or [score])} was outvoted—verify the video"
+            if value.get("flagged"):
+                note += "; low confidence—check the final score on the video"
             return f"{alliance}: {score} (evidence {value.get('confidence', 0):.0%}; OCR recognition {value.get('recognition_confidence', 0):.0%}; agreement {value.get('agreement', 0):.0%}; {value.get('samples', 0)}/{total_frames} readable frames{note})"
         self.scoreboard_ocr_status.setText(
             "OCR proposal from final scoreboard window — " + describe("Red", red) + "; " + describe("Blue", blue) +
@@ -1252,7 +1311,7 @@ class MainWindow(QMainWindow):
             if event["status"] == "rejected" or event["id"] in existing: continue
             path = folder / f"event-{event['id']}.mp4"
             try:
-                start, end = create_highlight(self.video_path, path, event["t_s"], ffmpeg, after_s=min(3.0, max(0.1, self.duration - event["t_s"])))
+                start, end = create_highlight(self.video_path, path, event["t_s"], ffmpeg, duration_s=self.duration)
                 self.db.add_clip(event["id"], path, start, end); made += 1
             except Exception as exc: errors.append(str(exc))
         self.refresh_clips()
@@ -1292,15 +1351,11 @@ class MainWindow(QMainWindow):
         if not self.db or self.video_id is None: return
         target, _ = QFileDialog.getSaveFileName(self, "Export statistics", "control-vision-stats.csv", "CSV (*.csv)")
         if not target: return
-        events = self.db.events_for_video(self.video_id)
-        video = self.db.connection.execute("SELECT * FROM videos WHERE id=?", (self.video_id,)).fetchone()
-        board = calculate_scoreboard(events, self.db.robots_for_video(self.video_id), int(video["swarm_threshold"]),
-                                     int(video["pollinator_1_threshold"]), int(video["pollinator_2_threshold"]),
-                                     {a for a, col in (("red", "red_disqualified"), ("blue", "blue_disqualified")) if video[col]})
+        video = dict(self.db.connection.execute("SELECT * FROM videos WHERE id=?", (self.video_id,)).fetchone())
         export_stats_csv(Path(target), self.db.robots_for_video(self.video_id),
                          [tuple(row) for row in self.db.tracks_for_video(self.video_id)],
                          [dict(row) for row in self.db.cycles_for_video(self.video_id)], self.zones,
-                         board["team_points"], board["team_ranking_points"])
+                         events=[dict(row) for row in self.db.events_for_video(self.video_id)], video=video)
         QMessageBox.information(self, "Export complete", f"Saved {target}")
 
     def export_json(self):
@@ -1332,8 +1387,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Photos exported", f"Exported {copied} robot photo(s). Photos below 200×200 pixels are skipped and listed in the run log.")
 
     def processing_failed(self, message):
-        if self.db and self.video_id is not None:
-            self.db.set_analysis_status(self.video_id, "failed")
+        try:
+            if self.db and self.video_id is not None:
+                self.db.set_analysis_status(self.video_id, "failed")
+        except Exception as exc:
+            message += f" The failed status could not be saved either: {exc}"
         self._set_results_enabled(False)
         self.progress_label.setText(message)
         self.log_view.addItem(message)

@@ -47,7 +47,24 @@ Create a project folder, import a video, click its four field corners, seed each
 
 The current build includes the project hub, tracking workflow, user-drawn zones, zone-trip cycles, BIOBUZZ review/scoring and Ranking Point logic, rule reference, FFmpeg highlights, statistics, Scout JSON and robot-photo exports, optional local ReID configuration, local training utilities, and scoreboard OCR. It does not include trained BIOBUZZ weights; OC-SORT fallback and AFLink/GSI stitching remain unimplemented. See the implementation status for blockers. Holdout acceptance metrics are unmeasured; no robot-detection accuracy or speed claim is implied.
 
+## Extract frames for labeling
+
+With Python 3.11 or newer, install the extractor's pinned dependencies and create unlabeled frames for manual annotation:
+
+```powershell
+python -m pip install -r requirements-extract.txt
+python -m control_vision.training.extract_frames path\to\match.mp4 --output datasets\biobuzz-v1\images\unlabeled
+```
+
+Each video is published to its own folder only after decoding succeeds. An existing folder for that video is left untouched; choose another output directory for a new extraction.
+
 ## Workflow
 
 - Every change via PR. Code review must give 5/5 before merge. Never merge below 5/5.
 - One feature per PR. Base main only. No stacked PRs.
+
+## License
+
+Control Vision source is licensed under the [GNU Affero General Public License v3.0](LICENSE). No Windows build is released from `main` yet. Any future release artifact must identify a commit containing its complete corresponding source.
+
+This project uses [Ultralytics YOLO](https://github.com/ultralytics/ultralytics), which is offered under AGPL-3.0 or an Enterprise license. Any released model weights must include their own provenance and licensing information.
