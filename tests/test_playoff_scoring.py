@@ -56,6 +56,25 @@ class PlayoffScoringTests(unittest.TestCase):
         unfinalized = calculate_playoff_scoreboard(self.events, self.robots)
         self.assertFalse(unfinalized["playoff_outcome"]["resolved"])
 
+    def test_final_reviewed_score_decides_winner_or_tie(self):
+        robots = [{"id": 1, "alliance": "red"}, {"id": 2, "alliance": "blue"}]
+        cases = (([(1, 20), (2, 5)], "red", False),
+                 ([(1, 5), (2, 20)], "blue", False),
+                 ([(1, 10), (2, 10)], None, True))
+        for scores, winner, tie in cases:
+            with self.subTest(scores=scores):
+                events = [{"robot_id": robot_id, "status": "confirmed", "points": points}
+                          for robot_id, points in scores]
+                board = calculate_playoff_scoreboard(events, robots, match_final=True)
+                self.assertEqual(board["playoff_outcome"],
+                                 {"resolved": True, "winner": winner, "tie": tie})
+        # A foul credit counts toward the recipient alliance's winning score.
+        foul = [{"robot_id": 2, "status": "confirmed", "points": 20,
+                 "event_type": "major_foul", "scoring_alliance": "red"},
+                {"robot_id": 2, "status": "confirmed", "points": 5}]
+        board = calculate_playoff_scoreboard(foul, robots, match_final=True)
+        self.assertEqual(board["playoff_outcome"]["winner"], "red")
+
     def test_invalid_referee_ruling_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown playoff alliance"):
             calculate_playoff_scoreboard([], self.robots, disqualified={"green"})
@@ -65,6 +84,9 @@ class PlayoffScoringTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "First disqualified"):
             calculate_playoff_scoreboard([], self.robots, disqualified={"red"},
                                          first_disqualified="red")
+        with self.assertRaisesRegex(ValueError, "Unknown first disqualified"):
+            calculate_playoff_scoreboard([], self.robots, disqualified={"red", "blue"},
+                                         first_disqualified="green")
         with self.assertRaisesRegex(ValueError, "Simultaneous DQ"):
             calculate_playoff_scoreboard([], self.robots, disqualified={"red"},
                                          simultaneous_disqualification=True)
