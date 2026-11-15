@@ -1,11 +1,22 @@
-# PyInstaller spec for a Windows one-folder build. Models and videos remain external.
+# PyInstaller spec for a Windows one-folder build. Run it through
+# scripts/build_windows.ps1, which writes the release metadata it requires.
+# Trained detector weights and match videos remain external to the bundle.
+import sys
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_data_files
+
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 import imageio_ffmpeg
 
 root = Path(SPECPATH)
+sys.path.insert(0, str(root / "scripts"))
+from bundle_licenses import write_license_bundle  # noqa: E402
+
 datas = collect_data_files("control_vision", includes=["config/*.yaml", "config/*.json"])
+# RapidOCR's config.yaml and its three ONNX text models.
 datas += collect_data_files("rapidocr_onnxruntime")
+# Ultralytics reads installed package versions before loading a model.
+for distribution in ("onnxruntime", "torch", "torchvision", "ultralytics", "numpy", "opencv-python"):
+    datas += copy_metadata(distribution)
 datas += [(str(root / "docs" / "BIOBUZZ_RULES.md"), "docs")]
 release_dir = root / "build" / "release"
 required_release_files = ["SOURCE.txt", "FFMPEG_LICENSE.txt", "FFMPEG_BUILD.txt", "FFMPEG_SOURCE.txt"]
@@ -13,9 +24,9 @@ missing = [name for name in required_release_files if not (release_dir / name).i
 if missing:
     raise RuntimeError("Run scripts/build_windows.ps1 first; missing release metadata: " + ", ".join(missing))
 datas += [(str(root / "LICENSE"), "."),
-          (str(root / "licenses" / "GPL-3.0.txt"), "licenses"),
           (str(root / "README.md"), "."),
           (str(root / "docs" / "THIRD_PARTY_NOTICES.md"), "docs")]
+datas += [(str(path), "licenses") for path in sorted((root / "licenses").glob("*.txt"))]
 datas += [(str(release_dir / name), ".") for name in required_release_files]
 ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -24,11 +35,14 @@ a = Analysis(
     pathex=[str(root)],
     binaries=[(ffmpeg_binary, "imageio_ffmpeg/binaries")],
     datas=datas,
-    hiddenimports=["ultralytics.trackers.bot_sort", "ultralytics.trackers.byte_tracker", "onnxruntime", "rapidocr_onnxruntime"],
+    hiddenimports=["control_vision.smoke_test", "ultralytics.trackers.bot_sort", "ultralytics.trackers.byte_tracker",
+                   "onnxruntime", "rapidocr_onnxruntime"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Export and training-only packages: not in requirements.txt, but present
+    # in training environments. Excluding them keeps local and CI builds alike.
+    excludes=["onnx", "onnxslim", "tensorboard", "tensorflow"],
     noarchive=False,
     optimize=1,
 )
@@ -37,6 +51,12 @@ a = Analysis(
 # Windows hosts; bundling that unrelated ICU causes QtCore error 127 at import.
 a.binaries = [entry for entry in a.binaries
               if Path(entry[0]).name.casefold() not in {"icuuc.dll", "icudt78.dll"}]
+# License files for every Python distribution actually collected above.
+collected = [entry[0] for entry in a.pure] + [entry[0] for entry in a.binaries] + [entry[0] for entry in a.datas]
+license_dir = release_dir / "licenses" / "python-packages"
+for source, folder in write_license_bundle(collected, license_dir, always=["pyinstaller"]):
+    destination = "licenses/python-packages" if folder == "." else f"licenses/python-packages/{folder}"
+    a.datas.append((f"{destination}/{Path(source).name}", source, "DATA"))
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="ControlVision", console=False)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="ControlVision")
