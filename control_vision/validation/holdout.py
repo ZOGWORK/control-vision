@@ -17,7 +17,9 @@ import csv
 import hashlib
 import json
 import math
+import os
 import sqlite3
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -334,7 +336,8 @@ def clip_window(t_s: float, duration_s: float) -> tuple[float, float]:
 
 
 def _open_read_only(db_path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True)
+    # as_uri() percent-encodes '#', '?' and '%' so SQLite opens the named file.
+    connection = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -796,19 +799,46 @@ def make_template(db_path: Path, video_id: int, sample_fps: float) -> dict:
     }
 
 
+def write_output(path: Path, text: str, replace: bool = False) -> None:
+    """Write ``text`` atomically; never replace an existing file unless ``replace``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        if replace:
+            os.replace(temporary, path)
+        else:
+            # A hard link fails if the target exists, so a file created after
+            # the caller's check is still never overwritten.
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                raise
+            except OSError:
+                # No hard links on this volume: fall back to exclusive create.
+                with path.open("x", encoding="utf-8") as stream:
+                    stream.write(text)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Evaluate Control Vision holdout matches")
     parser.add_argument("cases", type=Path, nargs="*", help="Human-labeled holdout JSON files")
     parser.add_argument("--holdout-list", type=Path, help="Frozen holdout list of case paths and SHA-256s")
     parser.add_argument("--dataset-root", type=Path, help="Training dataset root with split_manifest.csv")
     parser.add_argument("--manifest", type=Path, help="Split manifest path (relative to --dataset-root)")
-    parser.add_argument("--output", type=Path, help="Write the JSON report here")
+    parser.add_argument("--output", type=Path,
+                        help="Write the JSON report or template here (refuses an existing file)")
+    parser.add_argument("--force", action="store_true", help="Allow --output to replace an existing file")
     parser.add_argument("--make-template", action="store_true", help="Create an unreviewed label template")
     parser.add_argument("--project", type=Path, help="Project database for a label template")
     parser.add_argument("--video-id", type=int, help="Video ID for a label template")
     parser.add_argument("--sample-fps", type=float, help="Sampling rate used by the app")
     args = parser.parse_args(argv)
     report: dict
+    paths: list[Path] = list(args.cases)
     if args.make_template:
         if not (args.project and args.video_id is not None and args.sample_fps and args.output):
             parser.error("Template needs --project, --video-id, --sample-fps, and --output")
@@ -819,7 +849,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.manifest and not args.dataset_root:
             parser.error("--manifest needs --dataset-root")
         frozen = None
-        paths: list[Path] = list(args.cases)
         if args.holdout_list:
             if paths:
                 parser.error("Pass either case files or --holdout-list, not both")
@@ -832,8 +861,12 @@ def main(argv: list[str] | None = None) -> int:
         report = aggregate(cases, disjoint, frozen)
     data = json.dumps(report, indent=2)
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(data + "\n", encoding="utf-8")
+        output = args.output.resolve()
+        if output in {path.resolve() for path in paths}:
+            parser.error(f"--output {output} is one of the holdout cases; refusing to overwrite it")
+        if output.exists() and not args.force:
+            parser.error(f"--output {output} already exists; pass --force to replace it")
+        write_output(output, replace=args.force, text=data + "\n")
     else:
         print(data)
     return 0
