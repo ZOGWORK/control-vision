@@ -321,17 +321,20 @@ class ExportTests(unittest.TestCase):
         with csv_path.open(encoding="utf-8-sig", newline="") as stream:
             self.assertEqual(list(csv.reader(stream)), [
                 ["team_number", "alliance", "cycles", "cycle_time_avg_s", "top_speed_ft_s", "distance_ft",
-                 "zone_time_s", "points_video", "points_official", "ranking_points_video", "confidence"]])
+                 "zone_time_s", "points_video", "points_official", "ranking_points_video", "confidence",
+                 "match_type", "disqualified", "playoff_result"]])
 
     def test_csv_matches_scout_json_numbers(self):
         rows = track((LOAD, 8), (TRANSIT, 8), (GOAL, 8))
         cycles, _ = count_zone_cycles(rows, ZONES)
         reviewed = [event for event in self.events if event["status"] != "flagged"]
-        # Red 5 vs blue 15 (foul credit): blue wins; with red DQ red's team points clear.
-        expected = {0: ([5, 0], [0, 3]), 1: ([0, 0], [0, 3])}
+        # Red 5 vs blue 15 (foul credit): blue wins. An alliance DQ is a playoff
+        # ruling (13.7): red's team points clear and no Ranking Points are awarded.
+        expected = {0: ([5, 0], [0, 3]), 1: ([0, 0], [None, None])}
         for red_dq, (points, ranking) in expected.items():
             with self.subTest(red_disqualified=red_dq):
-                video = dict(self.video, red_disqualified=red_dq)
+                video = dict(self.video, red_disqualified=red_dq,
+                             match_type="playoff" if red_dq else "qualification")
                 export_scout_json(self.target, video, self.robots, rows, cycles, reviewed, [], [], ZONES)
                 teams = json.loads(self.target.read_text(encoding="utf-8"))["teams"]
                 csv_path = Path(self.directory.name) / "stats.csv"
@@ -342,14 +345,19 @@ class ExportTests(unittest.TestCase):
                 for csv_row, team in zip(csv_rows, teams):
                     self.assertEqual(csv_row["points_official"], "")
                     self.assertEqual(json.loads(csv_row["zone_time_s"]), team["zone_time_s"])
-                    for key in ("team_number", "cycles", "points_video", "ranking_points_video"):
+                    for key in ("team_number", "cycles", "points_video"):
                         self.assertEqual(int(csv_row[key]), team[key], key)
+                    self.assertEqual(int(csv_row["ranking_points_video"]) if csv_row["ranking_points_video"] else None,
+                                     team["ranking_points_video"])
+                    self.assertEqual(csv_row["match_type"], team["match_type"])
+                    self.assertEqual(csv_row["disqualified"], str(int(team["disqualified"])))
                     for key in ("cycle_time_avg_s", "top_speed_ft_s", "distance_ft"):
                         self.assertEqual(float(csv_row[key]), team[key], key)
                     self.assertEqual(csv_row["confidence"], team["confidence"])
                     self.assertEqual(csv_row["alliance"], team["alliance"])
                 self.assertEqual([int(row["points_video"]) for row in csv_rows], points)
-                self.assertEqual([int(row["ranking_points_video"]) for row in csv_rows], ranking)
+                self.assertEqual([int(row["ranking_points_video"]) if row["ranking_points_video"] else None
+                                  for row in csv_rows], ranking)
                 self.assertEqual(teams[0]["cycles"], 1)
                 self.assertEqual(teams[0]["confidence"], "medium")
 
