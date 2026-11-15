@@ -202,19 +202,22 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertIn("data.yaml must be a mapping", stderr)
         self.assert_not_trained()
 
+    def assert_not_published(self, code, message):
+        # Failures after training are not usage errors: plain message, exit status 1.
+        self.assertIsInstance(code, str)
+        self.assertIn(message, code)
+        self.assertEqual(self.model_files(), [])
+
     def test_old_opset_is_not_published(self):
         self.fake.opset = 11
-        code, stderr = self.run_main()
-        self.assertEqual(code, 2)
-        self.assertIn("opset 11", stderr)
+        code, _ = self.run_main()
+        self.assert_not_published(code, "Model version 1.0.0 was not published: Exported ONNX uses opset 11")
         self.assertEqual(self.model_files(), [])
 
     def test_onnx_runtime_failure_is_not_published(self):
         self.fake.run_error = "bad graph"
-        code, stderr = self.run_main()
-        self.assertEqual(code, 2)
-        self.assertIn("ONNX Runtime smoke check failed: bad graph", stderr)
-        self.assertEqual(self.model_files(), [])
+        code, _ = self.run_main()
+        self.assert_not_published(code, "ONNX Runtime smoke check failed: bad graph")
 
     def test_wrong_output_shape_or_metadata_is_not_published(self):
         for attribute, value, message in (("output_channels", 7, "does not match 1 x 5"),
@@ -223,17 +226,22 @@ class TrainingPipelineTests(unittest.TestCase):
                 fake = FakeTraining(self.work)
                 setattr(fake, attribute, value)
                 self.fake = fake
-                code, stderr = self.run_main()
-                self.assertEqual(code, 2)
-                self.assertIn(message, stderr)
-                self.assertEqual(self.model_files(), [])
+                code, _ = self.run_main()
+                self.assert_not_published(code, message)
 
     def test_missing_validation_metrics_are_not_published(self):
         self.fake.val_result = None
-        code, stderr = self.run_main()
-        self.assertEqual(code, 2)
-        self.assertIn("Validation returned no metrics", stderr)
+        code, _ = self.run_main()
+        self.assert_not_published(code, "Validation returned no metrics")
         self.assertEqual(self.fake.called("export"), [])
+
+    def test_errors_raised_during_training_keep_their_traceback(self):
+        def bad_device():
+            raise ValueError("Invalid CUDA 'device=7' requested")
+
+        self.fake.on_train = bad_device
+        with self.assertRaisesRegex(ValueError, "Invalid CUDA"):
+            self.run_main()
         self.assertEqual(self.model_files(), [])
 
     def test_existing_version_is_never_overwritten(self):
