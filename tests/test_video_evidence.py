@@ -1,8 +1,9 @@
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
+from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import cv2
 import numpy as np
@@ -11,6 +12,13 @@ from control_vision.pipeline.homography import matrix_from_corners, project_poin
 from control_vision.pipeline.ingest import VideoError, probe_video
 from control_vision.pipeline.scoreboard_ocr import _consensus, _read_digits, read_scoreboard
 from control_vision.pipeline.clips import create_highlight
+
+
+def _fake_rapidocr(engine: MagicMock) -> dict:
+    """Stand in for the optional RapidOCR package so tests do not need its models."""
+    module = ModuleType("rapidocr_onnxruntime")
+    module.RapidOCR = engine  # type: ignore[attr-defined]
+    return {"rapidocr_onnxruntime": module}
 
 
 class VideoEvidenceTests(unittest.TestCase):
@@ -97,7 +105,7 @@ class VideoEvidenceTests(unittest.TestCase):
 
         capture = Capture()
         with patch("control_vision.pipeline.scoreboard_ocr.cv2.VideoCapture", return_value=capture), \
-             patch("rapidocr_onnxruntime.RapidOCR", side_effect=RuntimeError("model load failed")):
+             patch.dict(sys.modules, _fake_rapidocr(MagicMock(side_effect=RuntimeError("model load failed")))):
             with self.assertRaisesRegex(RuntimeError, "model load failed"):
                 read_scoreboard(Path("match.mp4"), [], [])
         self.assertTrue(capture.released)
@@ -119,13 +127,18 @@ class VideoEvidenceTests(unittest.TestCase):
         ocr_values = [RuntimeError("one frame failed"), (100, .9, "100"), (90, .9, "90"),
                       (100, .9, "100"), (90, .9, "90")]
         with patch("control_vision.pipeline.scoreboard_ocr.cv2.VideoCapture", return_value=capture), \
-             patch("rapidocr_onnxruntime.RapidOCR"), \
+             patch.dict(sys.modules, _fake_rapidocr(MagicMock())), \
              patch("control_vision.pipeline.scoreboard_ocr._read_digits", side_effect=ocr_values), \
              patch("control_vision.pipeline.scoreboard_ocr.logging.getLogger"):
             result = read_scoreboard(Path("match.mp4"), [], [], sample_fps=1, tail_seconds=3)
         self.assertEqual(result["frames_sampled"], 2)
         self.assertEqual(result["red"]["value"], 100)
         self.assertTrue(capture.released)
+
+    def test_missing_ocr_package_reports_plain_reinstall_message(self):
+        with patch.dict(sys.modules, {"rapidocr_onnxruntime": None}):
+            with self.assertRaisesRegex(RuntimeError, "RapidOCR models are not installed"):
+                read_scoreboard(Path("match.mp4"), [], [])
 
     def test_failed_clip_copy_reencodes_without_leaving_partial_copy(self):
         with tempfile.TemporaryDirectory() as folder:
