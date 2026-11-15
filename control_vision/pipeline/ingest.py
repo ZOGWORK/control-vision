@@ -5,16 +5,93 @@ import math
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import cv2
+
+# Brief: warn (never block) below 720p or 15 fps. Same rule and wording as the
+# import dialog in the app so the warning text stays consistent.
+MIN_WIDTH, MIN_HEIGHT, MIN_FPS = 1280, 720, 15.0
 
 
 class VideoError(RuntimeError):
     pass
 
 
-def probe_video(path: Path) -> dict[str, float | int]:
-    """Probe with ffprobe; use OpenCV for a fallback when ffprobe is unavailable."""
+def probe_video(path: Path) -> dict[str, Any]:
+    """Probe with ffprobe; use OpenCV for a fallback when ffprobe is unavailable.
+
+    The result has duration_s, fps, width, height and a "warnings" list of
+    plain sentences. Warnings never block an import. The first frame and a
+    frame near the end are decoded so corrupt or truncated files are caught.
+    """
+    metadata = _probe_metadata(path)
+    return _check_decodable(path, metadata)
+
+
+def quality_warnings(metadata: dict[str, Any]) -> list[str]:
+    warnings = []
+    if metadata["width"] < MIN_WIDTH or metadata["height"] < MIN_HEIGHT:
+        warnings.append(f"Resolution is {metadata['width']}\u00d7{metadata['height']}; "
+                        f"{MIN_WIDTH}\u00d7{MIN_HEIGHT} or higher is recommended.")
+    if metadata["fps"] < MIN_FPS:
+        warnings.append(f"Frame rate is {metadata['fps']:.1f} fps; {MIN_FPS:.0f} fps or higher is recommended.")
+    return warnings
+
+
+def _check_decodable(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    result = dict(metadata)
+    warnings = quality_warnings(result)
+    fps = float(result["fps"])
+    duration = float(result["duration_s"])
+    cap = cv2.VideoCapture(str(path))
+    try:
+        if not cap.isOpened():
+            raise VideoError(f"Could not open video file {path.name}. The file may be corrupt or in an unsupported format.")
+        ok, _ = cap.read()
+        if not ok:
+            raise VideoError(f"Could not decode the first frame of {path.name}. The file may be corrupt or truncated.")
+        last_frame = max(0, int(duration * fps) - 1)
+        tail_frame = max(0, last_frame - max(1, int(round(fps))))
+        if tail_frame > 0 and not _decodes_at(cap, tail_frame):
+            result["reported_duration_s"] = duration
+            result["truncated"] = True
+            # After a failed read OpenCV reports how far decoding got. Verify
+            # that position with one more decode instead of searching, which
+            # keeps the probe to a few seeks even on long files.
+            reached = _position(cap)
+            if reached is not None and 1 <= reached < tail_frame and _decodes_at(cap, reached - 1):
+                decodable_s = reached / fps
+                result["duration_s"] = decodable_s
+                warnings.append(f"{path.name} may be truncated: video frames stop decoding near {decodable_s:.1f} s "
+                                f"although the file reports {duration:.1f} s.")
+            else:
+                warnings.append(f"{path.name} may be truncated: frames near the end ({duration:.1f} s) "
+                                "could not be decoded.")
+    finally:
+        cap.release()
+    result["warnings"] = warnings
+    return result
+
+
+def _position(cap) -> int | None:
+    try:
+        value = float(cap.get(cv2.CAP_PROP_POS_FRAMES))
+    except (cv2.error, KeyError, TypeError, ValueError):
+        return None
+    return int(value) if math.isfinite(value) else None
+
+
+def _decodes_at(cap, frame_index: int) -> bool:
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, _ = cap.read()
+    except cv2.error:
+        return False
+    return bool(ok)
+
+
+def _probe_metadata(path: Path) -> dict[str, Any]:
     ffprobe = shutil.which("ffprobe")
     if ffprobe:
         result = subprocess.run(
