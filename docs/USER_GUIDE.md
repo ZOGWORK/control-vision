@@ -2,7 +2,7 @@
 
 ## Prepare a local install
 
-Use Python 3.11 or newer, install the pinned packages in `requirements.txt`, and run `python -m control_vision`. Accurate full-match robot detection requires a locally trained YOLO model with class 0 named `robot`; Control Vision does not download weights. A seeded optical-flow preview is available without a model, but it is not accurate enough for scoring or unattended identity attribution. Install FFmpeg and add `ffmpeg.exe` to PATH to make highlight clips; the packaged Windows build includes FFmpeg.
+Use Python 3.11 or newer, install the pinned packages in `requirements.txt`, and run `python -m control_vision`. Accurate full-match robot detection requires a locally trained YOLO model with class 0 named `robot`; Control Vision does not download weights. A seeded optical-flow preview is available without a model, but it is not accurate enough for scoring or unattended identity attribution. Highlight clips use the FFmpeg binary bundled with the pinned `imageio-ffmpeg` package, and the packaged Windows build includes FFmpeg. To use a different FFmpeg build, set its path in Settings or put `ffmpeg.exe` on PATH; either overrides the bundled binary.
 
 ## Analyze a practice video or match
 
@@ -26,4 +26,4 @@ Statistics CSV and Scout JSON exports use the reviewed database values. Official
 
 No trained weights, labeled dataset, or holdout videos ship with the source. The UI and code do not claim measured ID-switch, track-completeness, cycle-count, scoring, or CPU-performance results. Zone crossings and manually reviewed points are practical scaffolding; score-value inference from robot motion alone is not automatic.
 
-On the Salk Q3 clip, ROIs copied from the live overlay proposed 156–93, which differs from the official 180–103 result. The final results screen moves the scores. ROIs drawn around the final screen's digits proposed 180–103 on the same last-12-second window, with 4 readable red frames and 2 readable blue frames. The red temporal confidence was 26% and the blue 54%; this single clip does not establish general OCR accuracy, and the proposal still requires review.
+On the Salk Q3 clip, ROIs copied from the live overlay proposed 156–93, which differs from the official 180–103 result. The final results screen moves the scores. ROIs drawn around the final screen's digits read blue 103 from 2 readable frames (54% confidence). The red score animates in on that screen: its 4 readable frames read 8, 8, 18, and 180, so the frame vote proposed red 8 at 21% confidence and the status line notes that the higher reading 180 was outvoted. Check the video and enter the official score when the proposal is flagged this way. This single clip does not establish general OCR accuracy, and every proposal requires review.
