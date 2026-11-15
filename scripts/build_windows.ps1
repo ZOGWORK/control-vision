@@ -5,6 +5,17 @@ param(
     [int]$SmokeTimeoutSeconds = 900
 )
 $ErrorActionPreference = "Stop"
+
+# Windows PowerShell turns a native program's stderr into a terminating error
+# under "Stop" whenever output is redirected (as in CI logs). PyInstaller logs
+# to stderr, so run native tools with stderr merged as plain text and check
+# their exit code instead.
+function Invoke-Native([scriptblock]$Command) {
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $Command 2>&1 | ForEach-Object { "$_" } } finally { $ErrorActionPreference = $saved }
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $repoRoot
 try {
@@ -43,7 +54,7 @@ weights and match videos are external to the application bundle.
     if ($LASTEXITCODE -ne 0 -or $wrapperVersion -ne "0.6.0") {
         throw "Unexpected imageio-ffmpeg package version; update binary provenance before packaging."
     }
-    & $ffmpeg -L | Set-Content -LiteralPath (Join-Path $releaseDir "FFMPEG_LICENSE.txt") -Encoding utf8
+    & $ffmpeg -hide_banner -L | Set-Content -LiteralPath (Join-Path $releaseDir "FFMPEG_LICENSE.txt") -Encoding utf8
     if ($LASTEXITCODE -ne 0) { throw "Could not read bundled FFmpeg license." }
     & $ffmpeg -version | Set-Content -LiteralPath (Join-Path $releaseDir "FFMPEG_BUILD.txt") -Encoding utf8
     if ($LASTEXITCODE -ne 0) { throw "Could not identify bundled FFmpeg build." }
@@ -66,7 +77,7 @@ The release maintainer must separately ensure corresponding source for the
 FFmpeg build and its linked libraries is provided with any public binary.
 "@ | Set-Content -LiteralPath (Join-Path $releaseDir "FFMPEG_SOURCE.txt") -Encoding utf8
 
-    & $python -m PyInstaller --noconfirm control_vision.spec
+    Invoke-Native { & $python -m PyInstaller --noconfirm control_vision.spec }
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed." }
     $exe = Join-Path $repoRoot "dist\ControlVision\ControlVision.exe"
     if (-not (Test-Path -LiteralPath $exe)) { throw "PyInstaller did not produce ControlVision.exe." }
