@@ -123,7 +123,9 @@ def calculate_playoff_scoreboard(events, robots, *, disqualified: set[str] | Non
     disqualified = set(disqualified or ())
     if disqualified - {"red", "blue"}:
         raise ValueError("Unknown playoff alliance DQ")
-    if first_disqualified is not None and (len(disqualified) != 2 or first_disqualified not in disqualified):
+    if first_disqualified is not None and first_disqualified not in {"red", "blue"}:
+        raise ValueError("Unknown first disqualified alliance")
+    if first_disqualified is not None and len(disqualified) != 2:
         raise ValueError("First disqualified alliance requires both alliance DQs")
     if simultaneous_disqualification and (len(disqualified) != 2 or first_disqualified is not None):
         raise ValueError("Simultaneous DQ requires both alliances and no first DQ")
