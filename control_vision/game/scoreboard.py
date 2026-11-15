@@ -21,14 +21,19 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
     ``disqualified`` is playoff alliance DQ. Qualification DQ uses robot IDs
     and zeroes only the affected team's match points and ranking points.
     ``team_points`` attributes observed actions to robots; ``team_match_points``
-    is the official alliance match score credited to each eligible team.
+    is the official alliance match score credited to each eligible team. It
+    includes opponent foul credit, so it is not the T-13.6.3 sort criterion
+    that excludes fouls.
     Ranking-point fields in this function are for qualification displays only.
     """
     events = list(events)
     robots = list(robots)
     disqualified = disqualified or set()
-    qualification_disqualified = {int(robot_id) for robot_id in
-                                   (qualification_disqualified_robot_ids or set())}
+    try:
+        qualification_disqualified = {int(robot_id) for robot_id in
+                                       (qualification_disqualified_robot_ids or set())}
+    except (TypeError, ValueError) as error:
+        raise ValueError("Qualification DQ robot IDs must be integers") from error
     if disqualified and qualification_disqualified:
         raise ValueError("Playoff alliance DQ and qualification team DQ cannot be combined")
     match_resolved = bool(events) and all(event["status"] in {"confirmed", "rejected"} for event in events)
