@@ -292,7 +292,8 @@ class AllianceColourRuleTests(unittest.TestCase):
 
     def test_reference_is_the_median_of_the_first_sightings_only(self):
         state = self.state(0.1)
-        state.observe_robot(1, 2.0, 3.0, 3.0, (0.9, 0.0))
+        for index in range(9):
+            state.observe_robot(1, 2.0 + index, 3.0, 3.0, (0.9, 0.0))
         self.assertAlmostEqual(state.colour_reference(1), 0.1)
         self.assertFalse(state.wants_colour(1))
 
@@ -322,6 +323,8 @@ class AllianceColourRuleTests(unittest.TestCase):
         self.assertFalse(state.colour_matches(1, (0.0, 0.0)))
         self.assertTrue(state.colour_matches(1, (0.04, 0.0)))
         self.assertFalse(state.colour_matches(1, (0.06, 0.0)))
+        # Within the bounds, but more of the other alliance's colour than its own.
+        self.assertFalse(state.colour_matches(1, (0.012, 0.018)))
 
     def test_blue_alliance_uses_blue_as_own_colour(self):
         state = self.state(0.1, "blue")
@@ -387,6 +390,14 @@ class IdentityRecoveryRuleTests(unittest.TestCase):
         state.note_assignment(1)
         state.observe_tracks(2.0, {5: (3.0, 3.0)})
         self.assertEqual(state.recover(2.0, {5: (3.0, 3.0)}, {1: 1}), [])
+
+    def test_expiry_is_permanent_even_if_the_robot_is_seen_again(self):
+        self.assertEqual(self.recover(11.5, {}), [])
+        # Its own track comes back briefly, then it is lost once more.
+        self.recover(12.0, {1: (3.0, 3.0)})
+        self.state.observe_robot(1, 12.0, 3.0, 3.0)
+        self.recover(12.2, {})
+        self.assertEqual(self.recover(12.6, {5: (3.2, 3.0)}), [])
 
     def test_previously_assigned_track_is_not_a_candidate(self):
         self.state.note_assignment(5)
