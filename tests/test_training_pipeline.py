@@ -108,7 +108,7 @@ class TrainingPipelineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.work = Path(self.temp.name)
+        self.work = Path(self.temp.name).resolve()
         self.root = self.work / "dataset"
         for split, value in (("train", 30), ("val", 90)):
             (self.root / "images" / split).mkdir(parents=True)
