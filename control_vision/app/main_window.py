@@ -658,6 +658,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Project ready: {name.strip()}")
             self.refresh_home()
         except Exception as exc:
+            # The previous database is already closed; never keep using it.
+            if self.db: self.db.close()
+            self.db, self.project_id = None, None
             QMessageBox.critical(self, "Could not create project", str(exc))
 
     def open_project(self):
@@ -887,7 +890,7 @@ class MainWindow(QMainWindow):
     def select_corner(self):
         if self.video_path is None: return
         self._mode = "corner"
-        self.statusBar().showMessage(f"Click corner {len(self.corners)+1} of 4 in order (top-left, top-right, bottom-right, bottom-left).")
+        self.statusBar().showMessage(f"Click corner {len(self.corners) % 4 + 1} of 4 in order (top-left, top-right, bottom-right, bottom-left).")
 
     def seed_robot(self):
         if self.video_path is None: return
@@ -898,6 +901,9 @@ class MainWindow(QMainWindow):
 
     def canvas_click(self, x, y):
         if self._mode == "corner":
+            if len(self.corners) >= 4:
+                # Selecting corners again starts a new calibration.
+                self.corners.clear()
             self.corners.append([x, y]); self._mode = None
             annotations = [(int(cx), int(cy), f"{i+1}") for i, (cx, cy) in enumerate(self.corners)]
             if self.video_path:
@@ -1049,6 +1055,9 @@ class MainWindow(QMainWindow):
             for col, value in enumerate(display): self.stats_table.setItem(row_index, col, QTableWidgetItem(str(value)))
         flagged = [event for event in self.events if event["status"] == "flagged"]
         self.review_table.setRowCount(len(flagged))
+        # The review controls describe one event; require a fresh selection
+        # after every rebuild so stale values are never applied to another row.
+        self.review_table.setCurrentCell(-1, -1)
         clips_by_event = {row["scoring_event_id"]: row for row in self.db.clips_for_video(self.video_id)}
         for row_index, event in enumerate(flagged):
             clip = clips_by_event.get(event["id"])
