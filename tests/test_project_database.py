@@ -68,7 +68,8 @@ class ProjectDatabaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db.review_event(event_id, "confirmed", 3, self.blue_robot)
         self.assertEqual(self.db.events_for_video(self.blue_video), [])
-        self.db.review_event(event_id, "confirmed", 3, None)
+        # Unassigning the robot keeps the points only with a recipient alliance.
+        self.db.review_event(event_id, "confirmed", 3, None, scoring_alliance="red")
         self.assertIsNone(self.db.events_for_video(self.red_video)[0]["robot_id"])
 
     def test_partial_review_edit_keeps_foul_recipient_and_classification(self):
@@ -274,7 +275,8 @@ class ProjectDatabaseTests(unittest.TestCase):
         confirmed, clipped = self.db.replace_analysis(
             [self.red_robot], [], [{"robot_id": None, "t_s": 40.0, "source": "goal_roi"},
                                    {"robot_id": None, "t_s": 60.0, "source": "goal_roi"}])
-        self.db.review_event(confirmed, "confirmed", 2)
+        # Unattributed confirmed points need a recipient alliance.
+        self.db.review_event(confirmed, "confirmed", 2, scoring_alliance="red")
         self.db.add_clip(clipped, Path("clip.mp4"), 57.0, 63.0)
         manual = self.db.add_scoring_event(self.red_robot, 80.0)
         self.db.replace_analysis([self.red_robot], [], [])
