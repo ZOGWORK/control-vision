@@ -16,7 +16,7 @@ import numpy as np
 from control_vision.storage.database import ProjectDatabase
 from control_vision.validation.holdout import (
     MIN_HOLDOUT_MATCHES, aggregate, assign, check_training_disjoint, evaluate_case,
-    load_holdout_list, make_template, match_tracks)
+    load_holdout_list, main, make_template, match_tracks)
 
 FPS = 4
 SECONDS = 10
@@ -176,6 +176,30 @@ class HoldoutValidationTests(unittest.TestCase):
         self.assertIsNone(template["tracks"][0]["visible"])
         self.assertEqual(template["format_version"], 1)
         self.assertIsNone(template["official_scores"]["source_url"])
+
+    def test_output_never_overwrites_labels_without_force(self):
+        case_path = make_case(self.root)
+        labels = case_path.read_text(encoding="utf-8")
+        template = ["--make-template", "--project", str(self.root / "project.sqlite"), "--video-id", "1",
+                    "--sample-fps", "2", "--output", str(case_path)]
+        with self.assertRaises(SystemExit):
+            main(template)
+        self.assertEqual(case_path.read_text(encoding="utf-8"), labels)
+        with self.assertRaises(SystemExit):
+            main([str(case_path), "--output", str(case_path), "--force"])
+        self.assertEqual(case_path.read_text(encoding="utf-8"), labels)
+        report_path = self.root / "report.json"
+        main([str(case_path), "--output", str(report_path)])
+        first = report_path.read_text(encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            main([str(case_path), "--output", str(report_path)])
+        main(template[:-1] + [str(report_path), "--force"])
+        self.assertNotEqual(report_path.read_text(encoding="utf-8"), first)
+        self.assertEqual([path.name for path in self.root.glob(".*.tmp")], [])
+
+    def test_database_path_with_url_characters_opens_the_right_file(self):
+        case = evaluate_case(make_case(self.root / "Qual #3 100%"))
+        self.assertEqual(case["tracking"]["completeness"], 1)
 
     # Minimum match count and "not measured".
 
