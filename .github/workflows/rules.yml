@@ -23,5 +23,7 @@ jobs:
         run: python -m mypy --ignore-missing-imports --check-untyped-defs control_vision/game/scoreboard.py
       - name: Test
         run: python -m unittest discover -s tests -p test_biobuzz_rules.py -v
+      - name: Test playoff outcome
+        run: python -m unittest discover -s tests -p test_playoff_scoring.py -v
       - name: Build source bytecode
         run: python -m compileall -q control_vision/game control_vision/config
