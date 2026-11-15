@@ -44,9 +44,9 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
             swarm_points[alliance] += points
         if event_type in {"hive_tip_auto", "hive_tip_teleop"}:
             hive_tips[alliance] += 1
-        # Robot attribution describes the observed actor; the recipient
-        # alliance can differ for alliance-scoped achievements and fouls.
-        if robot:
+        # Per-robot scored points must not credit an opponent's receipt or a
+        # referee/manual score adjustment to the observed actor.
+        if robot and robot["alliance"] == alliance and event_type not in {"minor_foul", "major_foul", "manual_adjustment"}:
             team_points[int(robot_id)] += points
 
     for alliance in disqualified:
@@ -56,13 +56,14 @@ def calculate_scoreboard(events, robots, swarm_threshold: int = 16,
                 if robot["alliance"] == alliance:
                     team_points[int(robot["id"])] = 0
 
-    ranking_points = {"red": {}, "blue": {}}
+    ranking_points: dict[str, dict[str, int]] = {"red": {}, "blue": {}}
     for alliance in ("red", "blue"):
         swarm = int(swarm_points[alliance] >= swarm_threshold)
         p1 = int(hive_tips[alliance] >= pollinator_1_threshold)
         p2 = int(hive_tips[alliance] >= pollinator_2_threshold)
-        if alliance in disqualified:
+        if alliance in disqualified or not match_resolved:
             swarm = p1 = p2 = 0
+        if alliance in disqualified:
             outcome = 0
         elif not match_resolved:
             outcome = 0

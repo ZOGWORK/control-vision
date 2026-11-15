@@ -51,7 +51,24 @@ class BiobuzzRulesTests(unittest.TestCase):
         result = calculate_scoreboard(event, self.robots)
         self.assertEqual(result["alliance_points"], {"red": 0, "blue": 5})
         self.assertEqual(result["ranking_points"]["blue"]["WIN_TIE"], 3)
-        self.assertEqual(result["team_points"][1], 5)
+        self.assertEqual(result["team_points"][1], 0)
+
+    def test_unreviewed_achievements_do_not_award_ranking_points(self):
+        events = [{"robot_id": 1, "status": "confirmed", "points": 20,
+                   "event_type": "hive_tip_auto"},
+                  {"robot_id": 2, "status": "flagged", "points": 0}]
+        result = calculate_scoreboard(events, self.robots, pollinator_1_threshold=1)
+        self.assertFalse(result["match_resolved"])
+        self.assertEqual(result["ranking_points"]["red"]["hive_tips"], 1)
+        self.assertEqual(result["ranking_points"]["red"]["POLLINATOR_1"], 0)
+        self.assertEqual(result["ranking_points"]["red"]["total"], 0)
+
+    def test_opponent_foul_credit_is_not_offending_robot_points(self):
+        event = {"robot_id": 1, "status": "confirmed", "points": 5,
+                 "event_type": "minor_foul", "scoring_alliance": "blue"}
+        result = calculate_scoreboard([event], self.robots)
+        self.assertEqual(result["alliance_points"]["blue"], 5)
+        self.assertEqual(result["team_points"][1], 0)
 
     def test_one_shot_event_and_robot_iterators_score_once(self):
         events = iter([{"robot_id": 1, "status": "confirmed", "points": 5}])
