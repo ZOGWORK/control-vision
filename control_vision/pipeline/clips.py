@@ -10,6 +10,8 @@ import cv2
 
 
 FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html"
+# A six-second highlight takes seconds; a hung FFmpeg must not block the app.
+_FFMPEG_TIMEOUT_S = 120.0
 
 
 def _resolve_ffmpeg(ffmpeg_path: str | None) -> str:
@@ -57,7 +59,9 @@ def _video_duration(video: Path) -> float | None:
 
 def _run(command: list[str]) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(command, capture_output=True, text=True, check=False)
+        return subprocess.run(command, capture_output=True, text=True, check=False, timeout=_FFMPEG_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"FFmpeg did not finish the clip within {_FFMPEG_TIMEOUT_S:.0f} seconds.") from exc
     except OSError as exc:
         raise RuntimeError(
             f"FFmpeg could not be started from {command[0]}. "
@@ -94,7 +98,11 @@ def create_highlight(video: Path, output: Path, event_time_s: float, ffmpeg_path
     output.parent.mkdir(parents=True, exist_ok=True)
     length = end - start
     copy_cmd = [executable, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.3f}", "-i", str(video), "-t", f"{length:.3f}", "-c", "copy", str(output)]
-    result = _run(copy_cmd)
+    try:
+        result = _run(copy_cmd)
+    except RuntimeError:
+        output.unlink(missing_ok=True)
+        raise
     if result.returncode != 0:
         output.unlink(missing_ok=True)
         encode_cmd = [executable, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.3f}", "-i", str(video), "-t", f"{length:.3f}", "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", str(output)]
