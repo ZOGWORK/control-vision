@@ -118,6 +118,7 @@ def calculate_playoff_scoreboard(events, robots, *, disqualified: set[str] | Non
     A human reviewer enters the chronological first DQ, or explicitly marks
     simultaneous DQs. Without that ruling, a double-DQ winner is unresolved.
     ``match_final`` allows a reviewed 0-0 match with no event rows to tie.
+    A resolved tie means the result is known; per 13.7.2 the teams replay.
     """
     disqualified = set(disqualified or ())
     if disqualified - {"red", "blue"}:
