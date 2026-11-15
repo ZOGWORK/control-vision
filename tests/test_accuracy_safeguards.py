@@ -162,6 +162,77 @@ class SeedMatchingTests(unittest.TestCase):
                                 logging.getLogger("empty-model-test"))
         self.assertEqual(capture.reads, 30)
 
+    def _run_seed_window(self, box_x: float, frames: int = 300, track_id=1):
+        """Track a 30 fps clip at 10 fps with one robot box centred at box_x."""
+        import numpy as np
+        from types import SimpleNamespace
+
+        class Capture:
+            reads = 0
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else frames
+            def read(self):
+                self.reads += 1
+                return (True, np.zeros((480, 640, 3), dtype=np.uint8)) if self.reads <= frames else (False, None)
+            def release(self): pass
+
+        box = SimpleNamespace(cls=[0], xyxy=np.array([[box_x - 20, 60, box_x + 20, 90]]), conf=[0.9],
+                              id=None if track_id is None else [track_id])
+        model = SimpleNamespace(track=lambda *args, **kwargs: [SimpleNamespace(boxes=[box])])
+        capture = Capture()
+        with tempfile.TemporaryDirectory() as folder:
+            model_path = Path(folder) / "robot.onnx"
+            model_path.touch()
+            with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=capture),                  patch("ultralytics.YOLO", return_value=model):
+                try:
+                    result = track_video(Path("match.mp4"), model_path,
+                                         [[0, 0], [640, 0], [640, 480], [0, 480]], [(1, 100, 90)],
+                                         10.0, lambda: False, lambda *_: None,
+                                         logging.getLogger("seed-window-test"))
+                except RuntimeError as exc:
+                    return capture.reads, exc
+        return capture.reads, result
+
+    def test_run_stops_after_the_seed_window_when_no_seed_matches(self):
+        # The only robot is 400 px from the click, beyond the 105.6 px gate.
+        reads, outcome = self._run_seed_window(box_x=500)
+        self.assertIsInstance(outcome, RuntimeError)
+        self.assertIn("No seeded robot was matched", str(outcome))
+        self.assertIn("seed at (100, 90): nearest tracked robot 400 px away (a match needs one within 106 px)",
+                      str(outcome))
+        self.assertNotIn("lower the detection confidence", str(outcome))
+        # Stops on the first sample after 3 s (frame 93 of 300), not at the end.
+        self.assertLess(reads, 100)
+
+    def test_untracked_detection_on_the_click_is_reported_as_untracked(self):
+        # The tracker gives a below-threshold detection no ID, so the matcher
+        # cannot use it even with the footpoint on the click.
+        reads, outcome = self._run_seed_window(box_x=100, track_id=None)
+        self.assertIsInstance(outcome, RuntimeError)
+        self.assertIn("a robot was detected 0 px away, but its detection confidence stayed below", str(outcome))
+        self.assertNotIn("nearest tracked robot", str(outcome))
+        self.assertLess(reads, 100)
+
+    def test_run_continues_past_the_seed_window_when_a_seed_matches(self):
+        reads, outcome = self._run_seed_window(box_x=110)
+        self.assertNotIsInstance(outcome, RuntimeError)
+        rows, _, _ = outcome
+        self.assertGreater(reads, 300)
+        self.assertGreater(max(row[2] for row in rows), 9.0)
+
+    def test_seed_window_message_reports_when_nothing_was_detected(self):
+        from control_vision.pipeline.tracking import _no_seed_match_message
+        message = _no_seed_match_message([(1, 100.4, 90.0), (2, 300.0, 50.0), (3, 5.0, 5.0)],
+                                         {2: 212.3}, {2: 1.0, 3: 40.0}, 105.6, 3.0)
+        self.assertIn("seed at (100, 90): no robot detected", message)
+        # A tracked robot is reported before a closer untracked detection.
+        self.assertIn("seed at (300, 50): nearest tracked robot 212 px away (a match needs one within 106 px)",
+                      message)
+        self.assertIn("seed at (5, 5): a robot was detected 40 px away, but", message)
+        self.assertIn("first 3 seconds", message)
+
     def test_goal_candidate_does_not_guess_a_missing_or_distant_robot(self):
         self.assertIsNone(_nearest_robot_id([], 100, 100, 150))
         self.assertIsNone(_nearest_robot_id([(7, 400, 400)], 100, 100, 150))

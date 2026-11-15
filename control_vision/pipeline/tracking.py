@@ -136,6 +136,33 @@ def _tracker_config(base: dict, confidence_threshold: float, gmc_method: str | N
     return config
 
 
+def _no_seed_match_message(seed_points, closest_tracked: dict[int, float], closest_untracked: dict[int, float],
+                           gate_px: float | None, deadline_s: float) -> str:
+    """Explain why no seed matched, separating tracked from untracked detections.
+
+    Seeds can only match detections the tracker has given an ID. A robot the
+    detector sees below the tracker's track-start threshold never gets one,
+    so moving the click closer cannot help it.
+    """
+    gate = "" if gate_px is None else f" (a match needs one within {gate_px:.0f} px)"
+    parts = []
+    for robot_id, seed_x, seed_y in seed_points:
+        tracked = closest_tracked.get(robot_id)
+        untracked = closest_untracked.get(robot_id)
+        if tracked is not None:
+            nearest = f"nearest tracked robot {tracked:.0f} px away{gate}"
+        elif untracked is not None:
+            nearest = (f"a robot was detected {untracked:.0f} px away, but its detection confidence stayed "
+                       "below the tracker's threshold for starting a track")
+        else:
+            nearest = "no robot detected"
+        parts.append(f"seed at ({seed_x:.0f}, {seed_y:.0f}): {nearest}")
+    return (f"No seeded robot was matched to a tracked robot in the first {deadline_s:.0f} seconds, so no "
+            f"positions could be recorded and processing stopped early ({'; '.join(parts)}). Seed robots that "
+            "are clearly visible at the start of the video and click near each robot's floor contact point. "
+            "A robot the model detects only with low confidence cannot be tracked; it needs a better-trained model.")
+
+
 def track_video(
     video_path: Path,
     model_path: Path,
@@ -222,6 +249,11 @@ def track_video(
     unowned_rows: dict[int, list[tuple[int, float, float, float, float]]] = {}
     identities_seeded = False
     seed_assignment_deadline_s = 3.0
+    # Closest detection to each seed click during the assignment window,
+    # reported if no seed can be matched.
+    closest_tracked: dict[int, float] = {}
+    closest_untracked: dict[int, float] = {}
+    seed_gate_px: float | None = None
     robot_ids = [seed[0] for seed in seed_points]
     rows: list[tuple[int, int, float, float, float, float]] = []
     best_photos: dict[int, tuple[int, float, float, object]] = {}
@@ -248,6 +280,12 @@ def track_video(
             if cancel():
                 raise InterruptedError("Processing was cancelled.")
             t_s = frame_index / fps
+            if not seed_to_track and t_s > seed_assignment_deadline_s:
+                # Identities are only assigned in the opening window, so a run
+                # with no matched seed can never record a position. Stop now
+                # instead of processing the rest of the match for nothing.
+                raise RuntimeError(_no_seed_match_message(seed_points, closest_tracked, closest_untracked,
+                                                          seed_gate_px, seed_assignment_deadline_s))
             try:
                 result = model.track(frame, persist=True, tracker=str(tracker_cfg), imgsz=640, conf=confidence_threshold, iou=0.5, verbose=False)[0]
             except Exception as exc:
@@ -283,6 +321,13 @@ def track_video(
             logger.info("Sampled frame %d (%.3fs): %d robot detections; %d scoring elements in ROI", frame_index, t_s, len(detections), len(roi_balls))
             if not identities_seeded and detections and t_s <= seed_assignment_deadline_s:
                 max_distance = max(60.0, min(frame.shape[:2]) * 0.22)
+                seed_gate_px = max_distance
+                for robot_id, seed_x, seed_y in seed_points:
+                    for track_id, x, y, *_ in detections:
+                        distance = ((x - seed_x) ** 2 + (y - seed_y) ** 2) ** 0.5
+                        # The matcher only considers detections with a tracker ID.
+                        closest = closest_tracked if track_id >= 0 else closest_untracked
+                        closest[robot_id] = min(distance, closest.get(robot_id, distance))
                 matches = _match_initial_seeds(seed_points, detections, set(seed_to_track),
                                                recovery.ever_assigned, max_distance)
                 for robot_id, (track_id, distance) in matches.items():
