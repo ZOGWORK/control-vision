@@ -75,12 +75,14 @@ class BiobuzzRulesTests(unittest.TestCase):
                   {"id": 3, "alliance": "blue"}]
         events = [{"robot_id": 1, "status": "confirmed", "points": 16,
                    "event_type": "park_teleop"},
+                  {"robot_id": 2, "status": "confirmed", "points": 4},
                   {"robot_id": 3, "status": "confirmed", "points": 5}]
         result = calculate_scoreboard(events, robots,
                                       qualification_disqualified_robot_ids={1})
-        self.assertEqual(result["alliance_points"], {"red": 16, "blue": 5})
-        self.assertEqual(result["team_match_points"], {1: 0, 2: 16, 3: 5})
-        self.assertEqual(result["team_points"], {1: 0, 2: 0, 3: 5})
+        self.assertEqual(result["alliance_points"], {"red": 20, "blue": 5})
+        self.assertEqual(result["team_match_points"], {1: 0, 2: 20, 3: 5})
+        # The DQ'd team's own credit is zeroed; its partner keeps its scored points.
+        self.assertEqual(result["team_points"], {1: 0, 2: 4, 3: 5})
         self.assertEqual(result["ranking_points"]["red"]["total"], 4)
         self.assertEqual(result["team_ranking_points"], {1: 0, 2: 4, 3: 0})
         self.assertEqual(result["qualification_disqualified_robot_ids"], [1])
@@ -89,6 +91,9 @@ class BiobuzzRulesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown qualification DQ robot IDs"):
             calculate_scoreboard([], self.robots,
                                  qualification_disqualified_robot_ids={999})
+        with self.assertRaisesRegex(ValueError, "must be integers"):
+            calculate_scoreboard([], self.robots,
+                                 qualification_disqualified_robot_ids={"x"})
         with self.assertRaisesRegex(ValueError, "cannot be combined"):
             calculate_scoreboard([], self.robots, disqualified={"red"},
                                  qualification_disqualified_robot_ids={1})
