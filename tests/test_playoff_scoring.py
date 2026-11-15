@@ -49,6 +49,11 @@ class PlayoffScoringTests(unittest.TestCase):
                          {"resolved": True, "winner": None, "tie": True})
         self.assertTrue(board["match_resolved"])
         self.assertFalse(calculate_playoff_scoreboard([], self.robots)["match_resolved"])
+        # Reviewed events alone do not finish a playoff match; the reviewer marks it final.
+        reviewed_not_final = calculate_playoff_scoreboard(self.events, self.robots)
+        self.assertFalse(reviewed_not_final["match_resolved"])
+        self.assertTrue(calculate_playoff_scoreboard(self.events, self.robots,
+                                                     match_final=True)["match_resolved"])
         pending = calculate_playoff_scoreboard([{"robot_id": 1, "status": "flagged",
                                                  "points": 5}], self.robots,
                                                match_final=True)
