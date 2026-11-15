@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 
 FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html"
@@ -119,8 +120,54 @@ def create_highlight(video: Path, output: Path, event_time_s: float, ffmpeg_path
     return start, end
 
 
+# Width of the cached clip thumbnail; the clip list shows it at 120 px.
+_THUMBNAIL_WIDTH = 240
+
+
+def thumbnail_cache_path(path: Path) -> Path:
+    return path.with_name(path.name + ".thumb.png")
+
+
 def thumbnail(path: Path):
+    """First frame of a clip, small, cached as a PNG beside the clip.
+
+    Decoding a clip's first frame can take seconds (AV1 sources on a busy
+    CPU took about 5.7 s each), and the clip list is rebuilt after every
+    review action. The cache is used only while it is at least as new as
+    the clip, so a regenerated clip gets a new thumbnail.
+    """
+    cache = thumbnail_cache_path(path)
+    # Encode and decode in memory with Python file I/O: cv2.imread/imwrite
+    # cannot open non-ASCII Windows paths, and imwrite reports failure by
+    # returning False rather than raising.
+    try:
+        if cache.is_file() and cache.stat().st_mtime_ns >= path.stat().st_mtime_ns:
+            cached = cv2.imdecode(np.fromfile(cache, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if cached is not None:
+                return cached
+    except (OSError, ValueError):
+        pass
     cap = cv2.VideoCapture(str(path))
     ok, frame = cap.read()
     cap.release()
-    return frame if ok else None
+    if not ok:
+        return None
+    height, width = frame.shape[:2]
+    if width > _THUMBNAIL_WIDTH:
+        frame = cv2.resize(frame, (_THUMBNAIL_WIDTH, max(1, round(height * _THUMBNAIL_WIDTH / width))),
+                           interpolation=cv2.INTER_AREA)
+    encoded, data = cv2.imencode(".png", frame)
+    try:
+        if not encoded:
+            raise OSError("PNG encoding failed")
+        cache.write_bytes(data.tobytes())
+    except OSError as exc:
+        try:
+            cache.unlink(missing_ok=True)
+        except OSError:
+            # A partial cache that cannot be removed fails to decode next
+            # time, so the clip is decoded again; never fail the refresh.
+            pass
+        logging.getLogger(__name__).warning(
+            "Could not cache the thumbnail for %s (%s); it will be decoded again on the next refresh.", path, exc)
+    return frame
