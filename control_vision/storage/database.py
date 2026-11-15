@@ -130,7 +130,12 @@ class ProjectDatabase:
         if "video_id" not in event_columns:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE")
         # Idempotent backfill for robot-owned events that predate video_id.
-        self.connection.execute("UPDATE scoring_events SET video_id=(SELECT video_id FROM robots WHERE robots.id=scoring_events.robot_id) WHERE video_id IS NULL AND robot_id IS NOT NULL")
+        # Spec-era tables had no foreign keys, so skip robots whose video row
+        # is gone instead of failing the whole project open.
+        self.connection.execute(
+            "UPDATE scoring_events SET video_id=(SELECT r.video_id FROM robots r WHERE r.id=scoring_events.robot_id) "
+            "WHERE video_id IS NULL AND robot_id IS NOT NULL AND EXISTS "
+            "(SELECT 1 FROM robots r JOIN videos v ON v.id=r.video_id WHERE r.id=scoring_events.robot_id)")
         if "origin_robot_id" not in event_columns:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN origin_robot_id INTEGER")
         if added_analysis_status:
@@ -246,8 +251,8 @@ class ProjectDatabase:
                 "WHERE video_id=? AND origin_robot_id IS NOT NULL", (video_id,),
             ).fetchall()
             matched = _match_preserved_events(events, preserved)
-            # Legacy reviewed events predate origin_robot_id. Match them by
-            # their credited robot with the same one-to-one 0.5 s rule.
+            # Legacy reviewed or clipped events predate origin_robot_id. Match
+            # them by their credited robot with the same one-to-one 0.5 s rule.
             unmatched = [index for index in range(len(events))
                          if index not in matched and events[index].get("robot_id") is not None]
             legacy_rows = [{"id": int(row["id"]), "origin_robot_id": row["robot_id"],
@@ -255,7 +260,9 @@ class ProjectDatabase:
                            for row in self.connection.execute(
                                "SELECT id,robot_id,source,t_s FROM scoring_events WHERE video_id=? "
                                "AND origin_robot_id IS NULL AND robot_id IS NOT NULL "
-                               "AND status IN ('confirmed','rejected')", (video_id,))]
+                               "AND (status IN ('confirmed','rejected') OR EXISTS "
+                               "(SELECT 1 FROM clips WHERE clips.scoring_event_id=scoring_events.id))",
+                               (video_id,))]
             legacy_matched = _match_preserved_events([events[index] for index in unmatched], legacy_rows)
             for local_index, row_id in legacy_matched.items():
                 index = unmatched[local_index]
