@@ -47,6 +47,8 @@ class PlayoffScoringTests(unittest.TestCase):
         board = calculate_playoff_scoreboard([], self.robots, match_final=True)
         self.assertEqual(board["playoff_outcome"],
                          {"resolved": True, "winner": None, "tie": True})
+        self.assertTrue(board["match_resolved"])
+        self.assertFalse(calculate_playoff_scoreboard([], self.robots)["match_resolved"])
         pending = calculate_playoff_scoreboard([{"robot_id": 1, "status": "flagged",
                                                  "points": 5}], self.robots,
                                                match_final=True)
@@ -65,6 +67,10 @@ class PlayoffScoringTests(unittest.TestCase):
                                          first_disqualified="red")
         with self.assertRaisesRegex(ValueError, "Simultaneous DQ"):
             calculate_playoff_scoreboard([], self.robots, disqualified={"red"},
+                                         simultaneous_disqualification=True)
+        with self.assertRaisesRegex(ValueError, "Simultaneous DQ"):
+            calculate_playoff_scoreboard([], self.robots, disqualified={"red", "blue"},
+                                         first_disqualified="red",
                                          simultaneous_disqualification=True)
 
 
