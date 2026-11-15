@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -16,7 +17,7 @@ import numpy as np
 from control_vision.storage.database import ProjectDatabase
 from control_vision.validation.holdout import (
     MIN_HOLDOUT_MATCHES, aggregate, assign, check_training_disjoint, evaluate_case,
-    load_holdout_list, main, make_template, match_tracks)
+    load_holdout_list, main, make_template, match_tracks, write_output)
 
 FPS = 4
 SECONDS = 10
@@ -196,6 +197,56 @@ class HoldoutValidationTests(unittest.TestCase):
         main(template[:-1] + [str(report_path), "--force"])
         self.assertNotEqual(report_path.read_text(encoding="utf-8"), first)
         self.assertEqual([path.name for path in self.root.glob(".*.tmp")], [])
+
+    def test_force_never_replaces_run_inputs(self):
+        paths = self.five_cases()
+        list_path = self.frozen_list(paths)
+        frozen = list_path.read_bytes()
+        db_path = paths[0].parent / "project.sqlite"
+        database = db_path.read_bytes()
+        dataset = make_dataset(self.root / "dataset")
+        for target in (list_path, db_path, paths[0].parent / "match.mp4", paths[0].parent / "clip.mp4",
+                       dataset / "split_manifest.csv"):
+            with self.subTest(target=target.name), self.assertRaises(SystemExit):
+                main(["--holdout-list", str(list_path), "--dataset-root", str(dataset),
+                      "--output", str(target), "--force"])
+        with self.assertRaises(SystemExit):
+            main(["--make-template", "--project", str(db_path), "--video-id", "1", "--sample-fps", "2",
+                  "--output", str(db_path), "--force"])
+        self.assertEqual(list_path.read_bytes(), frozen)
+        self.assertEqual(db_path.read_bytes(), database)
+
+    def test_failed_fallback_write_leaves_no_partial_output(self):
+        target = self.root / "report.json"
+        real_open = Path.open
+
+        class FailingStream:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.stream.close()
+
+            def write(self, text):
+                self.stream.write(text[:3])
+                raise OSError("disk full")
+
+        def fake_open(path, mode="r", *args, **kwargs):
+            stream = real_open(path, mode, *args, **kwargs)
+            return FailingStream(stream) if mode == "x" else stream
+
+        with mock.patch("os.link", side_effect=OSError("no hard links")), \
+                mock.patch.object(Path, "open", fake_open), self.assertRaisesRegex(OSError, "disk full"):
+            write_output(target, "{\"report\": 1}\n")
+        self.assertFalse(target.exists())
+        self.assertEqual(list(self.root.iterdir()), [])
+        target.write_text("someone else's file", encoding="utf-8")
+        with mock.patch("os.link", side_effect=OSError("no hard links")), self.assertRaises(FileExistsError):
+            write_output(target, "{}\n")
+        self.assertEqual(target.read_text(encoding="utf-8"), "someone else's file")
 
     def test_database_path_with_url_characters_opens_the_right_file(self):
         case = evaluate_case(make_case(self.root / "Qual #3 100%"))
