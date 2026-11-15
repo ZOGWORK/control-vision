@@ -245,6 +245,19 @@ class PreviewDialog(QDialog):
         self.finished.connect(lambda _: self.player.stop())
 
 
+def missing_robot_labels(robots, robot_ids, track_rows) -> list[str]:
+    """Labels of seeded robots that have no track rows, in seed order."""
+    tracked = {int(row[0]) for row in track_rows}
+    by_id = {int(robot["id"]): robot for robot in robots}
+    labels = []
+    for robot_id in robot_ids:
+        if int(robot_id) in tracked:
+            continue
+        robot = by_id.get(int(robot_id))
+        labels.append(f"team {robot['team_number']} ({robot['alliance']})" if robot else f"robot {robot_id}")
+    return labels
+
+
 def _video_switch_blocked(window) -> bool:
     if getattr(window, "_processing_active", False) or getattr(window, "_ocr_active", False):
         QMessageBox.information(window, "Analysis in progress",
@@ -990,6 +1003,16 @@ class MainWindow(QMainWindow):
         self.progress_label.setText(f"{stage} — {percent:.0f}% — {detail}")
 
     def processing_done(self, rows):
+        (track_rows, _, _), tracking_mode = rows
+        if not track_rows:
+            # The seeded preview suspends uncertain tracks and may record
+            # nothing; an empty run must not be presented as an analysis.
+            method = "The seeded preview" if tracking_mode == "seeded_optical_flow" else "Tracking"
+            self.processing_failed(
+                f"{method} did not record a confident position for any seeded robot, so no results were saved "
+                "and this video is not analysed. Seed each robot on a clear frame where it is fully visible, "
+                "or use a trained YOLO model.")
+            return
         try:
             self._store_processing_results(rows)
         except Exception as exc:
@@ -1025,7 +1048,14 @@ class MainWindow(QMainWindow):
         self.log_view.addItem(f"{tracking_method} complete: {len(track_rows):,} mapped robot samples; {len(self.cycles)} zone-trip cycles; {len(photos)} robot photos")
         if tracking_mode == "seeded_optical_flow":
             self.log_view.addItem("Accuracy note: optical-flow is a trail preview only. Cycle counts and movement statistics are omitted; verify every identity and position before any use as evidence.")
-        self.progress_label.setText(f"Analysis complete. Samples: {len(track_rows):,}; cycle/event candidates: {len(self.events)}. Review points and statuses before reporting scores.")
+        message = f"Analysis complete. Samples: {len(track_rows):,}; cycle/event candidates: {len(self.events)}. Review points and statuses before reporting scores."
+        missing = missing_robot_labels(self.db.robots_for_video(self.video_id), robot_ids, track_rows)
+        if missing:
+            note = ("No confident position was recorded for " + ", ".join(missing) +
+                    "; their trails and statistics are empty.")
+            self.log_view.addItem(note)
+            message += " " + note
+        self.progress_label.setText(message)
         self.refresh_result_tables()
 
     def refresh_result_tables(self):
