@@ -295,6 +295,90 @@ class VideoEvidenceTests(unittest.TestCase):
         rows = [{"t_s": 0.0, "value": 76, "confidence": .9}, {"t_s": 1.0, "value": 70, "confidence": .9}]
         self.assertEqual(_consensus(rows)["value"], 70)
 
+    @staticmethod
+    def _readings(values, confidence=.9):
+        return [{"t_s": float(i), "value": value, "confidence": confidence} for i, value in enumerate(values)]
+
+    def test_ocr_consensus_uses_final_score_revealed_through_partial_readings(self):
+        # Real Salk Q3 readings at 1 fps: the results screen fades in and 180 first reads as 8, then 18.
+        rows = [{"t_s": 166.483, "value": 8, "confidence": .8513}, {"t_s": 167.483, "value": 8, "confidence": .5594},
+                {"t_s": 168.483, "value": 18, "confidence": .946}, {"t_s": 169.483, "value": 180, "confidence": .7905}]
+        result = _consensus(rows)
+        self.assertEqual(result["value"], 180)
+        self.assertEqual(result["superseded_partial_values"], [8, 18])
+        self.assertEqual(result["outvoted_values"], [])
+        self.assertEqual(result["supporting_samples"], 1)
+        # One frame read the full value: the proposal stays low-confidence and flagged.
+        self.assertLessEqual(result["confidence"], .7905 / 3 + 1e-4)
+        self.assertTrue(result["flagged"])
+
+    def test_ocr_consensus_revealed_final_score_gains_confidence_with_frames(self):
+        single = _consensus(self._readings([8, 8, 18, 180]))
+        double = _consensus(self._readings([8, 8, 18, 180, 180]))
+        self.assertEqual((single["value"], double["value"]), (180, 180))
+        self.assertEqual(double["supporting_samples"], 2)
+        self.assertGreater(double["confidence"], single["confidence"])
+        self.assertTrue(double["flagged"])
+        self.assertLess(double["confidence"], .9)
+
+    def test_ocr_consensus_late_outlier_containing_stable_digits_is_outvoted(self):
+        # 88 reads like 188 with a digit missing, but eleven frames make it a stable reading, not a reveal.
+        for values in ([88] * 11 + [188], [188] + [88] * 11):
+            result = _consensus(self._readings(values))
+            self.assertEqual(result["value"], 88, values)
+            self.assertEqual(result["outvoted_values"], [188])
+            self.assertEqual(result["superseded_partial_values"], [])
+            self.assertTrue(result["flagged"])
+
+    def test_ocr_consensus_late_lower_misread_is_outvoted(self):
+        result = _consensus(self._readings([100, 100, 100, 90]))
+        self.assertEqual(result["value"], 100)
+        self.assertTrue(result["later_lower_reading"])
+        self.assertTrue(result["flagged"])
+
+    def test_ocr_consensus_score_progression_to_stable_final(self):
+        result = _consensus(self._readings([90, 90, 100, 100, 100]))
+        self.assertEqual(result["value"], 100)
+        self.assertEqual(result["superseded_partial_values"], [])
+
+    def test_ocr_consensus_trailing_partial_reading_does_not_replace_final_score(self):
+        # The last frame dropped a digit (seen on real footage: 180 then 18 to the end).
+        result = _consensus(self._readings([1, 12, 120, 120, 12]))
+        self.assertEqual(result["value"], 120)
+        self.assertEqual(result["superseded_partial_values"], [1, 12])
+        self.assertEqual(result["outvoted_values"], [12])
+        self.assertTrue(result["later_lower_reading"])
+        self.assertTrue(result["flagged"])
+        self.assertAlmostEqual(result["agreement"], 2 / 3, places=3)
+
+    def test_ocr_consensus_ambiguous_reveal_is_low_confidence_and_flagged(self):
+        clean = _consensus(self._readings([8, 8, 18, 180]))
+        result = _consensus(self._readings([8, 18, 180, 18]))
+        self.assertEqual(result["value"], 180)
+        self.assertTrue(result["flagged"])
+        self.assertLess(result["confidence"], clean["confidence"])
+        self.assertLess(result["confidence"], .2)
+
+    def test_ocr_consensus_reveal_must_rise_into_the_final_value(self):
+        # A high first frame followed by lower readings is an outlier, not a reveal.
+        result = _consensus(self._readings([188, 88, 88]))
+        self.assertEqual(result["value"], 88)
+        self.assertEqual(result["superseded_partial_values"], [])
+
+    def test_ocr_consensus_stable_partial_reading_is_not_set_aside(self):
+        # A partial reading held for three frames is treated as a real reading: the
+        # single full frame cannot overrule it, and the result is flagged for review.
+        result = _consensus(self._readings([8, 8, 8, 18, 180]))
+        self.assertEqual(result["value"], 8)
+        self.assertEqual(result["superseded_partial_values"], [])
+        self.assertTrue(result["flagged"])
+
+    def test_ocr_consensus_unrelated_higher_last_reading_is_not_a_reveal(self):
+        # 90 is not 100 with digits missing, so one final frame of 100 cannot overrule it.
+        result = _consensus(self._readings([90, 90, 100]))
+        self.assertEqual(result["value"], 90)
+        self.assertEqual(_consensus([{"t_s": 0.0, "value": None, "confidence": 0.0}])["flagged"], True)
+
     def test_ocr_engine_failure_releases_video(self):
         class Capture:
             released = False
