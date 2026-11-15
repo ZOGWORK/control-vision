@@ -811,6 +811,33 @@ class AppStateTests(unittest.TestCase):
             self.window.canvas_click(5, 5)
         self.assertEqual(self.window.corners, [[5, 5]])
 
+    def test_field_zone_names_cannot_use_the_roi_suffix(self):
+        from unittest.mock import Mock
+        self.window.db, self.window.video_id = Mock(), 1
+        self.window._drawing_zone = True
+        self.window.field_map.draft = [[0, 0], [2, 0], [2, 2]]
+        with patch("control_vision.app.main_window.QInputDialog.getText", return_value=("pickup_roi", True)), \
+             patch("control_vision.app.main_window.QMessageBox.warning") as shown:
+            self.window.finish_zone()
+        self.assertNotIn("pickup_roi", self.window.zones)
+        self.window.db.save_calibration.assert_not_called()
+        self.assertIn("_roi", shown.call_args.args[2])
+
+    def test_error_while_saving_results_releases_processing_state(self):
+        import sqlite3
+        from unittest.mock import Mock
+        db = Mock()
+        db.replace_tracks.side_effect = sqlite3.OperationalError("database is locked")
+        self.window.db, self.window.video_id = db, 1
+        self.window.seed_points = [(1, 0, 0)]
+        self.window._processing_active = True
+        self.window.process_btn.setEnabled(False)
+        self.window.processing_done((([], [], []), "yolo"))
+        self.assertFalse(self.window._processing_active)
+        self.assertTrue(self.window.process_btn.isEnabled())
+        db.set_analysis_status.assert_called_with(1, "failed")
+        self.assertIn("database is locked", self.window.progress_label.text())
+
     def test_review_controls_need_a_new_selection_after_each_review(self):
         with tempfile.TemporaryDirectory() as folder:
             db = ProjectDatabase(Path(folder) / "project.sqlite")
