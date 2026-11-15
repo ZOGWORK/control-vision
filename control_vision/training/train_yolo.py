@@ -9,7 +9,7 @@ import math
 import os
 import re
 import tempfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -158,6 +158,13 @@ def dataset_hash(root: Path, config: dict, data_file: Path) -> str:
     return digest.hexdigest()
 
 
+def _check_duplicate(seen_hashes: dict[str, str], image: Path, split: str) -> None:
+    image_hash = _sha256(image)
+    previous = seen_hashes.setdefault(image_hash, split)
+    if previous != split:
+        raise ValueError(f"Identical image appears in {previous} and {split}: {image.name}")
+
+
 def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
     """Reject broken YOLO labels and train/val leakage before training."""
     root = _dataset_root(data, config)
@@ -184,11 +191,7 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
                 raise ValueError(f"Missing YOLO label file for {split} image {image.name}: {label}")
             if cv2.imread(str(image)) is None:
                 raise ValueError(f"Unreadable {split} image: {image}")
-            image_hash = hashlib.sha256(image.read_bytes()).hexdigest()
-            previous = seen_hashes.get(image_hash)
-            if previous is not None and previous != split:
-                raise ValueError(f"Identical image appears in train and val: {image.name}")
-            seen_hashes[image_hash] = split
+            _check_duplicate(seen_hashes, image, split)
             for line_number, line in enumerate(label.read_text(encoding="utf-8").splitlines(), 1):
                 values = line.split()
                 if len(values) != 5:
@@ -205,6 +208,12 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
                     raise ValueError(f"{label}:{line_number}: class or normalized box is out of range")
                 if class_id == 0:
                     robot_counts[split] += 1
+    holdout = split_dirs.get("holdout")
+    if holdout is not None:
+        # Holdout frames are only compared by content; their labels are checked at evaluation time.
+        for image in sorted(path for path in holdout.rglob("*")
+                            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES):
+            _check_duplicate(seen_hashes, image, "holdout")
     if robot_counts["train"] == 0:
         raise ValueError("Training split has no labeled robots (class 0)")
     if robot_counts["val"] == 0:
@@ -456,36 +465,44 @@ def main(argv: list[str] | None = None) -> None:
     yaml, onnx, ort = modules["yaml"], modules["onnx"], modules["onnxruntime"]
     YOLO = modules["ultralytics"].YOLO
     models_dir, runs_dir = args.models_dir.resolve(), args.runs_dir.resolve()
-    try:
+    with ExitStack() as stack:
+        # Dataset, class, and version problems are usage errors. Errors raised
+        # by Ultralytics or torch during training keep their traceback.
         try:
-            config = yaml.safe_load(args.data.read_text(encoding="utf-8"))
-        except yaml.YAMLError as exc:
-            raise ValueError(f"data.yaml is not valid YAML: {exc}") from None
-        names = class_names(config)
-        data_root = validate_dataset(args.data, config, len(names))
-        dataset_sha256 = dataset_hash(data_root, config, args.data)
+            try:
+                config = yaml.safe_load(args.data.read_text(encoding="utf-8"))
+            except yaml.YAMLError as exc:
+                raise ValueError(f"data.yaml is not valid YAML: {exc}") from None
+            names = class_names(config)
+            data_root = validate_dataset(args.data, config, len(names))
+            dataset_sha256 = dataset_hash(data_root, config, args.data)
+            onnx_path, metadata_path = stack.enter_context(reserve_model_version(models_dir, args.version))
+        except ValueError as exc:
+            parser.error(str(exc))
         manifest = data_root / "split_manifest.csv"
         train_args = {"epochs": args.epochs, "batch": args.batch, "imgsz": args.imgsz, "device": args.device,
                       **TRAINING_DEFAULTS}
-        with reserve_model_version(models_dir, args.version) as (onnx_path, metadata_path):
-            # Ultralytics resolves a relative `path` against its process CWD.
-            # Pass the exact dataset root that was validated.
-            with tempfile.TemporaryDirectory(prefix="control-vision-data-") as temp:
-                normalized_data = Path(temp) / "data.yaml"
-                normalized_data.write_text(yaml.safe_dump({**config, "path": str(data_root)}), encoding="utf-8")
-                model = YOLO(str(args.base_weights))
-                model.train(data=str(normalized_data), project=str(runs_dir), name=f"biobuzz-{args.version}",
-                            **train_args)
-                trainer = model.trainer
-                best_pt = Path(getattr(trainer, "best", Path(trainer.save_dir) / "weights" / "best.pt"))
-                if not best_pt.is_file():
-                    raise SystemExit(f"Training completed without a best checkpoint at {best_pt}")
-                trained = YOLO(str(best_pt))
-                results = trained.val(data=str(normalized_data), split="val", imgsz=args.imgsz, batch=args.batch,
-                                      device=args.device, plots=False, project=str(runs_dir),
-                                      name=f"biobuzz-{args.version}-val")
+        # Ultralytics resolves a relative `path` against its process CWD.
+        # Pass the exact dataset root that was validated.
+        temp = stack.enter_context(tempfile.TemporaryDirectory(prefix="control-vision-data-"))
+        normalized_data = Path(temp) / "data.yaml"
+        normalized_data.write_text(yaml.safe_dump({**config, "path": str(data_root)}), encoding="utf-8")
+        model = YOLO(str(args.base_weights))
+        model.train(data=str(normalized_data), project=str(runs_dir), name=f"biobuzz-{args.version}", **train_args)
+        trainer = model.trainer
+        best_pt = Path(getattr(trainer, "best", Path(trainer.save_dir) / "weights" / "best.pt"))
+        if not best_pt.is_file():
+            raise SystemExit(f"Training completed without a best checkpoint at {best_pt}")
+        trained = YOLO(str(best_pt))
+        results = trained.val(data=str(normalized_data), split="val", imgsz=args.imgsz, batch=args.batch,
+                              device=args.device, plots=False, project=str(runs_dir),
+                              name=f"biobuzz-{args.version}-val")
+        try:
             metrics = validation_metrics(results, names)
-            exported = Path(trained.export(format="onnx", imgsz=args.imgsz, opset=MIN_OPSET, simplify=False))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        exported = Path(trained.export(format="onnx", imgsz=args.imgsz, opset=MIN_OPSET, simplify=False))
+        try:
             onnx_check = check_onnx_model(exported, names, args.imgsz, onnx, ort)
             record = {"version": args.version, "date": date.today().isoformat(), "dataset_sha256": dataset_sha256,
                       "dataset_root": str(data_root), "data_yaml": str(args.data.resolve()),
@@ -499,10 +516,9 @@ def main(argv: list[str] | None = None) -> None:
                       "onnxruntime_check": onnx_check,
                       "ultralytics_version": getattr(modules["ultralytics"], "__version__", None)}
             publish_model_artifacts(exported, onnx_path, metadata_path, record)
-            print(f"Saved {onnx_path} and {metadata_path}")
-    except ValueError as exc:
-        parser.error(str(exc))
-
+        except ValueError as exc:
+            raise SystemExit(f"Model version {args.version} was not published: {exc}") from None
+        print(f"Saved {onnx_path} and {metadata_path}")
 
 if __name__ == "__main__":
     main()
