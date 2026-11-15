@@ -1,0 +1,243 @@
+from __future__ import annotations
+
+import re
+import logging
+import math
+from pathlib import Path
+from typing import Callable
+
+import cv2
+import numpy as np
+
+
+def _read_digits(engine, frame: np.ndarray, polygon: list[list[float]]) -> tuple[int | None, float, str]:
+    points = np.asarray(polygon, dtype=np.int32)
+    x, y, width, height = cv2.boundingRect(points)
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(frame.shape[1], x + width), min(frame.shape[0], y + height)
+    if x1 <= x0 or y1 <= y0:
+        return None, 0.0, ""
+    crop = frame[y0:y1, x0:x1]
+    if crop.size == 0:
+        return None, 0.0, ""
+    # Keep pixels outside a non-rectangular user ROI from contributing digits.
+    local_points = points - np.asarray([x0, y0], dtype=np.int32)
+    mask = np.zeros(crop.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [local_points], 255)
+    crop = cv2.bitwise_and(crop, crop, mask=mask)
+    # UI overlays are often small in 720p streams. Enlarging the ROI helps OCR.
+    crop = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    result = engine(crop)
+    raw = result[0] if isinstance(result, tuple) else result
+    records = []
+    if raw and hasattr(raw[0], "txts"):
+        output = raw[0]
+        boxes = getattr(output, "boxes", ()) or ()
+        for box, text, confidence in zip(boxes, output.txts, output.scores):
+            records.append((float(np.asarray(box)[:, 0].mean()), str(text), float(confidence)))
+    else:
+        for row in raw or []:
+            if len(row) >= 3:
+                box, text, confidence = row[0], str(row[1]), float(row[2])
+                records.append((float(np.asarray(box)[:, 0].mean()), text, confidence))
+    records.sort(key=lambda item: item[0])
+    # PaddleOCR commonly returns one record per character on large score
+    # overlays. Join spatially ordered digits before converting to a score.
+    tokens = [(x, re.sub(r"\D", "", text), confidence, text)
+              for x, text, confidence in records if re.sub(r"\D", "", text)]
+    tokens = [token for token in tokens if len(token[1]) <= 3]
+    if not tokens:
+        return None, 0.0, " ".join(record[1] for record in records)
+    digit_text = "".join(token[1] for token in tokens)
+    if len(digit_text) > 3:
+        # The user-drawn crop contains extraneous digits. Prefer the most
+        # confident OCR token rather than accidentally reading a team number.
+        best = max(tokens, key=lambda token: (token[2], len(token[1])))
+        digit_text = best[1]
+        confidence = best[2]
+    else:
+        confidence = sum(token[2] for token in tokens) / len(tokens)
+    return int(digit_text), confidence, " ".join(record[1] for record in records)
+
+
+# Fewest frames that must agree before a later, higher reading counts as the
+# score having progressed rather than as a misread.
+_MIN_PROGRESSION_FRAMES = 3
+
+
+def _support(items: list[dict]) -> dict[int, float]:
+    votes: dict[int, float] = {}
+    for item in items:
+        votes[int(item["value"])] = votes.get(int(item["value"]), 0.0) + max(0.0, float(item["confidence"]))
+    return votes
+
+
+def _vote(items: list[dict]) -> int:
+    """Value with the most confidence-weighted readings; later frames break ties."""
+    votes = _support(items)
+    last_seen = {int(item["value"]): index for index, item in enumerate(items)}
+    return max(votes, key=lambda value: (round(votes[value], 9), last_seen[value]))
+
+
+def _consensus(samples: list[dict]) -> dict:
+    """Vote the proposed score over the sampled frames.
+
+    Every readable frame votes for its value, weighted by OCR confidence, so
+    one misread frame cannot outvote many agreeing frames. Scores only rise
+    during a match, so a higher value that first appears later in the tail
+    window and then holds a weighted majority of every frame from that point
+    on (with at least three frames) is treated as the score progressing to its
+    final value; earlier lower frames then do not vote against it. The result
+    is a proposal only and must be reviewed.
+    """
+    valid = [item for item in samples if item["value"] is not None]
+    if not valid:
+        return {"value": None, "confidence": 0.0, "agreement": 0.0, "samples": len(samples)}
+    winner = _vote(valid)
+    window = valid
+    first_seen: dict[int, int] = {}
+    for index, item in enumerate(valid):
+        first_seen.setdefault(int(item["value"]), index)
+    for value, index in sorted(first_seen.items(), key=lambda pair: pair[1]):
+        if value <= winner:
+            continue
+        tail = valid[index:]
+        if sum(1 for item in tail if item["value"] == value) < _MIN_PROGRESSION_FRAMES:
+            continue
+        if _vote(tail) == value:
+            winner, window = value, tail
+    votes = _support(window)
+    chosen = [item for item in window if item["value"] == winner]
+    total = sum(votes.values())
+    agreement = votes[winner] / total if total > 0 else len(chosen) / len(window)
+    recognition = sum(item["confidence"] for item in chosen) / len(chosen)
+    # Recognition confidence is not the same as temporal evidence. Cap the
+    # displayed confidence until at least three frames corroborate the score.
+    confidence = recognition * agreement * min(1.0, len(chosen) / 3.0)
+    outvoted = sorted({int(item["value"]) for item in valid if item["value"] != winner})
+    return {"value": int(winner), "confidence": round(confidence, 4),
+            "recognition_confidence": round(recognition, 4),
+            "agreement": round(agreement, 4), "samples": len(valid),
+            "supporting_samples": len(chosen),
+            "outvoted_values": outvoted,
+            "uncorroborated_prior_high": any(value > winner for value in outvoted),
+            "later_lower_reading": valid[-1]["value"] < winner}
+
+
+RAPIDOCR_REQUIREMENT = "rapidocr-onnxruntime==1.4.4"
+# Stop sampling only after this many frame reads fail in a row; a single
+# undecodable frame is skipped and logged.
+_MAX_CONSECUTIVE_READ_FAILURES = 5
+_MIN_ROI_AREA_PX = 16.0
+
+
+def _validate_roi(name: str, polygon) -> np.ndarray:
+    try:
+        points = np.asarray(polygon, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"The {name} scoreboard area is not valid. Draw it again around the score digits.") from exc
+    if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] != 2:
+        raise ValueError(f"The {name} scoreboard area is missing or has fewer than three points. "
+                         "Draw it again around the score digits.")
+    if not np.all(np.isfinite(points)):
+        raise ValueError(f"The {name} scoreboard area is not valid. Draw it again around the score digits.")
+    if abs(cv2.contourArea(points.astype(np.float32))) < _MIN_ROI_AREA_PX:
+        raise ValueError(f"The {name} scoreboard area is too small. Draw it again around the score digits.")
+    return points
+
+
+def _check_roi_in_frame(name: str, points: np.ndarray, frame: np.ndarray) -> None:
+    height, width = frame.shape[:2]
+    x0, y0 = points.min(axis=0)
+    x1, y1 = points.max(axis=0)
+    if x1 <= 0 or y1 <= 0 or x0 >= width or y0 >= height:
+        raise ValueError(f"The {name} scoreboard area is outside the video frame ({width}×{height}). "
+                         "Draw it again around the score digits.")
+
+
+def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list[list[float]],
+                    sample_fps: float = 1.0, tail_seconds: float = 12.0,
+                    progress: Callable[[float, str], None] | None = None,
+                    cancel: Callable[[], bool] | None = None) -> dict:
+    """Read the two alliance score ROIs locally and vote on the final stable score.
+
+    RapidOCR bundles its ONNX OCR models. Results are proposals only; callers
+    must keep these separate from confirmed scoring events and official scores.
+    """
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+    except ImportError as exc:
+        raise RuntimeError("Scoreboard OCR needs the rapidocr-onnxruntime package, which is not installed. "
+                           f"Install it with: python -m pip install {RAPIDOCR_REQUIREMENT}") from exc
+    if not math.isfinite(sample_fps) or sample_fps <= 0 or not math.isfinite(tail_seconds) or tail_seconds <= 0:
+        raise ValueError("OCR sample rate and tail window must be positive and finite.")
+    red_points = _validate_roi("red", red_roi)
+    blue_points = _validate_roi("blue", blue_roi)
+    logger = logging.getLogger(__name__)
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not read video file {video_path.name}.")
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not math.isfinite(fps) or fps <= 0 or frame_count <= 0:
+            raise RuntimeError(f"Could not read video timing from {video_path.name}.")
+        duration = frame_count / fps
+        stride = max(1, round(fps / sample_fps))
+        start_t = max(0.0, duration - tail_seconds)
+        start_frame = int(start_t * fps)
+        engine = RapidOCR()
+        red_samples, blue_samples = [], []
+        frame_index = start_frame
+        target_count = max(1, (frame_count - start_frame) // stride)
+        consecutive_failures = 0
+        skipped_frames: list[int] = []
+        rois_checked = False
+        while frame_index < frame_count:
+            if cancel and cancel():
+                raise InterruptedError("Scoreboard OCR was cancelled.")
+            try:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                ok, frame = cap.read()
+            except Exception:
+                logger.warning("Could not read scoreboard frame %s in %s", frame_index, video_path.name, exc_info=True)
+                ok, frame = False, None
+            if not ok or frame is None:
+                consecutive_failures += 1
+                skipped_frames.append(frame_index)
+                logger.warning("Skipped undecodable scoreboard frame %s in %s", frame_index, video_path.name)
+                if consecutive_failures >= _MAX_CONSECUTIVE_READ_FAILURES:
+                    logger.warning("Stopped scoreboard OCR in %s after %d unreadable frames in a row",
+                                   video_path.name, consecutive_failures)
+                    break
+                frame_index += stride
+                continue
+            consecutive_failures = 0
+            if not rois_checked:
+                _check_roi_in_frame("red", red_points, frame)
+                _check_roi_in_frame("blue", blue_points, frame)
+                rois_checked = True
+            t_s = frame_index / fps
+            try:
+                red_value, red_conf, red_text = _read_digits(engine, frame, red_roi)
+                blue_value, blue_conf, blue_text = _read_digits(engine, frame, blue_roi)
+            except Exception:
+                logger.warning("Skipped unreadable scoreboard frame %s in %s",
+                               frame_index, video_path.name, exc_info=True)
+                frame_index += stride
+                continue
+            red_samples.append({"t_s": round(t_s, 3), "value": red_value, "confidence": round(red_conf, 4), "text": red_text})
+            blue_samples.append({"t_s": round(t_s, 3), "value": blue_value, "confidence": round(blue_conf, 4), "text": blue_text})
+            if progress:
+                progress(min(100.0, 100.0 * len(red_samples) / target_count), f"Read scoreboard at {t_s:.1f}s")
+            frame_index += stride
+    finally:
+        cap.release()
+    if not red_samples:
+        raise RuntimeError(f"Scoreboard OCR could not read any frame in the last {tail_seconds:g} s of "
+                           f"{video_path.name}. Check that the video plays to the final results screen.")
+    return {"source": "scoreboard_ocr", "window_start_s": round(start_t, 3),
+            "frames_sampled": len(red_samples),
+            "frames_skipped": len(skipped_frames),
+            "red": _consensus(red_samples), "blue": _consensus(blue_samples),
+            "red_samples": red_samples, "blue_samples": blue_samples}
