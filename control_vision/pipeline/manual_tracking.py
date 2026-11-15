@@ -9,6 +9,7 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from control_vision.image_files import write_image
 from control_vision.pipeline.homography import matrix_from_corners, project_point
 
 ALLIANCES = ("red", "blue")
@@ -691,7 +692,7 @@ def _save_best_photos(best_photos: dict[int, tuple[float, float, float, np.ndarr
                         rid, crop.shape[1], crop.shape[0], MIN_PHOTO_SIDE, MIN_PHOTO_SIDE)
             continue
         path = photos_dir / f"robot-{rid}.png"
-        if cv2.imwrite(str(path), crop):
+        if write_image(path, crop):
             photo_rows.append((rid, path, t_s))
         else:
             logger.warning("Robot %s preview photo could not be written to %s", rid, path)
