@@ -41,8 +41,10 @@ python -m control_vision.validation.holdout --make-template `
 ```
 
 `--output` never replaces an existing file (for templates or reports) unless
-`--force` is given, and never replaces a holdout truth file being evaluated,
-even with `--force`. Files are written atomically.
+`--force` is given. Even with `--force` it never replaces an input to the run:
+truth files, the frozen holdout list, project databases, videos, clips, or
+the split manifest. Files are written atomically, and a failed write leaves
+no partial file.
 
 The template lists every seeded team at every sampled source frame. Fill it in:
 
