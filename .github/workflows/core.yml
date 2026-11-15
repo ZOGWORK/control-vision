@@ -25,6 +25,8 @@ jobs:
       - name: Typecheck
         run: python -m mypy --ignore-missing-imports --check-untyped-defs control_vision/pipeline/cycles.py control_vision/pipeline/stats.py control_vision/pipeline/zones.py control_vision/scout/exports.py
       - name: Test
-        run: python -m unittest discover -s tests -p test_core_scoring.py -v
+        run: |
+          python -m unittest discover -s tests -p test_core_scoring.py -v
+          python -m unittest discover -s tests -p test_pipeline_stats.py -v
       - name: Build source bytecode
         run: python -m compileall -q control_vision/pipeline control_vision/scout
