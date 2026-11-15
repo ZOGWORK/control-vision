@@ -8,6 +8,7 @@ from typing import Callable
 
 import cv2
 
+from control_vision.image_files import write_image
 from control_vision.pipeline.homography import matrix_from_corners, project_point
 from control_vision.pipeline.identity_recovery import IdentityRecovery
 from control_vision.pipeline.manual_tracking import _alliance_mask
@@ -486,6 +487,8 @@ def track_video(
                 logger.info("Robot %s photo skipped: best crop is %dx%d, below 200x200", robot_id, crop.shape[1], crop.shape[0])
                 continue
             path = photos_dir / f"robot-{robot_id}.png"
-            if cv2.imwrite(str(path), crop):
+            if write_image(path, crop):
                 photo_rows.append((robot_id, path, t_s))
+            else:
+                logger.warning("Robot %s photo could not be written to %s", robot_id, path)
     return rows, photo_rows, scoring_candidates
