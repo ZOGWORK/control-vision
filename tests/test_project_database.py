@@ -199,6 +199,102 @@ class ProjectDatabaseTests(unittest.TestCase):
         self.assertEqual([(event["status"], event["points"], event["origin_robot_id"]) for event in events],
                          [("confirmed", 3, self.red_robot)])
 
+    def test_legacy_review_reassigned_to_another_robot_is_not_duplicated(self):
+        other_robot = self.db.add_robot(self.red_video, 1002, "red", 30, 30)
+        self.db.connection.execute(
+            "INSERT INTO scoring_events(robot_id,video_id,t_s,status,points,source,origin_robot_id) "
+            "VALUES (?,?,12.0,'confirmed',3,'zone_crossing',NULL)", (other_robot, self.red_video))
+        self.db.connection.commit()
+        candidate = {"robot_id": self.red_robot, "t_s": 12.0, "source": "zone_crossing"}
+        self.assertEqual(self.db.replace_analysis([self.red_robot, other_robot], [], [candidate]), [])
+        events = self.db.events_for_video(self.red_video)
+        self.assertEqual([(event["robot_id"], event["origin_robot_id"], event["status"]) for event in events],
+                         [(other_robot, self.red_robot, "confirmed")])
+
+    def test_ambiguous_reassigned_legacy_reviews_are_not_guessed(self):
+        second, third = (self.db.add_robot(self.red_video, team, "red", 30, 30) for team in (1002, 1003))
+        for robot_id in (second, third):
+            self.db.connection.execute(
+                "INSERT INTO scoring_events(robot_id,video_id,t_s,status,points,source,origin_robot_id) "
+                "VALUES (?,?,12.0,'confirmed',3,'zone_crossing',NULL)", (robot_id, self.red_video))
+        self.db.connection.commit()
+        candidate = {"robot_id": self.red_robot, "t_s": 12.0, "source": "zone_crossing"}
+        self.assertEqual(len(self.db.replace_analysis([self.red_robot, second, third], [], [candidate])), 1)
+        legacy = self.db.connection.execute(
+            "SELECT origin_robot_id FROM scoring_events WHERE status='confirmed'").fetchall()
+        self.assertEqual([row[0] for row in legacy], [None, None])
+
+    def test_review_rejects_unknown_robot(self):
+        event_id = self.db.add_scoring_event(self.red_robot, 30.0)
+        with self.assertRaises(ValueError):
+            self.db.review_event(event_id, "confirmed", 1, 9999)
+        self.assertEqual(self.db.events_for_video(self.red_video)[0]["robot_id"], self.red_robot)
+
+    def test_legacy_clipped_candidate_is_not_duplicated_on_rerun(self):
+        cursor = self.db.connection.execute(
+            "INSERT INTO scoring_events(robot_id,video_id,t_s,status,points,source,origin_robot_id) "
+            "VALUES (?,?,20.0,'flagged',0,'goal_roi',NULL)", (self.red_robot, self.red_video))
+        self.db.connection.commit()
+        self.db.add_clip(int(cursor.lastrowid), Path("legacy.mp4"), 17.0, 23.0)
+        candidate = {"robot_id": self.red_robot, "t_s": 20.0, "source": "goal_roi"}
+        for _ in range(2):
+            self.assertEqual(self.db.replace_analysis([self.red_robot], [], [candidate]), [])
+        self.assertEqual(len(self.db.events_for_video(self.red_video)), 1)
+
+    def test_far_candidate_is_not_absorbed_into_reviewed_event(self):
+        candidate = {"robot_id": self.red_robot, "t_s": 12.0, "source": "goal_roi"}
+        reviewed = self.db.replace_analysis([self.red_robot], [], [candidate])[0]
+        self.db.review_event(reviewed, "confirmed", 2)
+        self.assertEqual(len(self.db.replace_analysis([self.red_robot], [], [dict(candidate, t_s=12.6)])), 1)
+        events = self.db.events_for_video(self.red_video)
+        self.assertEqual([(event["t_s"], event["status"]) for event in events],
+                         [(12.0, "confirmed"), (12.6, "flagged")])
+
+    def test_earlier_reviewed_candidate_stays_with_nearest_time(self):
+        first = {"robot_id": self.red_robot, "t_s": 12.0, "source": "goal_roi"}
+        second = {"robot_id": self.red_robot, "t_s": 12.3, "source": "goal_roi"}
+        ids = self.db.replace_analysis([self.red_robot], [], [first, second])
+        self.db.review_event(ids[0], "confirmed", 2)
+        self.db.replace_analysis([self.red_robot], [], [second, first])
+        events = self.db.events_for_video(self.red_video)
+        self.assertEqual([(event["t_s"], event["status"]) for event in events],
+                         [(12.0, "confirmed"), (12.3, "flagged")])
+        self.assertEqual(events[0]["id"], ids[0])
+
+    def test_same_time_candidates_from_different_sources_stay_distinct(self):
+        zone = {"robot_id": self.red_robot, "t_s": 12.0, "source": "zone_crossing"}
+        roi = {"robot_id": self.red_robot, "t_s": 12.0, "source": "goal_roi"}
+        zone_id = self.db.replace_analysis([self.red_robot], [], [zone])[0]
+        self.db.review_event(zone_id, "confirmed", 2)
+        self.assertEqual(len(self.db.replace_analysis([self.red_robot], [], [zone, roi])), 1)
+        self.assertEqual(sorted(event["source"] for event in self.db.events_for_video(self.red_video)),
+                         ["goal_roi", "zone_crossing"])
+
+    def test_rerun_keeps_reviewed_or_clipped_unassigned_and_manual_events(self):
+        confirmed, clipped = self.db.replace_analysis(
+            [self.red_robot], [], [{"robot_id": None, "t_s": 40.0, "source": "goal_roi"},
+                                   {"robot_id": None, "t_s": 60.0, "source": "goal_roi"}])
+        self.db.review_event(confirmed, "confirmed", 2)
+        self.db.add_clip(clipped, Path("clip.mp4"), 57.0, 63.0)
+        manual = self.db.add_scoring_event(self.red_robot, 80.0)
+        self.db.replace_analysis([self.red_robot], [], [])
+        self.assertEqual({event["id"] for event in self.db.events_for_video(self.red_video)},
+                         {confirmed, clipped, manual})
+
+    def test_analysis_targets_must_exist_in_one_video(self):
+        for robot_ids in ([self.red_robot, self.blue_robot], [self.red_robot, 9999]):
+            with self.subTest(robot_ids=robot_ids), self.assertRaises(ValueError):
+                self.db.replace_analysis(robot_ids, [], [])
+
+    def test_reopen_keeps_status_set_after_migration(self):
+        self.db.replace_analysis([self.red_robot], [], [{"robot_id": self.red_robot, "t_s": 5.0}])
+        self.db.set_analysis_status(self.red_video, "failed")
+        self.db.close()
+        self.db = ProjectDatabase(self.path)
+        self.addCleanup(self.db.close)
+        self.assertEqual(self.db.connection.execute(
+            "SELECT analysis_status FROM videos WHERE id=?", (self.red_video,)).fetchone()[0], "failed")
+
 
 class LegacyMigrationTests(unittest.TestCase):
     def setUp(self):
@@ -274,6 +370,20 @@ class LegacyMigrationTests(unittest.TestCase):
         db = ProjectDatabase(self.path)
         try:
             self._assert_spec_era_migrated(db)
+        finally:
+            db.close()
+
+    def test_orphan_legacy_robot_does_not_block_project_open(self):
+        connection = sqlite3.connect(self.path)
+        connection.execute("INSERT INTO robots VALUES (9,99,9009,'red',NULL)")
+        connection.execute("INSERT INTO scoring_events VALUES (2,9,30.0,5,'low','confirmed','zone_crossing')")
+        connection.commit()
+        connection.close()
+        db = ProjectDatabase(self.path)
+        try:
+            self._assert_spec_era_migrated(db)
+            self.assertIsNone(db.connection.execute(
+                "SELECT video_id FROM scoring_events WHERE id=2").fetchone()[0])
         finally:
             db.close()
 
