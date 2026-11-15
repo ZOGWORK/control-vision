@@ -1256,6 +1256,8 @@ class MainWindow(QMainWindow):
             note = "; later OCR read lower—verify the video" if value.get("later_lower_reading") else ""
             if value.get("uncorroborated_prior_high"):
                 note += f"; higher reading {max(value.get('outvoted_values') or [score])} was outvoted—verify the video"
+            if value.get("flagged"):
+                note += "; low confidence—check the final score on the video"
             return f"{alliance}: {score} (evidence {value.get('confidence', 0):.0%}; OCR recognition {value.get('recognition_confidence', 0):.0%}; agreement {value.get('agreement', 0):.0%}; {value.get('samples', 0)}/{total_frames} readable frames{note})"
         self.scoreboard_ocr_status.setText(
             "OCR proposal from final scoreboard window — " + describe("Red", red) + "; " + describe("Blue", blue) +
