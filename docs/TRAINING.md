@@ -14,7 +14,7 @@ The command refuses to start unless:
 - The version is unused and not locked by another run, and no incomplete files exist for it.
 - Every train/val image is readable and has a YOLO label file, and boxes and class IDs are valid. Empty label files are allowed for negative images.
 - Both the train and val splits contain labeled robots.
-- No identical image file appears in both train and val.
+- No identical image file appears in more than one of train, val, and holdout.
 - No folder directly under `images/train`, `images/val`, or `images/holdout` appears in more than one of them. `extract_frames` writes one such folder per video, so this catches frames from one match placed in two splits.
 - If `split_manifest.csv` exists at the dataset root, it passes `python -m control_vision.training.split_manifest` (see `docs/DATASET_SPLITS.md`). The manifest also lists every image under `images/`, so move `images/unlabeled` out of the dataset before using one. The manifest is optional for now.
 
