@@ -233,6 +233,9 @@ def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list
             frame_index += stride
     finally:
         cap.release()
+    if not red_samples:
+        raise RuntimeError(f"Scoreboard OCR could not read any frame in the last {tail_seconds:g} s of "
+                           f"{video_path.name}. Check that the video plays to the final results screen.")
     return {"source": "scoreboard_ocr", "window_start_s": round(start_t, 3),
             "frames_sampled": len(red_samples),
             "frames_skipped": len(skipped_frames),
