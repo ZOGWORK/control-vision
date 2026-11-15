@@ -11,7 +11,10 @@ from pathlib import Path, PurePosixPath
 
 
 SPLITS = ("train", "val", "holdout")
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+# Ultralytics 8.4.210 data.utils.IMG_FORMATS. train_yolo trains on exactly
+# these types, so the audit must see every one of them.
+IMAGE_SUFFIXES = {".avif", ".bmp", ".dng", ".heic", ".heif", ".jp2", ".jpeg",
+                  ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp"}
 FIELDS = {"image", "split", "source_match", "source", "rights"}
 
 

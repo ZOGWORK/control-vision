@@ -18,13 +18,12 @@ from typing import Any, BinaryIO, Callable, Iterator
 import cv2
 import numpy as np
 
-from control_vision.training.split_manifest import validate_split_manifest
+# IMAGE_SUFFIXES is Ultralytics' image list, shared with the manifest audit so
+# it covers every image that is trained on. Decoding is checked below on the
+# actual training machine before an image enters a dataset hash or split.
+from control_vision.training.split_manifest import IMAGE_SUFFIXES, validate_split_manifest
 
 
-# Ultralytics 8.4.210 data.utils.IMG_FORMATS; decoding is checked below on
-# the actual training machine before an image enters a dataset hash or split.
-IMAGE_SUFFIXES = {".avif", ".bmp", ".dng", ".heic", ".heif", ".jp2", ".jpeg",
-                  ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+")
 MIN_OPSET = 12
@@ -38,7 +37,10 @@ TRAINING_PACKAGES = (("yaml", "PyYAML"), ("ultralytics", "ultralytics"),
 TRAINING_DEFAULTS: dict[str, Any] = {"lr0": 0.01, "patience": 20, "hsv_h": 0.0, "hsv_s": 0.2, "hsv_v": 0.2,
                                      # Plots fetch a font from the internet on first use.
                                      "plots": False}
-REQUIRED_RECORD_FIELDS = ("version", "date", "dataset_sha256", "classes", "training_config", "validation_metrics")
+REQUIRED_RECORD_FIELDS = ("version", "date", "dataset_sha256", "classes", "training_config", "validation_metrics",
+                          "split_provenance")
+MANIFEST_NAME = "split_manifest.csv"
+AUDITED, EXPLORATORY = "match_audited", "exploratory_unverified"
 
 
 def model_stem(version: str) -> str:
@@ -170,12 +172,6 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
     root = _dataset_root(data, config)
     split_dirs = _split_dirs(root, config)
     _check_source_folders(split_dirs)
-    manifest = root / "split_manifest.csv"
-    if manifest.is_file():
-        try:
-            validate_split_manifest(root, manifest)
-        except ValueError as exc:
-            raise ValueError(f"split_manifest.csv: {exc}") from None
     seen_hashes: dict[str, str] = {}
     robot_counts = {"train": 0, "val": 0}
     for split in ("train", "val"):
@@ -219,6 +215,36 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
     if robot_counts["val"] == 0:
         raise ValueError("Validation split has no labeled robots (class 0), so robot mAP cannot be measured")
     return root
+
+
+def training_split_provenance(root: Path, config: dict, exploratory: bool = False) -> dict:
+    """Audit split_manifest.csv at the dataset root and return the record's split_provenance.
+
+    Release training requires the manifest. With ``exploratory`` and no
+    manifest the run is marked unverified; a manifest that exists is always
+    validated, so the flag cannot bypass an invalid one.
+    """
+    root = root.resolve()
+    manifest = root / MANIFEST_NAME
+    if not manifest.is_file():
+        if exploratory:
+            return {"mode": EXPLORATORY, "manifest_sha256": None}
+        raise ValueError(f"{MANIFEST_NAME} is missing from the dataset root {root}; release training needs it "
+                         f"(see docs/DATASET_SPLITS.md), or pass --exploratory-without-manifest for an "
+                         f"unverified local run")
+    for split in ("train", "val"):
+        images_dir = _split_images_dir(root, config, split)
+        if images_dir != (root / "images" / split).resolve():
+            raise ValueError(f"{split} in data.yaml must be images/{split} so {MANIFEST_NAME} covers the "
+                             f"images that are trained on (got {images_dir})")
+    # The audit rejects any image under images/ that the manifest does not list,
+    # using the same IMAGE_SUFFIXES that select training images.
+    try:
+        audit = validate_split_manifest(root, manifest)
+    except ValueError as exc:
+        raise ValueError(f"{MANIFEST_NAME}: {exc}") from None
+    return {"mode": AUDITED, "manifest_sha256": audit["manifest_sha256"], "matches": audit["matches"],
+            "events": audit["events"], "holdout_events": audit["holdout_events"], "images": audit["images"]}
 
 
 def model_version_state(models_dir: Path, version: str) -> tuple[str, str]:
@@ -300,6 +326,21 @@ def _check_record(record: dict) -> None:
         raise ValueError("Refusing to publish a model record without a SHA-256 dataset hash")
     if record["classes"][0] != "robot":
         raise ValueError("Refusing to publish a model whose class 0 is not robot")
+    provenance = record["split_provenance"]
+    if not isinstance(provenance, dict):
+        provenance = {}
+    mode = provenance.get("mode")
+    if mode == AUDITED:
+        counts = provenance.get("images")
+        valid = bool(re.fullmatch(r"[0-9a-f]{64}", str(provenance.get("manifest_sha256")))
+                 and all(type(provenance.get(key)) is int for key in ("matches", "events"))
+                 and isinstance(provenance.get("holdout_events"), list)
+                 and isinstance(counts, dict) and all(type(counts.get(split)) is int for split in ("train", "val")))
+    else:
+        valid = mode == EXPLORATORY and provenance.get("manifest_sha256", "") is None
+    if not valid:
+        raise ValueError(f"Refusing to publish a model record without a valid split_provenance "
+                         f"(mode {AUDITED!r} with its manifest audit, or {EXPLORATORY!r})")
 
 
 def _write_partial(final: Path, write: Callable[[BinaryIO], None], partials: list[Path]) -> None:
@@ -454,6 +495,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="Where versioned ONNX files and JSON records are published (default: the repo's models/)")
     parser.add_argument("--runs-dir", type=Path, default=REPO_ROOT / "runs" / "training",
                         help="Where Ultralytics writes training and validation runs (default: the repo's runs/training)")
+    parser.add_argument("--exploratory-without-manifest", action="store_true",
+                        help="Allow a local run without split_manifest.csv; its record says exploratory_unverified "
+                             "and it is not a release model. A manifest that exists is still validated.")
     args = parser.parse_args(argv)
     try:
         check_version(args.version)
@@ -474,12 +518,18 @@ def main(argv: list[str] | None = None) -> None:
             except yaml.YAMLError as exc:
                 raise ValueError(f"data.yaml is not valid YAML: {exc}") from None
             names = class_names(config)
+            # Provenance first: a missing or invalid manifest stops the run before images are decoded.
+            split_provenance = training_split_provenance(_dataset_root(args.data, config), config,
+                                                         args.exploratory_without_manifest)
             data_root = validate_dataset(args.data, config, len(names))
             dataset_sha256 = dataset_hash(data_root, config, args.data)
             onnx_path, metadata_path = stack.enter_context(reserve_model_version(models_dir, args.version))
         except ValueError as exc:
             parser.error(str(exc))
-        manifest = data_root / "split_manifest.csv"
+        exploratory = split_provenance["mode"] == EXPLORATORY
+        if exploratory:
+            print(f"UNVERIFIED EXPLORATORY RUN: {data_root} has no {MANIFEST_NAME}, so match-level split separation "
+                  f"is not checked. The record will say {EXPLORATORY}; this is not a release model.", flush=True)
         train_args = {"epochs": args.epochs, "batch": args.batch, "imgsz": args.imgsz, "device": args.device,
                       **TRAINING_DEFAULTS}
         # Ultralytics resolves a relative `path` against its process CWD.
@@ -506,8 +556,7 @@ def main(argv: list[str] | None = None) -> None:
             onnx_check = check_onnx_model(exported, names, args.imgsz, onnx, ort)
             record = {"version": args.version, "date": date.today().isoformat(), "dataset_sha256": dataset_sha256,
                       "dataset_root": str(data_root), "data_yaml": str(args.data.resolve()),
-                      "split_manifest_sha256": _sha256(manifest) if manifest.is_file() else None,
-                      "classes": names, "base_weights": str(args.base_weights),
+                      "split_provenance": split_provenance, "classes": names, "base_weights": str(args.base_weights),
                       "base_weights_sha256": _sha256(args.base_weights), "best_checkpoint": str(best_pt),
                       "training_config": {"model": "yolo11n", **train_args},
                       "validation_metrics": metrics,
@@ -519,6 +568,9 @@ def main(argv: list[str] | None = None) -> None:
         except ValueError as exc:
             raise SystemExit(f"Model version {args.version} was not published: {exc}") from None
         print(f"Saved {onnx_path} and {metadata_path}")
+        if exploratory:
+            print(f"UNVERIFIED: version {args.version} is {EXPLORATORY} (no {MANIFEST_NAME}); "
+                  f"do not use or report it as a release model.")
 
 if __name__ == "__main__":
     main()

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -12,17 +13,23 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from control_vision.training.train_yolo import (check_onnx_model, class_names, dataset_hash, model_version_state,
-                                                publish_model_artifacts, reserve_model_version, validate_dataset,
-                                                validation_metrics)
+from control_vision.training.train_yolo import (IMAGE_SUFFIXES, check_onnx_model, class_names, dataset_hash,
+                                                model_version_state, publish_model_artifacts, reserve_model_version,
+                                                training_split_provenance, validate_dataset, validation_metrics)
 from control_vision.training.extract_frames import extract
+
+# Ultralytics 8.4.210 data.utils.IMG_FORMATS: every image type training reads.
+TRAINED_SUFFIXES = {".avif", ".bmp", ".dng", ".heic", ".heif", ".jp2", ".jpeg",
+                    ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp"}
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def complete_record(version="1.0.0"):
     return {"version": version, "date": "2026-11-14", "dataset_sha256": "a" * 64, "classes": ["robot"],
-            "training_config": {"epochs": 1}, "validation_metrics": {"overall": {"mAP50": 0.5}}}
+            "training_config": {"epochs": 1}, "validation_metrics": {"overall": {"mAP50": 0.5}},
+            "split_provenance": {"mode": "match_audited", "manifest_sha256": "c" * 64, "matches": 2, "events": 1,
+                                 "holdout_events": [], "images": {"train": 1, "val": 1, "holdout": 0}}}
 
 
 class FrameExtractionTests(unittest.TestCase):
@@ -198,11 +205,50 @@ class TrainingDatasetTests(unittest.TestCase):
             f"images/val/two.jpg,val,{val_match},team video,team-owned\n", encoding="utf-8")
 
     def test_split_manifest_errors_are_reported_when_present(self):
-        self._manifest("USWASAM1:Q2")
-        self.assertEqual(validate_dataset(self.data, self.config, 1), self.root)
         self._manifest("uswasam1:q01")
-        with self.assertRaisesRegex(ValueError, "split_manifest.csv: match .* appears in both train and val"):
-            validate_dataset(self.data, self.config, 1)
+        for exploratory in (False, True):
+            with self.subTest(exploratory=exploratory):
+                with self.assertRaisesRegex(ValueError, "split_manifest.csv: match .* appears in both train and val"):
+                    training_split_provenance(self.root, self.config, exploratory)
+
+    def test_missing_manifest_is_refused_unless_exploratory(self):
+        with self.assertRaisesRegex(ValueError, "split_manifest.csv is missing from the dataset root"):
+            training_split_provenance(self.root, self.config)
+        self.assertEqual(training_split_provenance(self.root, self.config, exploratory=True),
+                         {"mode": "exploratory_unverified", "manifest_sha256": None})
+
+    def test_valid_manifest_is_match_audited_even_with_exploratory_flag(self):
+        self._manifest("USWASAM1:Q2")
+        audit = training_split_provenance(self.root, self.config)
+        self.assertEqual(audit, {"mode": "match_audited",
+                                 "manifest_sha256": hashlib.sha256((self.root / "split_manifest.csv").read_bytes())
+                                 .hexdigest(),
+                                 "matches": 2, "events": 1, "holdout_events": [],
+                                 "images": {"train": 1, "val": 1, "holdout": 0}})
+        self.assertEqual(training_split_provenance(self.root, self.config, exploratory=True), audit)
+
+    def test_manifest_requires_standard_split_directories(self):
+        self._manifest("USWASAM1:Q2")
+        (self.root / "images" / "extra").mkdir()
+        for split in ("train", "val"):
+            with self.subTest(split=split):
+                with self.assertRaisesRegex(ValueError, f"{split} in data.yaml must be images/{split}"):
+                    training_split_provenance(self.root, {**self.config, split: "images/extra"})
+
+    def test_manifest_audit_covers_every_trained_image_type(self):
+        self.assertEqual(IMAGE_SUFFIXES, TRAINED_SUFFIXES)
+        for suffix in sorted(TRAINED_SUFFIXES):
+            with self.subTest(suffix=suffix):
+                self._manifest("USWASAM1:Q2")
+                extra = self.root / "images" / "train" / f"extra{suffix}"
+                extra.write_bytes(suffix.encode())
+                (self.root / "labels" / "train" / "extra.txt").write_text("", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "split_manifest.csv: 1 image\\(s\\) are absent"):
+                    training_split_provenance(self.root, self.config)
+                with (self.root / "split_manifest.csv").open("a", encoding="utf-8") as stream:
+                    stream.write(f"images/train/extra{suffix},train,USWASAM1:Q1,team video,team-owned\n")
+                self.assertEqual(training_split_provenance(self.root, self.config)["images"]["train"], 2)
+                extra.unlink()
 
     def test_dataset_hash_covers_split_files_and_yaml_only(self):
         self.data.write_text("names: [robot]\n", encoding="utf-8")
@@ -336,6 +382,26 @@ class ModelPublishingTests(unittest.TestCase):
                 self.assertEqual(model_version_state(self.models, "1.0.0")[0], "absent")
         with self.assertRaisesRegex(ValueError, "SHA-256 dataset hash"):
             self._publish({**complete_record(), "dataset_sha256": "unknown"})
+
+    def test_record_without_valid_split_provenance_is_refused(self):
+        record = complete_record()
+        audited = record["split_provenance"]
+        cases = {"missing": {key: value for key, value in record.items() if key != "split_provenance"},
+                 "unknown mode": {**record, "split_provenance": {"mode": "trust_me", "manifest_sha256": None}},
+                 "audited without hash": {**record, "split_provenance": {**audited, "manifest_sha256": None}},
+                 "audited without counts": {**record, "split_provenance": {"mode": "match_audited",
+                                                                           "manifest_sha256": "c" * 64}},
+                 "exploratory with hash": {**record, "split_provenance": {"mode": "exploratory_unverified",
+                                                                          "manifest_sha256": "c" * 64}}}
+        for name, bad in cases.items():
+            with self.subTest(name):
+                with self.assertRaisesRegex(ValueError, "split_provenance"):
+                    self._publish(bad)
+                self.assertEqual(model_version_state(self.models, "1.0.0")[0], "absent")
+        _, metadata, _ = self._publish({**record, "split_provenance": {"mode": "exploratory_unverified",
+                                                                      "manifest_sha256": None}})
+        self.assertEqual(json.loads(metadata.read_text(encoding="utf-8"))["split_provenance"]["mode"],
+                         "exploratory_unverified")
 
     def _interrupt(self, mode):
         script = textwrap.dedent("""

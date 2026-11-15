@@ -117,6 +117,10 @@ class TrainingPipelineTests(unittest.TestCase):
             self.assertTrue(ok)
             (self.root / "images" / split / "a.jpg").write_bytes(encoded.tobytes())
             (self.root / "labels" / split / "a.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+        self.manifest = self.root / "split_manifest.csv"
+        self.manifest.write_text("image,split,source_match,source,rights\n"
+                                 "images/train/a.jpg,train,USWASAM1:Q1,team video,team-owned\n"
+                                 "images/val/a.jpg,val,USWASAM1:Q2,team video,team-owned\n", encoding="utf-8")
         self.data = self.root / "data.yaml"
         self.config = {"path": str(self.root), "train": "images/train", "val": "images/val", "names": {"0": "robot"}}
         self._write_config()
@@ -132,14 +136,17 @@ class TrainingPipelineTests(unittest.TestCase):
     def run_main(self, *extra, modules=None):
         argv = ["--data", str(self.data), "--base-weights", str(self.base), "--models-dir", str(self.models),
                 "--runs-dir", str(self.runs), *extra]
-        stderr = io.StringIO()
+        stderr, self.stdout = io.StringIO(), io.StringIO()
         with patch.dict(sys.modules, modules or self.fake.modules()), patch.dict(os.environ, {}), \
-                contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(self.stdout):
             try:
                 train_yolo.main(argv)
             except SystemExit as exc:
                 return exc.code, stderr.getvalue()
         return 0, stderr.getvalue()
+
+    def record(self):
+        return json.loads((self.models / "yolo11n-biobuzz-v1.0.0.json").read_text(encoding="utf-8"))
 
     def model_files(self):
         return sorted(path.name for path in self.models.iterdir()) if self.models.exists() else []
@@ -166,6 +173,11 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(record["validation_metrics"]["overall"], {"mAP50": 0.81, "mAP50-95": 0.52})
         self.assertEqual(record["onnxruntime_check"]["smoke_run"], "passed")
         self.assertGreaterEqual(record["onnxruntime_check"]["opset"], 12)
+        self.assertEqual(record["split_provenance"],
+                         {"mode": "match_audited", "manifest_sha256": train_yolo._sha256(self.manifest),
+                          "matches": 2, "events": 1, "holdout_events": [],
+                          "images": {"train": 1, "val": 1, "holdout": 0}})
+        self.assertNotIn("UNVERIFIED", self.stdout.getvalue())
 
         [train] = self.fake.called("train")
         self.assertEqual({key: train[key] for key in ("hsv_h", "hsv_s", "hsv_v", "imgsz", "epochs", "batch",
@@ -183,6 +195,48 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(export["opset"], 12)
         self.assertEqual(self.fake.feeds[0]["images"].shape, (1, 3, 640, 640))
         self.assertEqual(set(self.fake.env_at_init), {("False", "True")})
+
+    def test_missing_manifest_is_refused_before_training(self):
+        self.manifest.unlink()
+        with patch.object(train_yolo, "validate_dataset", side_effect=AssertionError("images checked")):
+            code, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("split_manifest.csv is missing from the dataset root", stderr)
+        self.assert_not_trained()
+        self.assertEqual(self.fake.called("init"), [])
+
+    def test_exploratory_flag_publishes_a_visibly_unverified_record(self):
+        self.manifest.unlink()
+        code, stderr = self.run_main("--exploratory-without-manifest")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.record()["split_provenance"], {"mode": "exploratory_unverified", "manifest_sha256": None})
+        output = self.stdout.getvalue()
+        self.assertIn("UNVERIFIED EXPLORATORY RUN", output)
+        self.assertIn("UNVERIFIED: version 1.0.0 is exploratory_unverified", output)
+
+    def test_exploratory_flag_does_not_bypass_an_invalid_manifest(self):
+        self.manifest.write_text(self.manifest.read_text(encoding="utf-8").replace("USWASAM1:Q2", "uswasam1:q01"),
+                                 encoding="utf-8")
+        code, stderr = self.run_main("--exploratory-without-manifest")
+        self.assertEqual(code, 2)
+        self.assertIn("split_manifest.csv: match", stderr)
+        self.assert_not_trained()
+
+    def test_exploratory_flag_with_valid_manifest_is_match_audited(self):
+        code, stderr = self.run_main("--exploratory-without-manifest")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.record()["split_provenance"]["mode"], "match_audited")
+        self.assertNotIn("UNVERIFIED", self.stdout.getvalue())
+
+    def test_training_folders_outside_the_manifest_layout_are_refused(self):
+        (self.root / "images" / "train2").mkdir()
+        (self.root / "images" / "train2" / "b.jpg").write_bytes((self.root / "images" / "train" / "a.jpg").read_bytes())
+        self.config["train"] = "images/train2"
+        self._write_config()
+        code, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn("train in data.yaml must be images/train", stderr)
+        self.assert_not_trained()
 
     def test_unsupported_class_map_is_refused_before_training(self):
         for names, message in (({"0": "pollen", "1": "robot"}, "Supported classes"),
@@ -250,7 +304,8 @@ class TrainingPipelineTests(unittest.TestCase):
         with reserve_model_version(self.models, "1.0.0") as (onnx, metadata):
             publish_model_artifacts(exported, onnx, metadata, {
                 "version": "1.0.0", "date": "2026-11-01", "dataset_sha256": "b" * 64, "classes": ["robot"],
-                "training_config": {"epochs": 1}, "validation_metrics": {"overall": {"mAP50": 0.1}}})
+                "training_config": {"epochs": 1}, "validation_metrics": {"overall": {"mAP50": 0.1}},
+                "split_provenance": {"mode": "exploratory_unverified", "manifest_sha256": None}})
         before = {path.name: path.read_bytes() for path in self.models.iterdir()}
         code, stderr = self.run_main()
         self.assertEqual(code, 2)

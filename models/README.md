@@ -21,7 +21,7 @@ The JSON record contains:
 | `date` | Date the version was published. |
 | `dataset_sha256` | SHA-256 of the train, val, and holdout images and labels plus `data.yaml`, computed before training. `images/unlabeled` is not included. |
 | `dataset_root`, `data_yaml` | Where the dataset was read from. |
-| `split_manifest_sha256` | SHA-256 of `split_manifest.csv`, or `null` when the dataset has none. |
+| `split_provenance` | How the train/val/holdout split was checked before training. `mode` is `match_audited` when `split_manifest.csv` passed the match-level audit; then `manifest_sha256` is the manifest's SHA-256 and `matches`, `events`, `holdout_events`, and `images` (per-split counts) come from the audit. `mode` is `exploratory_unverified` with `manifest_sha256` `null` for a run made with `--exploratory-without-manifest`: its split was not checked, so it is not a release model. |
 | `classes` | Class names in ID order; class 0 is `robot`. |
 | `base_weights`, `base_weights_sha256` | Starting checkpoint and its SHA-256. |
 | `best_checkpoint` | Local path of the best training checkpoint that was exported. |
@@ -32,7 +32,7 @@ The JSON record contains:
 | `ultralytics_version` | Ultralytics version used for training. |
 | `onnx`, `onnx_sha256` | ONNX file name and its SHA-256. |
 
-Add a line for each published version below, with its record's date, dataset hash, and val metrics, and the matches the metrics were measured on.
+Publishing refuses a record without a valid `split_provenance`. Only `match_audited` versions are release models. Add a line for each released version below, with its record's date, dataset hash, manifest hash, and val metrics, and the matches the metrics were measured on. Do not list `exploratory_unverified` versions as released.
 
 ## ReID weights
 

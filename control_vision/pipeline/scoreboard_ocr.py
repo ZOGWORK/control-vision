@@ -79,6 +79,49 @@ def _vote(items: list[dict]) -> int:
     return max(votes, key=lambda value: (round(votes[value], 9), last_seen[value]))
 
 
+def _is_partial(reading: int, value: int) -> bool:
+    """True when ``reading`` looks like ``value`` with some digits not read.
+
+    On a results screen that is still fading in over the field, OCR drops
+    digits from either end: real footage read a final 180 as 8 and 18, and a
+    final 103 as 3. So a reading is partial when its digits are a shorter,
+    contiguous run of the higher value's digits (so it is also lower).
+    """
+    shown, full = str(reading), str(value)
+    return len(shown) < len(full) and shown in full
+
+
+def _revealed_final(valid: list[dict]) -> tuple[int, int] | None:
+    """Find a final value that the end of the window rises into through partial readings.
+
+    Looks for the longest run of frames reaching to the end of the window in
+    which every reading is either its highest value or a partial reading of
+    it. The run must start with a partial reading (the screen is being
+    revealed, not a high outlier followed by lower readings), and no partial
+    value may be read on as many frames as a stable score needs: a value held
+    that long is a real reading, not a passing frame. Returns the final value
+    and the index where the run starts, or None.
+    """
+    found: tuple[int, int] | None = None
+    for start in range(len(valid) - 1, -1, -1):
+        values = [int(item["value"]) for item in valid[start:]]
+        top = max(values)
+        if all(value == top or _is_partial(value, top) for value in values):
+            found = (top, start)
+    if found is None:
+        return None
+    top, start = found
+    if int(valid[start]["value"]) == top:
+        return None
+    counts: dict[int, int] = {}
+    for item in valid:
+        counts[int(item["value"])] = counts.get(int(item["value"]), 0) + 1
+    partials = {int(item["value"]) for item in valid[start:] if item["value"] != top}
+    if any(counts[value] >= _MIN_PROGRESSION_FRAMES for value in partials):
+        return None
+    return found
+
+
 def _consensus(samples: list[dict]) -> dict:
     """Vote the proposed score over the sampled frames.
 
@@ -87,12 +130,21 @@ def _consensus(samples: list[dict]) -> dict:
     during a match, so a higher value that first appears later in the tail
     window and then holds a weighted majority of every frame from that point
     on (with at least three frames) is treated as the score progressing to its
-    final value; earlier lower frames then do not vote against it. The result
-    is a proposal only and must be reviewed.
+    final value; earlier lower frames then do not vote against it.
+
+    The final results screen often fades in at the very end of a video, so
+    its first frames read with digits missing (180 read as 8, then 18). When
+    the window ends by rising through such passing partial readings into a
+    higher value (see ``_revealed_final``), that value is proposed and the
+    partial readings before it do not vote against it. Partial readings after
+    it still count against its agreement, and the confidence stays capped by
+    how few frames read the full value, so a short reveal is proposed with
+    low confidence and flagged. The result is a proposal only and must be
+    reviewed.
     """
     valid = [item for item in samples if item["value"] is not None]
     if not valid:
-        return {"value": None, "confidence": 0.0, "agreement": 0.0, "samples": len(samples)}
+        return {"value": None, "confidence": 0.0, "agreement": 0.0, "samples": len(samples), "flagged": True}
     winner = _vote(valid)
     window = valid
     first_seen: dict[int, int] = {}
@@ -106,6 +158,13 @@ def _consensus(samples: list[dict]) -> dict:
             continue
         if _vote(tail) == value:
             winner, window = value, tail
+    superseded: list[dict] = []
+    revealed = _revealed_final(valid)
+    if revealed is not None and revealed[0] >= winner:
+        winner, start = revealed
+        reveal = valid[start:]
+        first_full = next(index for index, item in enumerate(reveal) if item["value"] == winner)
+        superseded, window = reveal[:first_full], reveal[first_full:]
     votes = _support(window)
     chosen = [item for item in window if item["value"] == winner]
     total = sum(votes.values())
@@ -114,14 +173,22 @@ def _consensus(samples: list[dict]) -> dict:
     # Recognition confidence is not the same as temporal evidence. Cap the
     # displayed confidence until at least three frames corroborate the score.
     confidence = recognition * agreement * min(1.0, len(chosen) / 3.0)
-    outvoted = sorted({int(item["value"]) for item in valid if item["value"] != winner})
+    superseded_ids = {id(item) for item in superseded}
+    outvoted = sorted({int(item["value"]) for item in valid
+                       if item["value"] != winner and id(item) not in superseded_ids})
+    later_lower = valid[-1]["value"] < winner
     return {"value": int(winner), "confidence": round(confidence, 4),
             "recognition_confidence": round(recognition, 4),
             "agreement": round(agreement, 4), "samples": len(valid),
             "supporting_samples": len(chosen),
             "outvoted_values": outvoted,
+            "superseded_partial_values": sorted({int(item["value"]) for item in superseded}),
             "uncorroborated_prior_high": any(value > winner for value in outvoted),
-            "later_lower_reading": valid[-1]["value"] < winner}
+            "later_lower_reading": later_lower,
+            # Needs a closer look than an ordinary review: few frames read
+            # this value, frames it rests on read something else, or the
+            # video ends on a lower reading.
+            "flagged": bool(len(chosen) < _MIN_PROGRESSION_FRAMES or len(chosen) < len(window) or later_lower)}
 
 
 RAPIDOCR_REQUIREMENT = "rapidocr-onnxruntime==1.4.4"
@@ -163,6 +230,13 @@ def read_scoreboard(video_path: Path, red_roi: list[list[float]], blue_roi: list
 
     RapidOCR bundles its ONNX OCR models. Results are proposals only; callers
     must keep these separate from confirmed scoring events and official scores.
+
+    The default of one sample per second is deliberate. On a real 720p match
+    video each sampled frame took about 3 s to read, so the 12 s tail took
+    35-46 s at 1 fps, 73 s at 2 fps and 151 s at 4 fps, and the denser
+    sampling caught more frames where OCR drops digits from the clean final
+    screen (103 read as 3), which made the blue proposal wrong (3) at both
+    2 and 4 fps rather than better.
     """
     try:
         from rapidocr_onnxruntime import RapidOCR
