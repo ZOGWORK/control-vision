@@ -62,6 +62,13 @@ class ClipThumbnailTests(unittest.TestCase):
         self.assertFalse(thumbnail_cache_path(self.clip).exists())
         self.assertIn("read-only folder", logs.output[0])
 
+    def test_a_cache_that_cannot_be_cleaned_up_still_returns_the_frame(self):
+        with patch("pathlib.Path.write_bytes", side_effect=PermissionError("disk full")), \
+                patch("pathlib.Path.unlink", side_effect=PermissionError("locked")), \
+                self.assertLogs("control_vision.pipeline.clips", level="WARNING"):
+            frame = thumbnail(self.clip)
+        self.assertEqual(frame.shape[:2], (135, 240))
+
     def test_non_ascii_project_folder_is_cached_and_reused(self):
         folder = self.clip.parent / "Équipe ñandú 机器人"
         folder.mkdir()
