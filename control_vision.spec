@@ -1,6 +1,7 @@
 # PyInstaller spec for a Windows one-folder build. Run it through
 # scripts/build_windows.ps1, which writes the release metadata it requires.
 # Trained detector weights and match videos remain external to the bundle.
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -29,11 +30,20 @@ datas += [(str(root / "LICENSE"), "."),
 datas += [(str(path), "licenses") for path in sorted((root / "licenses").glob("*.txt"))]
 datas += [(str(release_dir / name), ".") for name in required_release_files]
 ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
+# torchvision loads its C++ ops (_C_stable.pyd, image_stable.pyd) with
+# torch.ops.load_library from its own folder rather than importing them, so
+# PyInstaller's import analysis misses them. Without them Ultralytics' NMS
+# fails with "operator torchvision::nms does not exist".
+torchvision_dir = Path(importlib.util.find_spec("torchvision").origin).parent
+torchvision_native = [(str(path), "torchvision") for path in sorted(torchvision_dir.glob("*.pyd"))
+                      + sorted(torchvision_dir.glob("*.dll"))]
+if not any(Path(source).name.startswith("_C") for source, _ in torchvision_native):
+    raise RuntimeError(f"torchvision C++ ops were not found in {torchvision_dir}")
 
 a = Analysis(
     [str(root / "control_vision" / "__main__.py")],
     pathex=[str(root)],
-    binaries=[(ffmpeg_binary, "imageio_ffmpeg/binaries")],
+    binaries=[(ffmpeg_binary, "imageio_ffmpeg/binaries")] + torchvision_native,
     datas=datas,
     hiddenimports=["control_vision.smoke_test", "ultralytics.trackers.bot_sort", "ultralytics.trackers.byte_tracker",
                    "onnxruntime", "rapidocr_onnxruntime"],
