@@ -18,6 +18,8 @@ from typing import Any, BinaryIO, Callable, Iterator
 import cv2
 import numpy as np
 
+from control_vision.image_files import read_image
+
 # IMAGE_SUFFIXES is Ultralytics' image list, shared with the manifest audit so
 # it covers every image that is trained on. Decoding is checked below on the
 # actual training machine before an image enters a dataset hash or split.
@@ -185,7 +187,7 @@ def validate_dataset(data: Path, config: dict, class_count: int) -> Path:
             label = labels_dir / image.relative_to(images_dir).with_suffix(".txt")
             if not label.is_file():
                 raise ValueError(f"Missing YOLO label file for {split} image {image.name}: {label}")
-            if cv2.imread(str(image)) is None:
+            if read_image(image) is None:
                 raise ValueError(f"Unreadable {split} image: {image}")
             _check_duplicate(seen_hashes, image, split)
             for line_number, line in enumerate(label.read_text(encoding="utf-8").splitlines(), 1):

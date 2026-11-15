@@ -8,6 +8,8 @@ from pathlib import Path
 
 import cv2
 
+from control_vision.image_files import write_image
+
 
 def extract(video: Path, output: Path, every_seconds: float = 2.0, max_frames: int | None = None) -> int:
     if not math.isfinite(every_seconds) or every_seconds <= 0:
@@ -41,7 +43,7 @@ def extract(video: Path, output: Path, every_seconds: float = 2.0, max_frames: i
                     break
                 if frame_index % interval == 0:
                     target = stage / f"{frame_index:09d}.jpg"
-                    if not cv2.imwrite(str(target), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+                    if not write_image(target, frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
                         raise RuntimeError(f"Could not write {target}")
                     written += 1
                     if max_frames is not None and written >= max_frames:
