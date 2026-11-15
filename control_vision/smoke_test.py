@@ -199,13 +199,20 @@ def check_project_import(work: Path, clip: Path) -> dict[str, Any]:
 def check_ultralytics() -> dict[str, Any]:
     import onnxruntime
     import torch
+    import torchvision
     import ultralytics
     from ultralytics import YOLO  # noqa: F401  # The import itself is the check.
     from ultralytics.utils import AUTOINSTALL
 
     if is_frozen() and AUTOINSTALL:
         raise SmokeFailure("Ultralytics auto-install is enabled in the frozen build")
-    return {"autoinstall": AUTOINSTALL,"ultralytics": ultralytics.__version__, "torch": torch.__version__,
+    # Ultralytics' detection post-processing runs torchvision's C++ NMS op,
+    # which a frozen build only has if torchvision's native library shipped.
+    boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 11.0, 11.0], [50.0, 50.0, 60.0, 60.0]])
+    kept = torchvision.ops.nms(boxes, torch.tensor([0.9, 0.8, 0.7]), 0.5).tolist()
+    if kept != [0, 2]:
+        raise SmokeFailure(f"torchvision NMS kept {kept}, expected [0, 2]")
+    return {"autoinstall": AUTOINSTALL, "torchvision": torchvision.__version__,"ultralytics": ultralytics.__version__, "torch": torch.__version__,
             "onnxruntime": onnxruntime.__version__, "providers": onnxruntime.get_available_providers()}
 
 
