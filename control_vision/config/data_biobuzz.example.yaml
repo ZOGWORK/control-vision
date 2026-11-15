@@ -1,0 +1,7 @@
+path: datasets/biobuzz-v1
+train: images/train
+val: images/val
+names:
+  0: robot
+  1: pollen
+  2: nectar
