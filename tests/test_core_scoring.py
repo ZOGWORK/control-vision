@@ -153,8 +153,9 @@ class CoreScoringTests(unittest.TestCase):
                     "load": {"type": "loading_zone", "points": [[0, 0], [2, 0], [2, 2], [0, 2]]},
                     "goal": {"type": scoring_type, "points": [[8, 8], [10, 8], [10, 10], [8, 10]]},
                 }
-                rows = [(1, 0, 0.0, 1.0, 1.0, 0.9), (1, 1, 1.0, 4.0, 4.0, 0.9),
-                        (1, 2, 2.0, 9.0, 9.0, 0.9)]
+                # 8 fps: 1 s in the loading zone, 1 s in transit, 1 s in the goal.
+                positions = [(1.0, 1.0)] * 8 + [(4.0, 4.0)] * 8 + [(9.0, 9.0)] * 8
+                rows = [(1, frame, frame / 8, x, y, 0.9) for frame, (x, y) in enumerate(positions)]
                 cycles, events = count_zone_cycles(rows, zones)
                 self.assertEqual(len(cycles), 1)
                 self.assertEqual(events[0]["status"], "flagged")
