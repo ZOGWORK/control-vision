@@ -379,6 +379,116 @@ class VideoEvidenceTests(unittest.TestCase):
         self.assertEqual(result["value"], 90)
         self.assertEqual(_consensus([{"t_s": 0.0, "value": None, "confidence": 0.0}])["flagged"], True)
 
+    @staticmethod
+    def _ocr(*detections, line=None, calls=None):
+        """Read a frame with a stub engine returning RapidOCR 1.4.4 results.
+
+        Detection runs return ([[box, text, score], ...], elapsed) or (None, None).
+        Each detection is (x0, x1, text, score) on one line, or
+        (x0, x1, text, score, y0, y1) to place it on another line. ``line`` is
+        what recognising the score line on its own returns, as (text, score);
+        by default it reads nothing, so the separate detections are merged.
+        """
+        rows = []
+        for detection in detections:
+            x0, x1, text, score = detection[:4]
+            y0, y1 = detection[4:] if len(detection) > 4 else (30.0, 160.0)
+            rows.append([[[x0, y0], [x1, y0], [x1, y1], [x0, y1]], text, score])
+
+        def engine(image, use_det=True, use_cls=True):
+            if calls is not None:
+                calls.append((image.shape, use_det, use_cls))
+            if not use_det:
+                return ([list(line)], [0.01]) if line else (None, None)
+            return (rows, [0.01, 0.0, 0.01]) if rows else (None, None)
+
+        return _read_digits(engine, np.zeros((100, 200, 3), dtype=np.uint8), [[0, 0], [199, 0], [199, 99], [0, 99]])
+
+    def test_ocr_reading_recognises_the_whole_score_line(self):
+        # Detection found only the "3" of 73; reading the line at once sees both digits.
+        calls = []
+        self.assertEqual(self._ocr((133, 206, "3", .99), line=("73", .95), calls=calls), (73, .95, "73"))
+        # The second pass reads a strip across the whole crop (2x the 200 px ROI)
+        # at the line's height plus a 10% margin, without detection.
+        self.assertEqual(calls, [((200, 400, 3), True, True), ((156, 400, 3), False, False)])
+        self.assertEqual(self._ocr((10, 100, "1", .9), (110, 200, "8", .9), line=("1 8 0", .8))[:2], (180, .8))
+
+    def test_ocr_reading_falls_back_to_detections_when_the_line_is_not_a_score(self):
+        for text in ("21229 76", "03", "Red", ""):
+            value, confidence, _ = self._ocr((10, 100, "7", .9), (110, 200, "6", .8), line=(text, .99))
+            self.assertEqual((value, confidence), (76, .8), text)
+        calls = []
+        self.assertEqual(self._ocr((10, 100, "Red", .9), line=("7", .9), calls=calls), (None, 0.0, "Red"))
+        self.assertEqual(len(calls), 1)
+
+    def test_ocr_reading_accepts_line_result_objects(self):
+        def engine(image, use_det=True, use_cls=True):
+            if use_det:
+                return [[[[133, 30], [206, 30], [206, 160], [133, 160]], "3", .99]], [0.01]
+            return SimpleNamespace(txts=("73",), scores=(.9,))
+
+        value, confidence, _ = _read_digits(engine, np.zeros((100, 200, 3), dtype=np.uint8),
+                                            [[0, 0], [199, 0], [199, 99], [0, 99]])
+        self.assertEqual((value, confidence), (73, .9))
+
+    def test_ocr_reading_merges_digit_detections_left_to_right(self):
+        # RapidOCR does not return detections in reading order.
+        value, confidence, text = self._ocr((200, 300, "3", .99), (10, 100, "1", .8), (120, 210, "0", .9))
+        self.assertEqual(value, 103)
+        self.assertAlmostEqual(confidence, .8)
+        self.assertEqual(text, "1 0 3")
+        self.assertEqual(self._ocr((10, 100, "1", .9), (120, 300, "80", .7))[:2], (180, .7))
+        # Boxes on one line are rarely level; position along the line decides the order.
+        self.assertEqual(self._ocr((10, 100, "1", .9, 40.0, 170.0), (120, 210, "0", .9, 30.0, 160.0))[0], 10)
+
+    def test_ocr_reading_drops_a_glyph_read_twice(self):
+        # Real footage read a clean 103 as "1", "03" and an overlapping "3":
+        # the repeated 3 is one glyph, not a fourth digit.
+        value, confidence, _ = self._ocr((12, 96, "1", .56), (124, 223, "03", .72), (201, 299, "3", 1.0))
+        self.assertEqual((value, confidence), (103, .56))
+        # A two-digit detection and a detection of its last digit.
+        self.assertEqual(self._ocr((56, 176, "53", 1.0), (119, 217, "3", 1.0))[0], 53)
+        # One glyph read as two different digits keeps the more confident one.
+        self.assertEqual(self._ocr((10, 100, "7", .55), (15, 98, "1", .9), (120, 210, "3", .99))[0], 13)
+
+    def test_ocr_reading_keeps_neighbouring_glyphs_whose_boxes_touch(self):
+        # Boxes of neighbouring digits overlap a little; both digits are kept.
+        self.assertEqual(self._ocr((62, 153, "5", 1.0), (121, 215, "3", 1.0))[0], 53)
+        self.assertEqual(self._ocr((38, 93, "1", .9), (90, 169, "1", 1.0), (165, 239, "6", 1.0))[0], 116)
+
+    def test_ocr_reading_does_not_merge_separate_text_lines(self):
+        # A small number on another line (a label or timer) is not part of the score.
+        value, _, _ = self._ocr((10, 100, "4", .99), (110, 200, "2", .99),
+                                (10, 40, "1", .99, 170.0, 200.0), (50, 80, "5", .99, 170.0, 200.0))
+        self.assertEqual(value, 42)
+        # The taller line is the score even when it comes second.
+        value, _, _ = self._ocr((10, 40, "9", .99, 0.0, 25.0), (10, 100, "7", .9), (110, 200, "6", .9))
+        self.assertEqual(value, 76)
+
+    def test_ocr_reading_with_too_many_digits_is_not_a_score(self):
+        value, confidence, text = self._ocr((10, 100, "1", .9), (110, 200, "0", .9), (210, 300, "3", .9),
+                                            (310, 400, "7", .99))
+        self.assertIsNone(value)
+        self.assertEqual(confidence, 0.0)
+        self.assertEqual(text, "1 0 3 7")
+        # A merged reading that starts with a zero lost the digit before it.
+        self.assertIsNone(self._ocr((120, 210, "0", .9), (220, 300, "3", .99))[0])
+        self.assertEqual(self._ocr((120, 210, "0", .9))[0], 0)
+
+    def test_ocr_reading_ignores_team_numbers_and_non_digits(self):
+        value, _, text = self._ocr((0, 300, "21229", .99), (110, 200, "8C", .9, 180.0, 300.0))
+        self.assertEqual(value, 8)
+        self.assertEqual(text, "21229 8C")
+        self.assertEqual(self._ocr((10, 100, "Red", .9)), (None, 0.0, "Red"))
+        self.assertEqual(self._ocr(), (None, 0.0, ""))
+
+    def test_ocr_reading_accepts_result_objects_with_boxes(self):
+        boxes = [[[110, 30], [200, 30], [200, 160], [110, 160]], [[10, 30], [100, 30], [100, 160], [10, 160]]]
+        output = SimpleNamespace(boxes=np.asarray(boxes, dtype=np.float32), txts=("2", "4"), scores=(.9, .95))
+        value, confidence, _ = _read_digits(lambda _image, **_options: [output] if _options.get("use_det", True) else None,
+                                            np.zeros((100, 200, 3), dtype=np.uint8), [[0, 0], [199, 0], [199, 99], [0, 99]])
+        self.assertEqual((value, confidence), (42, .9))
+
     def test_ocr_engine_failure_releases_video(self):
         class Capture:
             released = False
