@@ -103,7 +103,7 @@ def _probe_metadata(path: Path) -> dict[str, Any]:
             try:
                 payload = json.loads(result.stdout)
                 stream = payload["streams"][0]
-                fps = _fraction(stream.get("avg_frame_rate") or stream.get("r_frame_rate") or "0/1")
+                fps = _stream_fps(path, stream)
                 duration = _positive_float(stream.get("duration"))
                 if duration is None:
                     duration = _positive_float(payload.get("format", {}).get("duration"))
@@ -133,6 +133,26 @@ def _probe_metadata(path: Path) -> dict[str, Any]:
     if not all(math.isfinite(value) and value > 0 for value in (fps, frames, width_px, height_px)):
         raise VideoError(f"Could not read video metadata for {path.name}.")
     return {"duration_s": frames / fps, "fps": fps, "width": int(width_px), "height": int(height_px)}
+
+
+def _stream_fps(path: Path, stream: dict) -> float:
+    """First positive rate of avg_frame_rate, r_frame_rate, then OpenCV.
+
+    ffprobe reports avg_frame_rate as "0/0" for some valid MKV/WebM files.
+    """
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            rate = _fraction(str(stream.get(key) or "0/1"))
+        except (ValueError, ZeroDivisionError):
+            continue
+        if math.isfinite(rate) and rate > 0:
+            return rate
+    cap = cv2.VideoCapture(str(path))
+    try:
+        rate = float(cap.get(cv2.CAP_PROP_FPS)) if cap.isOpened() else 0.0
+    finally:
+        cap.release()
+    return rate if math.isfinite(rate) and rate > 0 else 0.0
 
 
 def _fraction(value: str) -> float:
