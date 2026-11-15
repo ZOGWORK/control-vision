@@ -1,0 +1,11 @@
+# Local model training only; the app and CI do not need these packages.
+# Pins match the app environment where training was checked, except onnx:
+# onnx is not installed there, and 1.18.0 was chosen as a recent release
+# that onnxruntime 1.23 can load. It has not been tested in that environment.
+-r requirements-extract.txt
+ultralytics==8.4.210
+torch==2.15.0
+torchvision==0.29.2
+onnx==1.18.0
+onnxruntime==1.23.2
+PyYAML==6.0.3
