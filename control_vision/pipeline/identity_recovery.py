@@ -241,9 +241,9 @@ class IdentityRecovery:
                 # Rule 1: never-assigned track, born after the robot vanished.
                 if track_id in self.ever_assigned or first is None or first.t_s <= last.t_s:
                     continue
+                # A track born more than max_absence_s later cannot get here:
+                # the robot has expired by then (rule 6).
                 elapsed = first.t_s - last.t_s
-                if elapsed > rules.max_absence_s:
-                    continue
                 distance = _distance(last, first.x_ft, first.y_ft)
                 # Rule 2: first footpoint inside the speed gate.
                 if distance > rules.gate_ft(elapsed):
