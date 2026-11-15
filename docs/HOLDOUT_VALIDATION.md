@@ -40,6 +40,10 @@ python -m control_vision.validation.holdout --make-template `
   --output labels\stl-north-q1.json
 ```
 
+`--output` never replaces an existing file (for templates or reports) unless
+`--force` is given, and never replaces a holdout truth file being evaluated,
+even with `--force`. Files are written atomically.
+
 The template lists every seeded team at every sampled source frame. Fill it in:
 
 ```json
