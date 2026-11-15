@@ -207,11 +207,13 @@ class SeedMatchingTests(unittest.TestCase):
         self.assertLess(reads, 100)
 
     def test_untracked_detection_on_the_click_is_reported_as_untracked(self):
-        # The tracker gives a below-threshold detection no ID, so the matcher
-        # cannot use it even with the footpoint on the click.
+        # The tracker gives a detection that never started a track no ID, so the
+        # matcher cannot use it even with the footpoint on the click.
         reads, outcome = self._run_seed_window(box_x=100, track_id=None)
         self.assertIsInstance(outcome, RuntimeError)
-        self.assertIn("a robot was detected 0 px away, but its detection confidence stayed below", str(outcome))
+        self.assertIn("a robot was detected 0 px away, but the tracker never started a track", str(outcome))
+        # The tracker threshold follows the confidence setting, so lowering it can help here.
+        self.assertIn("lower the detection confidence in Settings", str(outcome))
         self.assertNotIn("nearest tracked robot", str(outcome))
         self.assertLess(reads, 100)
 
