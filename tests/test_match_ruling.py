@@ -381,6 +381,10 @@ class MatchRulingUiTests(unittest.TestCase):
         self.project, self.video, self.robots = _seed(self.db)
         _confirm(self.db, self.robots[1001], 20)
         self.db.set_analysis_status(self.video, "ready")
+        # A modal warning would block an offscreen run; record it instead.
+        warning = patch("control_vision.app.main_window.QMessageBox.warning")
+        self.warning = warning.start()
+        self.addCleanup(warning.stop)
         self.window = MainWindow()
         self.window.db, self.window.project_id, self.window.video_id = self.db, self.project, self.video
         self.window.load_match_ruling()
@@ -390,6 +394,8 @@ class MatchRulingUiTests(unittest.TestCase):
         self.window.db = None
         self.window.close()
         self.db.close()
+        # Every action in these tests is valid, so nothing is refused.
+        self.warning.assert_not_called()
 
     def switch(self, match_type, answer):
         from PySide6.QtWidgets import QMessageBox
