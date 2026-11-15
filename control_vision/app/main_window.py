@@ -182,7 +182,8 @@ class ProcessingWorker(QObject):
                                             self.args[5], self.args[6])
             else:
                 result = track_video(*self.args[:5], cancel=lambda: self.cancelled,
-                                     progress=report, logger=self.args[5], photos_dir=self.args[6], confidence_threshold=self.args[7], goal_roi=self.args[8], reid_model_path=self.args[9])
+                                     progress=report, logger=self.args[5], photos_dir=self.args[6], confidence_threshold=self.args[7], goal_roi=self.args[8], reid_model_path=self.args[9],
+                                     alliances=self.args[11])
             self.done.emit((result, self.args[10]))
         except InterruptedError:
             self.failed.emit("Processing was cancelled.")
