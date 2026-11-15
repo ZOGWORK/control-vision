@@ -81,6 +81,9 @@ class ImageFileTests(unittest.TestCase):
         self.assertFalse(unknown.exists())
         with patch("pathlib.Path.write_bytes", side_effect=PermissionError("read-only")):
             self.assertFalse(write_image(self.folder / "locked.png", self.image))
+        with patch("pathlib.Path.write_bytes", side_effect=PermissionError("disk full")), \
+                patch("pathlib.Path.unlink", side_effect=PermissionError("locked")):
+            self.assertFalse(write_image(self.folder / "stuck.png", self.image))
         self.assertFalse((self.folder / "locked.png").exists())
         self.assertIsNone(read_image(self.folder / "absent.png"))
         garbage = self.folder / "garbage.png"
