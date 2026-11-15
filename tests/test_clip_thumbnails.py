@@ -54,12 +54,30 @@ class ClipThumbnailTests(unittest.TestCase):
         self.assertIsNone(thumbnail(broken))
         self.assertFalse(thumbnail_cache_path(broken).exists())
 
+    def test_a_failed_cache_write_is_logged_and_the_frame_still_returned(self):
+        with patch("pathlib.Path.write_bytes", side_effect=PermissionError("read-only folder")), \
+                self.assertLogs("control_vision.pipeline.clips", level="WARNING") as logs:
+            frame = thumbnail(self.clip)
+        self.assertEqual(frame.shape[:2], (135, 240))
+        self.assertFalse(thumbnail_cache_path(self.clip).exists())
+        self.assertIn("read-only folder", logs.output[0])
+
+    def test_non_ascii_project_folder_is_cached_and_reused(self):
+        folder = self.clip.parent / "Équipe ñandú 机器人"
+        folder.mkdir()
+        clip = folder / "event-2.mp4"
+        _write_clip(clip, 120)
+        self.assertEqual(thumbnail(clip).shape[:2], (135, 240))
+        self.assertTrue(thumbnail_cache_path(clip).is_file())
+        with patch("control_vision.pipeline.clips.cv2.VideoCapture", side_effect=AssertionError("decoded")):
+            self.assertAlmostEqual(float(thumbnail(clip).mean()), 120, delta=6)
+
     def test_a_corrupt_cache_is_replaced(self):
         cache = thumbnail_cache_path(self.clip)
         cache.write_bytes(b"not a png")
         frame = thumbnail(self.clip)
         self.assertEqual(frame.shape[:2], (135, 240))
-        self.assertIsNotNone(cv2.imread(str(cache)))
+        self.assertIsNotNone(cv2.imdecode(np.fromfile(cache, dtype=np.uint8), cv2.IMREAD_COLOR))
 
 
 if __name__ == "__main__":
