@@ -358,6 +358,12 @@ class ProjectDatabase:
                 confidence = event["confidence"]
             if scoring_alliance is _UNCHANGED:
                 scoring_alliance = event["scoring_alliance"]
+            if status == "confirmed" and points != 0 and robot_id is None and scoring_alliance is None:
+                # The scoreboard credits an alliance from the recipient or the
+                # attributed robot. With neither, confirmed points would count
+                # for no one, so refuse instead of losing them silently.
+                raise ValueError("Choose the attributed robot or the alliance that receives these points "
+                                 "before confirming them.")
             if robot_id is not None:
                 robot = self.connection.execute("SELECT video_id FROM robots WHERE id=?", (robot_id,)).fetchone()
                 if robot is None:
