@@ -27,6 +27,6 @@ jobs:
       - name: Typecheck
         run: python -m mypy --ignore-missing-imports --check-untyped-defs control_vision/training/train_yolo.py
       - name: Test
-        run: python -m unittest discover -s tests -p test_training_dataset.py -v
+        run: python -m unittest discover -s tests -p "test_training_*.py" -v
       - name: Build source bytecode
         run: python -m compileall -q control_vision/training/train_yolo.py
