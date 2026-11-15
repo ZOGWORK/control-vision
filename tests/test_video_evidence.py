@@ -64,6 +64,29 @@ class VideoEvidenceTests(unittest.TestCase):
         self.assertEqual(metadata["warnings"], [])
         self.assertTrue(capture.released)
 
+    def test_ffprobe_zero_avg_frame_rate_falls_back_to_r_frame_rate(self):
+        result = SimpleNamespace(returncode=0, stdout=(
+            '{"streams":[{"avg_frame_rate":"0/0","r_frame_rate":"30/1","duration":"10",'
+            '"width":1280,"height":720}]}'
+        ))
+        with patch("control_vision.pipeline.ingest.shutil.which", return_value="ffprobe"),              patch("control_vision.pipeline.ingest.subprocess.run", return_value=result),              patch("control_vision.pipeline.ingest._check_decodable", side_effect=lambda _path, meta: meta):
+            metadata = probe_video(Path("match.mkv"))
+        self.assertEqual(metadata["fps"], 30.0)
+
+    def test_ffprobe_without_usable_rates_falls_back_to_opencv_fps(self):
+        class Capture:
+            def isOpened(self): return True
+            def get(self, prop): return {cv2.CAP_PROP_FPS: 25.0}[prop]
+            def release(self): pass
+
+        result = SimpleNamespace(returncode=0, stdout=(
+            '{"streams":[{"avg_frame_rate":"0/0","r_frame_rate":"0/0","duration":"10",'
+            '"width":1280,"height":720}]}'
+        ))
+        with patch("control_vision.pipeline.ingest.shutil.which", return_value="ffprobe"),              patch("control_vision.pipeline.ingest.subprocess.run", return_value=result),              patch("control_vision.pipeline.ingest.cv2.VideoCapture", return_value=Capture()),              patch("control_vision.pipeline.ingest._check_decodable", side_effect=lambda _path, meta: meta):
+            metadata = probe_video(Path("match.webm"))
+        self.assertEqual(metadata["fps"], 25.0)
+
     def test_invalid_ffprobe_rate_does_not_import_video(self):
         result = SimpleNamespace(returncode=0, stdout=(
             '{"streams":[{"avg_frame_rate":"0/1","duration":"10",'
@@ -340,9 +363,39 @@ class VideoEvidenceTests(unittest.TestCase):
         with patch("control_vision.pipeline.scoreboard_ocr.cv2.VideoCapture", return_value=capture), \
              patch.dict(sys.modules, _fake_rapidocr(MagicMock())), \
              patch("control_vision.pipeline.scoreboard_ocr.logging.getLogger"):
-            result = read_scoreboard(Path("match.mp4"), ROI, ROI, sample_fps=1, tail_seconds=100)
+            with self.assertRaisesRegex(RuntimeError, "could not read any frame.*match.mp4"):
+                read_scoreboard(Path("match.mp4"), ROI, ROI, sample_fps=1, tail_seconds=100)
         self.assertEqual(capture.reads, 5)
-        self.assertEqual(result["frames_sampled"], 0)
+
+    def test_ocr_failing_on_every_frame_is_an_error_not_an_empty_read(self):
+        class Capture:
+            released = False
+            def isOpened(self): return True
+            def get(self, prop):
+                return {cv2.CAP_PROP_FPS: 1, cv2.CAP_PROP_FRAME_COUNT: 3}[prop]
+            def set(self, *_): pass
+            def read(self): return True, np.zeros((20, 20, 3), dtype=np.uint8)
+            def release(self): self.released = True
+
+        capture = Capture()
+        with patch("control_vision.pipeline.scoreboard_ocr.cv2.VideoCapture", return_value=capture),              patch.dict(sys.modules, _fake_rapidocr(MagicMock())),              patch("control_vision.pipeline.scoreboard_ocr._read_digits", side_effect=RuntimeError("onnx failed")),              patch("control_vision.pipeline.scoreboard_ocr.logging.getLogger"):
+            with self.assertRaisesRegex(RuntimeError, "could not read any frame.*match.mp4"):
+                read_scoreboard(Path("match.mp4"), ROI, ROI, sample_fps=1, tail_seconds=3)
+        self.assertTrue(capture.released)
+
+    def test_ocr_with_no_digits_still_returns_a_result(self):
+        class Capture:
+            def isOpened(self): return True
+            def get(self, prop):
+                return {cv2.CAP_PROP_FPS: 1, cv2.CAP_PROP_FRAME_COUNT: 2}[prop]
+            def set(self, *_): pass
+            def read(self): return True, np.zeros((20, 20, 3), dtype=np.uint8)
+            def release(self): pass
+
+        with patch("control_vision.pipeline.scoreboard_ocr.cv2.VideoCapture", return_value=Capture()),              patch.dict(sys.modules, _fake_rapidocr(MagicMock())),              patch("control_vision.pipeline.scoreboard_ocr._read_digits", return_value=(None, 0.0, "")):
+            result = read_scoreboard(Path("match.mp4"), ROI, ROI, sample_fps=1, tail_seconds=2)
+        self.assertEqual(result["frames_sampled"], 2)
+        self.assertIsNone(result["red"]["value"])
 
     def test_invalid_scoreboard_roi_is_rejected_up_front(self):
         capture = MagicMock()
@@ -460,6 +513,20 @@ class VideoEvidenceTests(unittest.TestCase):
             run.assert_not_called()
             self.assertIn(missing, str(caught.exception))
             self.assertIn("does not exist", str(caught.exception))
+
+    def test_hung_ffmpeg_times_out_and_removes_partial_clip(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "clip.mp4"
+            def run(command, **kwargs):
+                self.assertIn("timeout", kwargs)
+                output.write_bytes(b"partial")
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+            with patch("control_vision.pipeline.clips.shutil.which", return_value="ffmpeg"),                  patch("control_vision.pipeline.clips.subprocess.run", side_effect=run):
+                with self.assertRaisesRegex(RuntimeError, "did not finish"):
+                    create_highlight(Path("match.mp4"), output, 5.0, "ffmpeg", duration_s=20.0)
+            self.assertFalse(output.exists())
 
     def test_ffmpeg_that_cannot_start_gives_plain_message(self):
         with tempfile.TemporaryDirectory() as folder:
