@@ -765,11 +765,7 @@ class MainWindow(QMainWindow):
         path = Path(selected)
         try:
             metadata = probe_video(path)
-            video_warnings = []
-            if metadata["width"] < 1280 or metadata["height"] < 720:
-                video_warnings.append(f"Resolution is {metadata['width']}×{metadata['height']}; 1280×720 or higher is recommended.")
-            if metadata["fps"] < 15:
-                video_warnings.append(f"Frame rate is {metadata['fps']:.1f} fps; 15 fps or higher is recommended.")
+            video_warnings = list(metadata.get("warnings", []))
             if video_warnings:
                 QMessageBox.warning(self, "Video quality warning", "\n".join(video_warnings) + "\n\nYou can still import this video.")
             event_code, ok = QInputDialog.getText(self, "Match details", "Event code (optional)")
@@ -801,11 +797,8 @@ class MainWindow(QMainWindow):
         self.capture = cv2.VideoCapture(str(path))
         self.canvas.show_frame(frame)
         self.slider.setValue(0)
-        warnings = []
-        if metadata["width"] < 1280 or metadata["height"] < 720: warnings.append("below 720p")
-        if metadata["fps"] < 15: warnings.append("below 15 fps")
         message = f"{path.name}: {metadata['width']}×{metadata['height']}, {metadata['fps']:.2f} fps, {self.duration:.1f} s"
-        if warnings: message += " — warning: " + " and ".join(warnings)
+        if video_warnings: message += " — warning: " + " ".join(video_warnings)
         self.progress_label.setText(message)
         self.statusBar().showMessage("Video imported. Select the field corners in this order: top-left, top-right, bottom-right, bottom-left.")
         self.refresh_home()
@@ -876,7 +869,8 @@ class MainWindow(QMainWindow):
         self.robot_labels = [f"{row['team_number']} ({row['alliance']})" for row in robots]
         self.canvas.show_frame(frame, [(int(x), int(y), str(index + 1)) for index, (x, y) in enumerate(self.corners)])
         self.refresh_home()
-        self.progress_label.setText(f"Loaded {path.name}. Corners: {len(self.corners)}/4; seeded identities: {len(self.seed_points)}.")
+        warning_note = (" Warning: " + " ".join(metadata["warnings"])) if metadata.get("warnings") else ""
+        self.progress_label.setText(f"Loaded {path.name}. Corners: {len(self.corners)}/4; seeded identities: {len(self.seed_points)}.{warning_note}")
         rows = self.db.connection.execute("SELECT robot_id,t_s,x_ft,y_ft FROM tracks WHERE robot_id IN (SELECT id FROM robots WHERE video_id=?) ORDER BY frame", (self.video_id,)).fetchall() if results_available else []
         track_by_id = {}
         for row in rows: track_by_id.setdefault(row["robot_id"], []).append((row["t_s"], row["x_ft"], row["y_ft"]))
@@ -884,11 +878,11 @@ class MainWindow(QMainWindow):
         self.field_map.tracks = self.tracks; self.field_map.current_time = 0; self.field_map.update()
         self.refresh_result_tables()
         if not results_available:
-            self.progress_label.setText(
+            self.progress_label.setText((
                 "This video has not been processed. Set up the field and run analysis to create results."
                 if video["analysis_status"] == "unprocessed"
                 else "The last analysis did not finish. Saved results are hidden until this video is processed successfully."
-            )
+            ) + warning_note)
 
     def select_corner(self):
         if self.video_path is None: return
@@ -917,7 +911,10 @@ class MainWindow(QMainWindow):
                     self.field_map.update()
                     self.progress_label.setText(f"Calibration saved. Four-corner interpolation residual: {reprojection_error_px(self.corners):.2f} px (this is not an independent accuracy check).")
                 except Exception as exc:
-                    QMessageBox.warning(self, "Invalid calibration", str(exc)); self.corners.clear()
+                    self.corners.clear()
+                    self.progress_label.setText(f"Calibration not saved: {exc} Use Calibrate to select the 4 corners again.")
+                    if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
+                    QMessageBox.warning(self, "Invalid calibration", str(exc))
         elif self._mode == "robot":
             dialog = IdentityDialog(self)
             if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -1206,6 +1203,8 @@ class MainWindow(QMainWindow):
             score = value.get("value")
             if score is None: return f"{alliance}: no readable score"
             note = "; later OCR read lower—verify the video" if value.get("later_lower_reading") else ""
+            if value.get("uncorroborated_prior_high"):
+                note += f"; higher reading {max(value.get('outvoted_values') or [score])} was outvoted—verify the video"
             return f"{alliance}: {score} (evidence {value.get('confidence', 0):.0%}; OCR recognition {value.get('recognition_confidence', 0):.0%}; agreement {value.get('agreement', 0):.0%}; {value.get('samples', 0)}/{total_frames} readable frames{note})"
         self.scoreboard_ocr_status.setText(
             "OCR proposal from final scoreboard window — " + describe("Red", red) + "; " + describe("Blue", blue) +
@@ -1259,7 +1258,7 @@ class MainWindow(QMainWindow):
             if event["status"] == "rejected" or event["id"] in existing: continue
             path = folder / f"event-{event['id']}.mp4"
             try:
-                start, end = create_highlight(self.video_path, path, event["t_s"], ffmpeg, after_s=min(3.0, max(0.1, self.duration - event["t_s"])))
+                start, end = create_highlight(self.video_path, path, event["t_s"], ffmpeg, duration_s=self.duration)
                 self.db.add_clip(event["id"], path, start, end); made += 1
             except Exception as exc: errors.append(str(exc))
         self.refresh_clips()
@@ -1299,15 +1298,11 @@ class MainWindow(QMainWindow):
         if not self.db or self.video_id is None: return
         target, _ = QFileDialog.getSaveFileName(self, "Export statistics", "control-vision-stats.csv", "CSV (*.csv)")
         if not target: return
-        events = self.db.events_for_video(self.video_id)
-        video = self.db.connection.execute("SELECT * FROM videos WHERE id=?", (self.video_id,)).fetchone()
-        board = calculate_scoreboard(events, self.db.robots_for_video(self.video_id), int(video["swarm_threshold"]),
-                                     int(video["pollinator_1_threshold"]), int(video["pollinator_2_threshold"]),
-                                     {a for a, col in (("red", "red_disqualified"), ("blue", "blue_disqualified")) if video[col]})
+        video = dict(self.db.connection.execute("SELECT * FROM videos WHERE id=?", (self.video_id,)).fetchone())
         export_stats_csv(Path(target), self.db.robots_for_video(self.video_id),
                          [tuple(row) for row in self.db.tracks_for_video(self.video_id)],
                          [dict(row) for row in self.db.cycles_for_video(self.video_id)], self.zones,
-                         board["team_points"], board["team_ranking_points"])
+                         events=[dict(row) for row in self.db.events_for_video(self.video_id)], video=video)
         QMessageBox.information(self, "Export complete", f"Saved {target}")
 
     def export_json(self):
