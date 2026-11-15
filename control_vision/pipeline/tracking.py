@@ -90,6 +90,18 @@ def _match_initial_seeds(seed_points, detections, assigned_robot_ids, assigned_t
     return best
 
 
+def _no_seed_match_message(seed_points, closest_to_seed: dict[int, float], deadline_s: float) -> str:
+    parts = []
+    for robot_id, seed_x, seed_y in seed_points:
+        distance = closest_to_seed.get(robot_id)
+        nearest = "no robot detected" if distance is None else f"nearest detection {distance:.0f} px away"
+        parts.append(f"seed at ({seed_x:.0f}, {seed_y:.0f}): {nearest}")
+    return (f"No seeded robot was matched to a detected robot in the first {deadline_s:.0f} seconds, so no "
+            f"positions could be recorded and processing stopped early ({'; '.join(parts)}). Seed robots that "
+            "are clearly visible at the start of the video, click near each robot's floor contact point, or "
+            "lower the detection confidence in Settings.")
+
+
 def track_video(
     video_path: Path,
     model_path: Path,
@@ -159,6 +171,9 @@ def track_video(
     seed_to_track: dict[int, int] = {}
     identities_seeded = False
     seed_assignment_deadline_s = 3.0
+    # Closest detection to each seed click during the assignment window,
+    # reported if no seed can be matched.
+    closest_to_seed: dict[int, float] = {}
     robot_ids = [seed[0] for seed in seed_points]
     rows: list[tuple[int, int, float, float, float, float]] = []
     best_photos: dict[int, tuple[int, float, float, object]] = {}
@@ -185,6 +200,11 @@ def track_video(
             if cancel():
                 raise InterruptedError("Processing was cancelled.")
             t_s = frame_index / fps
+            if not seed_to_track and t_s > seed_assignment_deadline_s:
+                # Identities are only assigned in the opening window, so a run
+                # with no matched seed can never record a position. Stop now
+                # instead of processing the rest of the match for nothing.
+                raise RuntimeError(_no_seed_match_message(seed_points, closest_to_seed, seed_assignment_deadline_s))
             try:
                 result = model.track(frame, persist=True, tracker=str(tracker_cfg), imgsz=640, conf=confidence_threshold, iou=0.5, verbose=False)[0]
             except Exception as exc:
@@ -220,6 +240,9 @@ def track_video(
             logger.info("Sampled frame %d (%.3fs): %d robot detections; %d scoring elements in ROI", frame_index, t_s, len(detections), len(roi_balls))
             if not identities_seeded and detections and t_s <= seed_assignment_deadline_s:
                 max_distance = max(60.0, min(frame.shape[:2]) * 0.22)
+                for robot_id, seed_x, seed_y in seed_points:
+                    nearest = min(((x - seed_x) ** 2 + (y - seed_y) ** 2) ** 0.5 for _, x, y, *_ in detections)
+                    closest_to_seed[robot_id] = min(nearest, closest_to_seed.get(robot_id, nearest))
                 matches = _match_initial_seeds(seed_points, detections, set(seed_to_track),
                                                set(seed_to_track.values()), max_distance)
                 for robot_id, (track_id, distance) in matches.items():
