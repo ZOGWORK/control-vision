@@ -32,8 +32,10 @@ def probe_video(path: Path) -> dict[str, float | int]:
                     duration = _positive_float(payload.get("format", {}).get("duration"))
                 if duration is None and fps > 0:
                     cap = cv2.VideoCapture(str(path))
-                    duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps
-                    cap.release()
+                    try:
+                        duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps
+                    finally:
+                        cap.release()
                 width, height = int(stream["width"]), int(stream["height"])
                 if not math.isfinite(fps) or fps <= 0 or width <= 0 or height <= 0 or duration is None or not math.isfinite(duration) or duration <= 0:
                     raise VideoError(f"Could not read video metadata for {path.name}.")
@@ -47,13 +49,13 @@ def probe_video(path: Path) -> dict[str, float | int]:
     try:
         fps = cap.get(cv2.CAP_PROP_FPS)
         frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-        height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        width_px = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        height_px = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
     finally:
         cap.release()
-    if not all(math.isfinite(value) and value > 0 for value in (fps, frames, width, height)):
+    if not all(math.isfinite(value) and value > 0 for value in (fps, frames, width_px, height_px)):
         raise VideoError(f"Could not read video metadata for {path.name}.")
-    return {"duration_s": frames / fps, "fps": fps, "width": int(width), "height": int(height)}
+    return {"duration_s": frames / fps, "fps": fps, "width": int(width_px), "height": int(height_px)}
 
 
 def _fraction(value: str) -> float:
