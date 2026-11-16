@@ -92,6 +92,65 @@ class ProjectDatabaseTests(unittest.TestCase):
                 self.db.review_event(event_id, points=1, **kwargs)
         self.assertEqual(self.db.events_for_video(self.red_video)[0]["status"], "flagged")
 
+    def _live(self, t_s, alliance="red", event_type="hive_tip_teleop", points=20):
+        return {"t_s": t_s, "points": points, "scoring_alliance": alliance,
+                "event_type": event_type, "confidence": "medium"}
+
+    def _live_rows(self):
+        return [row for row in self.db.events_for_video(self.red_video) if row["source"] == "live_overlay"]
+
+    def test_live_overlay_events_are_flagged_alliance_events_without_a_robot(self):
+        counts = self.db.replace_live_overlay_events(
+            self.red_video, [self._live(40.0), self._live(41.0, "blue", "minor_foul", 5)])
+        self.assertEqual(counts, {"added": 2, "kept": 0, "removed": 0})
+        rows = self._live_rows()
+        self.assertEqual([(r["robot_id"], r["status"], r["scoring_alliance"], r["event_type"], r["points"])
+                          for r in rows],
+                         [(None, "flagged", "red", "hive_tip_teleop", 20), (None, "flagged", "blue", "minor_foul", 5)])
+        self.assertEqual(self.db.events_for_video(self.blue_video), [])
+
+    def test_reading_the_overlay_again_keeps_reviews_and_clips_without_duplicates(self):
+        self.db.replace_live_overlay_events(
+            self.red_video, [self._live(10.0), self._live(50.0), self._live(90.0), self._live(120.0)])
+        by_t = {row["t_s"]: row["id"] for row in self._live_rows()}
+        # The reviewer reclassifies one, rejects one and clips one; one stays flagged.
+        self.db.review_event(by_t[10.0], "confirmed", 5, None, "major_foul", "high", "red")
+        self.db.review_event(by_t[50.0], "rejected", 0, None, scoring_alliance="red")
+        self.db.add_clip(by_t[90.0], Path("clip.mp4"), 88.0, 92.0)
+        counts = self.db.replace_live_overlay_events(
+            self.red_video, [self._live(10.4), self._live(50.0), self._live(90.0), self._live(120.0),
+                             self._live(10.6, "blue")])
+        self.assertEqual(counts, {"added": 2, "kept": 3, "removed": 1})
+        rows = self._live_rows()
+        self.assertEqual(sorted((r["t_s"], r["scoring_alliance"], r["status"]) for r in rows),
+                         [(10.0, "red", "confirmed"), (10.6, "blue", "flagged"), (50.0, "red", "rejected"),
+                          (90.0, "red", "flagged"), (120.0, "red", "flagged")])
+        self.assertEqual(next(r for r in rows if r["t_s"] == 10.0)["event_type"], "major_foul")
+        self.assertEqual(len(self.db.clips_for_video(self.red_video)), 1)
+
+    def test_each_kept_live_event_absorbs_only_one_new_proposal(self):
+        self.db.replace_live_overlay_events(self.red_video, [self._live(30.0)])
+        event_id = self._live_rows()[0]["id"]
+        self.db.review_event(event_id, "confirmed", 20, None, scoring_alliance="red")
+        counts = self.db.replace_live_overlay_events(self.red_video, [self._live(30.0), self._live(30.5)])
+        self.assertEqual(counts["added"], 1)
+        self.assertEqual(len(self._live_rows()), 2)
+
+    def test_live_overlay_rerun_leaves_other_sources_alone(self):
+        manual = self.db.add_scoring_event(self.red_robot, 30.0)
+        self.db.replace_live_overlay_events(self.red_video, [self._live(30.0)])
+        self.db.replace_live_overlay_events(self.red_video, [])
+        self.assertEqual([row["id"] for row in self.db.events_for_video(self.red_video)], [manual])
+
+    def test_live_overlay_rejects_bad_alliance_confidence_and_video(self):
+        for event in ({"t_s": 1.0, "scoring_alliance": None}, {"t_s": 1.0, "scoring_alliance": "green"},
+                      {"t_s": 1.0, "scoring_alliance": "red", "confidence": "certain"}):
+            with self.subTest(event=event), self.assertRaises(ValueError):
+                self.db.replace_live_overlay_events(self.red_video, [self._live(5.0), event])
+        with self.assertRaises(ValueError):
+            self.db.replace_live_overlay_events(9999, [self._live(5.0)])
+        self.assertEqual(self._live_rows(), [])
+
     def test_manual_event_requires_existing_robot(self):
         with self.assertRaises(ValueError):
             self.db.add_scoring_event(9999, 1.0)

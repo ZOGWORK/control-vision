@@ -25,6 +25,10 @@ GENERATED_SOURCES = frozenset({"zone_crossing", "goal_roi"})
 EVENT_STATUSES = frozenset({"confirmed", "flagged", "rejected"})
 CONFIDENCES = frozenset({"high", "medium", "low"})
 ALLIANCES = frozenset({"red", "blue"})
+# Events proposed from the live score overlay (control_vision.pipeline.live_score).
+LIVE_OVERLAY_SOURCE = "live_overlay"
+# A re-read proposal this close to a kept live-overlay event is the same event.
+LIVE_OVERLAY_MATCH_S = 1.0
 MATCH_TYPES = frozenset({"qualification", "playoff"})
 # Confirmed events of these types count toward Ranking Points even at 0 points.
 RANKING_COUNT_EVENT_TYPES = frozenset({"hive_tip_auto", "hive_tip_teleop"})
@@ -514,6 +518,49 @@ class ProjectDatabase:
         self.connection.execute("UPDATE robots SET qualification_disqualified=0 WHERE video_id=?", (video_id,))
         self.connection.executemany("UPDATE robots SET qualification_disqualified=1 WHERE video_id=? AND id=?",
                                     [(video_id, robot_id) for robot_id in sorted(team_ids)])
+
+    def replace_live_overlay_events(self, video_id: int, events: list[dict]) -> dict[str, int]:
+        """Store live-overlay proposals for a video, replacing earlier unreviewed ones.
+
+        Flagged live-overlay events without a clip are removed. Events a
+        reviewer confirmed or rejected, or that have a clip, are kept, and a
+        new proposal for the same alliance within LIVE_OVERLAY_MATCH_S of a
+        kept one (each kept event matching once) is not added again, so reading the
+        overlay twice neither duplicates nor undoes a review. New events are
+        alliance-scoped (no robot) and flagged.
+        """
+        for event in events:
+            if event.get("scoring_alliance") not in ALLIANCES:
+                raise ValueError("A live-overlay event needs a red or blue scoring alliance")
+            if event.get("confidence", "low") not in CONFIDENCES:
+                raise ValueError(f"Unsupported confidence: {event.get('confidence')}")
+        with self.connection:
+            if self.connection.execute("SELECT 1 FROM videos WHERE id=?", (video_id,)).fetchone() is None:
+                raise ValueError(f"Unknown video {video_id}")
+            removed = self.connection.execute(
+                "DELETE FROM scoring_events WHERE video_id=? AND source=? AND status='flagged' "
+                "AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.scoring_event_id=scoring_events.id)",
+                (video_id, LIVE_OVERLAY_SOURCE)).rowcount
+            kept = [dict(row) for row in self.connection.execute(
+                "SELECT id,t_s,event_type,scoring_alliance FROM scoring_events WHERE video_id=? AND source=?",
+                (video_id, LIVE_OVERLAY_SOURCE))]
+            used: set[int] = set()
+            added = 0
+            for event in sorted(events, key=lambda item: float(item["t_s"])):
+                # Not matched on event type: the reviewer may have changed it.
+                same = next((row for row in kept if row["id"] not in used
+                             and row["scoring_alliance"] == event["scoring_alliance"]
+                             and abs(float(row["t_s"]) - float(event["t_s"])) <= LIVE_OVERLAY_MATCH_S), None)
+                if same is not None:
+                    used.add(same["id"])
+                    continue
+                self.connection.execute(
+                    "INSERT INTO scoring_events(robot_id,video_id,t_s,points,confidence,status,source,event_type,"
+                    "scoring_alliance) VALUES (NULL,?,?,?,?,'flagged',?,?,?)",
+                    (video_id, float(event["t_s"]), int(event.get("points", 0)), event.get("confidence", "low"),
+                     LIVE_OVERLAY_SOURCE, event.get("event_type", "unclassified"), event["scoring_alliance"]))
+                added += 1
+        return {"added": added, "kept": len(kept), "removed": removed}
 
     def set_scoreboard_ocr(self, video_id: int, result: dict) -> None:
         self.connection.execute("UPDATE videos SET scoreboard_ocr_json=? WHERE id=?",
