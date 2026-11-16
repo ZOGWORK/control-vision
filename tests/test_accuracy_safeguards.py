@@ -359,8 +359,11 @@ class SeedMatchingTests(unittest.TestCase):
         def detect(*args, **kwargs):
             nonlocal frame_index
             robot = SimpleNamespace(cls=[0], xyxy=np.array([[10, 10, 30, 50]]), conf=[0.95], id=[1])
+            # Class 3 (blue_nectar) arrives; class 4 (not in any supported schema) is ignored.
             balls = [] if frame_index < 16 else [SimpleNamespace(cls=[3], xyxy=np.array([[85, 40, 95, 50]]),
-                                                                  conf=[0.9], id=[12])]
+                                                                  conf=[0.9], id=[12]),
+                                                  SimpleNamespace(cls=[4], xyxy=np.array([[60, 40, 70, 50]]),
+                                                                  conf=[0.9], id=[13])]
             frame_index += 1
             return [SimpleNamespace(boxes=[robot, *balls])]
 
