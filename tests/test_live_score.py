@@ -277,6 +277,13 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual([phase for _, phase in proposal["phases"]], [TELEOP, ENDED])
         self.assertEqual(proposal["events"][0]["event_type"], "hive_tip_teleop")
 
+    def test_stream_cutting_into_the_next_match_at_two_fifteen_starts_auto(self):
+        rows = timeline([(0.0, {"clock": 60}), (5.0, {"clock": 0}), (10.0, {"clock": 135}),
+                         (12.0, {"red": 20, "red_tips": 1, "clock": 133})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [TELEOP, ENDED, AUTO])
+        self.assertEqual(proposal["events"][-1]["event_type"], "hive_tip_auto")
+
     def test_clip_opening_on_the_last_teleop_seconds_then_the_next_match(self):
         rows = timeline([(0.0, {"clock": 3}), (5.0, {"clock": 150}), (10.0, {"clock": 145})])
         self.assertEqual([phase for _, phase in match_phases(rows)], [TELEOP, AUTO])
@@ -332,14 +339,14 @@ class FakeCapture:
 
 
 class FakeEngine:
-    def __init__(self, fail_reads=(), fail_locate=0):
-        self.reads, self.fail_reads, self.fail_locate = 0, set(fail_reads), fail_locate
+    def __init__(self, fail_reads=(), fail_locate=0, text="0"):
+        self.reads, self.fail_reads, self.fail_locate, self.text = 0, set(fail_reads), fail_locate, text
 
     def text_rec(self, crops):
         self.reads += 1
         if self.reads in self.fail_reads:
             raise RuntimeError("ONNX error")
-        return [("0", 0.9) for _ in crops], 0.0
+        return [(self.text, 0.9) for _ in crops], 0.0
 
     def __call__(self, frame):
         # Full-frame OCR used to locate the overlay: fail the first probes.
@@ -437,6 +444,14 @@ class ReadOverlayTests(unittest.TestCase):
         self.assertFalse(result["complete"])
         self.assertIn("from 9.5 s", result["stopped_early"])
         self.assertEqual(result["read_until_s"], 9.0)
+
+    def test_an_overlay_with_nothing_readable_is_an_error_not_a_scoreless_read(self):
+        with self.assertRaisesRegex(RuntimeError, "No score, clock or HIVE TIP count"):
+            self.read(FakeCapture(100), FakeEngine(text="~~"))
+
+    def test_ocr_failing_from_the_start_says_why_no_frame_was_read(self):
+        with self.assertLogs("control_vision.pipeline.live_score", level="WARNING"),                 self.assertRaisesRegex(RuntimeError, "Could not read any frame .*: 5 sampled frames in a row"):
+            self.read(FakeCapture(100), FakeEngine(fail_reads=set(range(1, 30))))
 
     def test_complete_read(self):
         result = self.read(FakeCapture(100))
