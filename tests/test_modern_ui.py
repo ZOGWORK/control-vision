@@ -245,6 +245,28 @@ class ShellWindowTests(unittest.TestCase):
         self.assertEqual(self.window.scoreboard_ocr_status.property("tone"), "info")
         self.assertFalse(self.window.use_ocr_btn.isEnabled())
 
+    def test_setup_messages_after_a_failure_do_not_keep_the_failure_tone(self):
+        window = self.window
+        window.processing_failed("model failed")
+        self.assertEqual(window.progress_label.property("tone"), "danger")
+        self.attach()
+        window.video_path = Path("Q1.mp4")
+        window._mode = "corner"
+        window.corners = [[0, 0], [100, 0], [100, 100]]
+        with patch("control_vision.app.main_window.cv2.VideoCapture") as capture:
+            capture.return_value.read.return_value = (False, None)
+            window.canvas_click(0, 100)
+        self.assertIn("Calibration saved", window.progress_label.text())
+        self.assertEqual(window.progress_label.property("tone"), "info")
+        window._mode = "corner"
+        window.corners = [[0, 0], [1, 0], [2, 0]]
+        with patch("control_vision.app.main_window.cv2.VideoCapture") as capture, \
+                patch("control_vision.app.main_window.QMessageBox.warning"):
+            capture.return_value.read.return_value = (False, None)
+            window.canvas_click(3, 0)
+        self.assertIn("Calibration not saved", window.progress_label.text())
+        self.assertEqual(window.progress_label.property("tone"), "danger")
+
     def test_progress_bar_shows_only_while_processing(self):
         window = self.window
         self.assertTrue(window.status_progress.isHidden())
