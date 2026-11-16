@@ -255,8 +255,14 @@ def _seek(cap, logger, video_path: Path, target: int):
     is wrong the video is reopened and decoded forward to ``target``.
     Returns (capture, ok); the old capture is released when replaced.
     """
-    cap.set(cv2.CAP_PROP_POS_FRAMES, target)
-    if cap.get(cv2.CAP_PROP_POS_FRAMES) == target:
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+        position = cap.get(cv2.CAP_PROP_POS_FRAMES)
+    except Exception:
+        # A backend that raises on seeking is handled like one that refuses.
+        logger.warning("Seeking %s to frame %d raised", video_path.name, target, exc_info=True)
+        position = None
+    if position == target:
         return cap, True
     logger.warning("Could not seek %s to frame %d; reopening it and decoding forward", video_path.name, target)
     cap.release()
@@ -445,6 +451,10 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
             # the clock shows which (2:00 next, or 0:00).
             new = (AUTO if clock > _AUTO_END_CLOCK_S else ENDED if clock == 0
                    else TRANSITION if clock <= _TRANSITION_MAX_CLOCK_S else TELEOP)
+        elif phase == ENDED and 0 < clock <= _AUTO_END_CLOCK_S:
+            # After 0:00 the clock only moves again in the next match: a cut
+            # into its countdown or TELEOP (its AUTO was not shown).
+            new = TRANSITION if clock <= _TRANSITION_MAX_CLOCK_S else TELEOP
         elif phase in (TELEOP, ENDED, TRANSITION) and clock >= _NEW_MATCH_MIN_CLOCK_S:
             # The countdown runs into 2:00, so a clock above 2:00 after it is
             # the next match; an opening "TRANSITION" before it was TELEOP.
@@ -517,16 +527,18 @@ def _apply_correction(drop: int, open_rises: list[dict], events: list[dict], log
     of it was corrected. Returns the part of the drop no rise accounts for.
     """
     recent = open_rises[-_CORRECTION_LOOKBACK:]
-    for size in range(1, len(recent) + 1):
-        for chosen in combinations(range(len(recent) - 1, -1, -1), size):
-            if sum(recent[i]["points"] for i in chosen) == drop:
-                for i in chosen:
-                    rise = recent[i]
-                    open_rises.remove(rise)
-                    events.remove(rise)
-                    log.append({"alliance": alliance, "t_s": t_s, "cancelled_rise_t_s": rise["t_s"],
-                                "points": rise["points"]})
-                return 0
+    # Of the sets of rises that add up to the drop, take the one whose oldest
+    # rise is the latest (the entries withdrawn last), then the fewest rises.
+    exact = [chosen for size in range(1, len(recent) + 1) for chosen in combinations(range(len(recent)), size)
+             if sum(recent[i]["points"] for i in chosen) == drop]
+    if exact:
+        best = max(exact, key=lambda chosen: (min(chosen), -len(chosen)))
+        for i in best:
+            rise = recent[i]
+            open_rises.remove(rise)
+            events.remove(rise)
+            log.append({"alliance": alliance, "t_s": t_s, "cancelled_rise_t_s": rise["t_s"], "points": rise["points"]})
+        return 0
     remaining = drop
     while remaining > 0 and open_rises:
         rise = open_rises[-1]
@@ -569,14 +581,29 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
     # next match. The match is the first AUTO that reaches TELEOP (else the
     # last AUTO seen); only readings from its start to the next AUTO count.
     autos = [index for index, (_, phase) in enumerate(phases) if phase == AUTO]
+    # A clock moving again after the end (a cut into the next match's
+    # countdown or TELEOP) also starts another match.
+    cuts = [index for index in range(1, len(phases)) if phases[index - 1][1] == ENDED and phases[index][1] != AUTO]
+    starts = sorted(autos + cuts)
     played = [index for index in autos
-              if any(phase == TELEOP for _, phase in phases[index + 1:next((a for a in autos if a > index), len(phases))])]
+              if any(phase == TELEOP for _, phase in phases[index + 1:next((a for a in starts if a > index), len(phases))])]
     chosen = played[0] if played else (autos[-1] if autos else None)
     in_match = samples
     detail["match_start_s"] = detail["match_end_s"] = None
+    if chosen is None and cuts:
+        # No AUTO was shown: the match is the first stretch with TELEOP play,
+        # bounded by the cuts (the clip opening before a cut, or a cut on).
+        bounds = [0] + cuts + [len(phases)]
+        segments = list(zip(bounds, bounds[1:]))
+        first, last = next(((a, b) for a, b in segments if any(p == TELEOP for _, p in phases[a:b])), segments[0])
+        start = phases[first][0] if first else None
+        end = phases[last][0] if last < len(phases) else None
+        in_match = [s for s in samples if (start is None or float(s["t_s"]) >= start)
+                    and (end is None or float(s["t_s"]) < end)]
+        detail["match_start_s"], detail["match_end_s"] = start, end
     if chosen is not None:
         start = phases[chosen][0]
-        end = next((phases[a][0] for a in autos if a > chosen), None)
+        end = next((phases[a][0] for a in starts if a > chosen), None)
         detail["match_start_s"], detail["match_end_s"] = start, end
         in_match = [s for s in samples if float(s["t_s"]) >= start and (end is None or float(s["t_s"]) < end)]
     for alliance in ("red", "blue"):
