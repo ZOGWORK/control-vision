@@ -93,6 +93,9 @@ def _match_initial_seeds(seed_points, detections, assigned_robot_ids, assigned_t
     return best
 
 
+# Highest class id that is a scoring element: 1-2 in the three-class schema,
+# 1-3 in the four-class one (train_yolo.SUPPORTED_CLASSES). Class 0 is robot.
+MAX_ELEMENT_CLASS_ID = 3
 TRACKER_CONFIG = Path(__file__).resolve().parents[1] / "config" / "botsort.yaml"
 
 
@@ -317,7 +320,10 @@ def track_video(
                     if class_id == 0:
                         tid = int(box.id[0]) if box.id is not None else -1
                         detections.append((tid, center_x, y2, conf, (x1, y1, x2, y2)))
-                    elif class_id in (1, 2) and goal_roi and point_in_polygon(center_x, center_y, goal_roi):
+                    elif 1 <= class_id <= MAX_ELEMENT_CLASS_ID and goal_roi and point_in_polygon(center_x, center_y, goal_roi):
+                        # Classes 1..3 are scoring elements (POLLEN and NECTAR,
+                        # or yellow/red/blue in the four-class schema); any
+                        # other class an unsupported model emits is ignored.
                         track_id = int(box.id[0]) if box.id is not None else -1
                         roi_balls.append((center_x, center_y, conf, track_id))
             if sampled < 30 and not detections:

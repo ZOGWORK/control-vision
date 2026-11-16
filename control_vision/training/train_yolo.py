@@ -29,7 +29,11 @@ from control_vision.training.split_manifest import IMAGE_SUFFIXES, validate_spli
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+")
 MIN_OPSET = 12
-SUPPORTED_CLASSES = (["robot"], ["robot", "pollen", "nectar"])
+# Class 0 is always robot; every other class is a scoring element. The
+# four-class schema (v0.4.0 on) splits elements by colour so a detector can
+# tell yellow POLLEN from each alliance's NECTAR.
+SUPPORTED_CLASSES = (["robot"], ["robot", "pollen", "nectar"],
+                     ["robot", "yellow_pollen", "red_nectar", "blue_nectar"])
 # Import name, pip distribution name. Checked before any training starts.
 TRAINING_PACKAGES = (("yaml", "PyYAML"), ("ultralytics", "ultralytics"),
                      ("onnx", "onnx"), ("onnxruntime", "onnxruntime"))
@@ -76,8 +80,9 @@ def class_names(config: object) -> list[str]:
     else:
         raise ValueError("data.yaml needs a names list or mapping; class 0 must be robot")
     if values not in SUPPORTED_CLASSES:
-        raise ValueError("Supported classes are ['robot'] or ['robot','pollen','nectar'] in that order; "
-                         "alliance color is an attribute, not a class.")
+        raise ValueError("Supported classes are ['robot'], ['robot','pollen','nectar'] or "
+                         "['robot','yellow_pollen','red_nectar','blue_nectar'] in that order; "
+                         "a robot's alliance color is an attribute, not a class.")
     return list(values)
 
 
