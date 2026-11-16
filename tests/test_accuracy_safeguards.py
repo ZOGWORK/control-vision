@@ -339,6 +339,49 @@ class SeedMatchingTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertGreaterEqual(events[0]["t_s"], 1.0)
 
+    def test_goal_element_classes_1_to_3_count_and_class_4_does_not(self):
+        # Four-class models: class 3 (blue_nectar) arriving in the ROI is flagged. Class 4 is in no supported
+        # schema; its box sits more than 35 px (the ROI candidate de-duplication radius) from the class-3 box,
+        # so counting it would add a second event instead of being merged into the first.
+        import numpy as np
+        from types import SimpleNamespace
+
+        class Capture:
+            reads = 0
+            def isOpened(self): return True
+            def get(self, prop):
+                import cv2
+                return 30 if prop == cv2.CAP_PROP_FPS else 35
+            def read(self):
+                self.reads += 1
+                return (True, np.zeros((100, 100, 3), dtype=np.uint8)) if self.reads <= 35 else (False, None)
+            def release(self): pass
+
+        frame_index = 0
+        def detect(*args, **kwargs):
+            nonlocal frame_index
+            robot = SimpleNamespace(cls=[0], xyxy=np.array([[10, 10, 30, 50]]), conf=[0.95], id=[1])
+            # Class 3 (blue_nectar) arrives; class 4 (not in any supported schema) is ignored.
+            balls = [] if frame_index < 16 else [SimpleNamespace(cls=[3], xyxy=np.array([[85, 40, 95, 50]]),
+                                                                  conf=[0.9], id=[12]),
+                                                  SimpleNamespace(cls=[4], xyxy=np.array([[40, 80, 50, 90]]),
+                                                                  conf=[0.9], id=[13])]
+            frame_index += 1
+            return [SimpleNamespace(boxes=[robot, *balls])]
+
+        model = SimpleNamespace(track=detect)
+        with tempfile.TemporaryDirectory() as folder:
+            model_path = Path(folder) / "robot.onnx"
+            model_path.touch()
+            with patch("control_vision.pipeline.tracking.cv2.VideoCapture", return_value=Capture()),                  patch("ultralytics.YOLO", return_value=model):
+                _, _, events = track_video(
+                    Path("match.mp4"), model_path, [[0, 0], [100, 0], [100, 100], [0, 100]], [(1, 20, 50)],
+                    30.0, lambda: False, lambda *_: None, logging.getLogger("four-class-roi-test"),
+                    goal_roi=[[0, 0], [100, 0], [100, 100], [0, 100]],
+                )
+        self.assertEqual(len(events), 1)
+        self.assertGreaterEqual(events[0]["t_s"], 1.0)
+
     def test_moving_roi_element_does_not_create_second_candidate(self):
         import numpy as np
         from types import SimpleNamespace
