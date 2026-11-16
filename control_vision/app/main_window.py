@@ -882,6 +882,11 @@ class MainWindow(QMainWindow):
             item.setBackground(QBrush(QColor(background)) if background else QBrush())
             item.setForeground(QBrush(QColor(foreground)) if foreground else QBrush())
 
+    def _show_status(self, text: str, tone: str = "info"):
+        """Show an analysis message; every message sets its own tone so none inherits the last one."""
+        theme.set_tone(self.progress_label, tone)
+        self.progress_label.setText(text)
+
     def _refresh_workflow(self):
         """Update the setup steps, the page context line and the status bar context."""
         status = None
@@ -1370,8 +1375,7 @@ class MainWindow(QMainWindow):
         self.scoring_table.setRowCount(0)
         self.clip_list.clear()
         self._set_results_enabled(False)
-        theme.set_tone(self.progress_label, "info")
-        self.progress_label.setText("Project opened. Load or import a match video to begin.")
+        self._show_status("Project opened. Load or import a match video to begin.")
         self.slider.setValue(0)
         self.refresh_result_tables()
         self.refresh_home()
@@ -1454,8 +1458,7 @@ class MainWindow(QMainWindow):
         self.slider.setValue(0)
         message = f"{path.name}: {metadata['width']}×{metadata['height']}, {metadata['fps']:.2f} fps, {self.duration:.1f} s"
         if video_warnings: message += " — warning: " + " ".join(video_warnings)
-        theme.set_tone(self.progress_label, "pending" if video_warnings else "info")
-        self.progress_label.setText(message)
+        self._show_status(message, "pending" if video_warnings else "info")
         self.statusBar().showMessage("Video imported. Select the field corners in this order: top-left, top-right, bottom-right, bottom-left.")
         self.refresh_home()
 
@@ -1526,8 +1529,7 @@ class MainWindow(QMainWindow):
         self.canvas.show_frame(frame, [(int(x), int(y), str(index + 1)) for index, (x, y) in enumerate(self.corners)])
         self.refresh_home()
         warning_note = (" Warning: " + " ".join(metadata["warnings"])) if metadata.get("warnings") else ""
-        theme.set_tone(self.progress_label, "pending" if warning_note else "info")
-        self.progress_label.setText(f"Loaded {path.name}. Corners: {len(self.corners)}/4; seeded identities: {len(self.seed_points)}.{warning_note}")
+        self._show_status(f"Loaded {path.name}. Corners: {len(self.corners)}/4; seeded identities: {len(self.seed_points)}.{warning_note}", "pending" if warning_note else "info")
         rows = self.db.connection.execute("SELECT robot_id,t_s,x_ft,y_ft FROM tracks WHERE robot_id IN (SELECT id FROM robots WHERE video_id=?) ORDER BY frame", (self.video_id,)).fetchall() if results_available else []
         track_by_id = {}
         for row in rows: track_by_id.setdefault(row["robot_id"], []).append((row["t_s"], row["x_ft"], row["y_ft"]))
@@ -1535,11 +1537,11 @@ class MainWindow(QMainWindow):
         self.field_map.tracks = self.tracks; self.field_map.current_time = 0; self.field_map.update()
         self.refresh_result_tables()
         if not results_available:
-            self.progress_label.setText((
+            self._show_status((
                 "This video has not been processed. Set up the field and run analysis to create results."
                 if video["analysis_status"] == "unprocessed"
                 else "The last analysis did not finish. Saved results are hidden until this video is processed successfully."
-            ) + warning_note)
+            ) + warning_note, "pending" if warning_note else "info")
 
     def select_corner(self):
         if self.video_path is None: return
@@ -1569,10 +1571,10 @@ class MainWindow(QMainWindow):
                     matrix_from_corners(self.corners)
                     self.db.save_calibration(self.video_id, self.corners, self.zones)
                     self.field_map.update()
-                    self.progress_label.setText(f"Calibration saved. Four-corner interpolation residual: {reprojection_error_px(self.corners):.2f} px (this is not an independent accuracy check).")
+                    self._show_status(f"Calibration saved. Four-corner interpolation residual: {reprojection_error_px(self.corners):.2f} px (this is not an independent accuracy check).")
                 except Exception as exc:
                     self.corners.clear()
-                    self.progress_label.setText(f"Calibration not saved: {exc} Use Calibrate to select the 4 corners again.")
+                    self._show_status(f"Calibration not saved: {exc} Use Calibrate to select the 4 corners again.", "danger")
                     if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
                     QMessageBox.warning(self, "Invalid calibration", str(exc))
         elif self._mode == "robot":
@@ -1581,7 +1583,7 @@ class MainWindow(QMainWindow):
                 robot_id = self.db.add_robot(self.video_id, dialog.team.value(), dialog.alliance.currentText(), x, y)
                 self.seed_points.append((robot_id, x, y))
                 self.robot_labels.append(f"{dialog.team.value()} ({dialog.alliance.currentText()})")
-                self.progress_label.setText("Robot identities: " + ", ".join(self.robot_labels))
+                self._show_status("Robot identities: " + ", ".join(self.robot_labels))
                 if self.capture:
                     self.capture.set(cv2.CAP_PROP_POS_MSEC, 0); ok, frame = self.capture.read()
                     if ok: self.canvas.show_frame(frame, [(sx, sy, label) for (_, sx, sy), label in zip(self.seed_points, self.robot_labels)])
@@ -1633,7 +1635,7 @@ class MainWindow(QMainWindow):
         self._worker.failed.connect(self.processing_failed)
         self._worker.done.connect(self._thread.quit); self._worker.failed.connect(self._thread.quit)
         self._processing_active = True
-        theme.set_tone(self.progress_label, "info")
+        self._show_status("Starting analysis…")
         self.status_progress.setValue(0); self.status_progress.show()
         self._refresh_workflow()
         try:
@@ -1642,7 +1644,7 @@ class MainWindow(QMainWindow):
             self.processing_failed(f"Could not start analysis: {exc}")
 
     def show_progress(self, stage, percent, detail):
-        self.progress_label.setText(f"{stage} — {percent:.0f}% — {detail}")
+        self._show_status(f"{stage} — {percent:.0f}% — {detail}")
         self.status_progress.setValue(max(0, min(100, round(percent))))
         self._step_widgets["process"][1].setText(f"{stage} — {percent:.0f}%")
 
@@ -1701,7 +1703,7 @@ class MainWindow(QMainWindow):
                     "; their trails and statistics are empty.")
             self.log_view.addItem(note)
             message += " " + note
-        self.progress_label.setText(message)
+        self._show_status(message, "pending" if missing else "info")
         self.refresh_result_tables()
 
     def refresh_result_tables(self):
@@ -2080,8 +2082,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             message += f" The failed status could not be saved either: {exc}"
         self._set_results_enabled(False)
-        theme.set_tone(self.progress_label, "danger")
-        self.progress_label.setText(message)
+        self._show_status(message, "danger")
         self.log_view.addItem(message)
         self.process_btn.setEnabled(True)
         self._processing_active = False
