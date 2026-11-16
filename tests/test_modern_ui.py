@@ -35,7 +35,7 @@ class ThemeTokenTests(unittest.TestCase):
         self.assertEqual(self.theme.row_colours(tokens, "rejected", "low"), (None, tokens.text_muted))
 
     def test_status_and_confidence_labels(self):
-        self.assertIn("Pending review", self.theme.status_label("flagged"))
+        self.assertIn("Needs review", self.theme.status_label("flagged"))
         self.assertIn("Confirmed", self.theme.status_label("confirmed"))
         self.assertIn("Rejected", self.theme.status_label("rejected"))
         self.assertEqual(self.theme.status_label("something-new"), "something-new")
@@ -152,12 +152,12 @@ class ShellWindowTests(unittest.TestCase):
         window = self.window
         self.assertIn("process the video", window.nav.item(window._nav_rows[4]).toolTip())
         window._set_results_enabled(True)
-        self.assertEqual(window.nav.item(window._nav_rows[4]).toolTip(), "Scoring timeline (Ctrl+4)")
+        self.assertEqual(window.nav.item(window._nav_rows[4]).toolTip(), "Scoring timeline (Ctrl+6)")
         window._set_review_badge(2)
         window._sync_nav()
-        self.assertIn("2 event(s) pending", window.nav.item(window._nav_rows[3]).toolTip())
+        self.assertIn("2 event(s) need review", window.nav.item(window._nav_rows[3]).toolTip())
         window._set_review_badge(0)
-        self.assertEqual(window.nav.item(window._nav_rows[3]).toolTip(), "Review queue (Ctrl+3)")
+        self.assertEqual(window.nav.item(window._nav_rows[3]).toolTip(), "Review queue (Ctrl+5)")
 
     def test_minimum_window_width_fits_every_panel(self):
         # Fixed and minimum widths only, so the check does not depend on installed fonts.
@@ -192,7 +192,7 @@ class ShellWindowTests(unittest.TestCase):
         self.assertEqual(self.window.review_table.item(0, 0).data(0x0100), event)
         self.assertIn("(1)", self.window.nav.item(self.window._nav_rows[3]).text())
         status = self.window.review_table.item(0, 7)
-        self.assertIn("Pending review", status.text())
+        self.assertIn("Needs review", status.text())
         tokens = self.window._tokens
         self.assertEqual(status.background().color().name().lower(), tokens.pending_bg.lower())
         # Switching theme re-tints the rows without rebuilding them.
