@@ -296,9 +296,11 @@ class ProposalTests(unittest.TestCase):
 class FakeCapture:
     """A 10 fps video of ``frames`` frames whose decoding fails from ``fail_at`` on."""
 
-    def __init__(self, frames, fail_at=None, raise_at=(), refuse_rewind=False):
+    def __init__(self, frames, fail_at=None, raise_at=(), refuse_rewind=False, refuse_seek=False, decoded=None):
         self.frames, self.fail_at, self.position = frames, fail_at, 0
-        self.raise_at, self.refuse_rewind = set(raise_at), refuse_rewind
+        self.raise_at, self.refuse_rewind, self.refuse_seek = set(raise_at), refuse_rewind, refuse_seek
+        # Positions of the frames decoded with read(), shared across reopened captures.
+        self.decoded = decoded if decoded is not None else []
 
     def isOpened(self):
         return True
@@ -308,7 +310,7 @@ class FakeCapture:
                 cv2.CAP_PROP_POS_FRAMES: float(self.position)}[prop]
 
     def set(self, prop, value):
-        if not (self.refuse_rewind and value == 0):
+        if not (self.refuse_seek or (self.refuse_rewind and value == 0)):
             self.position = int(value)
 
     def _ok(self):
@@ -322,6 +324,7 @@ class FakeCapture:
         return self._ok()
 
     def read(self):
+        self.decoded.append(self.position)
         return (True, np.zeros((300, 1920, 3), np.uint8)) if self._ok() else (False, None)
 
     def release(self):
@@ -407,6 +410,33 @@ class ReadOverlayTests(unittest.TestCase):
         self.assertEqual(result["samples"][0]["t_s"], 0.0)
         self.assertEqual(len(result["samples"]), 20)
         self.assertEqual(fresh.position, 100)
+
+    def test_refused_probe_seeks_still_probe_the_right_frames(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from control_vision.pipeline import live_score
+        decoded: list = []
+        engine = FakeEngine(fail_locate=1)  # the first probe (frame 50) is searched but fails
+        with patch.object(live_score, "_engine", return_value=engine),                 patch.object(live_score.cv2, "VideoCapture",
+                             side_effect=lambda *_: FakeCapture(100, refuse_seek=True, decoded=decoded)),                 self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            result = live_score.read_live_overlay(Path("match.mp4"), sample_fps=2.0)
+        self.assertEqual(decoded[:2], [50, 35])
+        self.assertEqual(result["samples"][0]["t_s"], 0.0)
+        self.assertEqual(len(result["samples"]), 20)
+        self.assertTrue(result["complete"])
+
+    def test_no_searchable_probe_is_a_reader_failure_not_a_missing_overlay(self):
+        for capture, engine in ((FakeCapture(100), FakeEngine(fail_locate=5)),
+                                (FakeCapture(100, raise_at={50, 35, 65, 20, 80}), FakeEngine())):
+            with self.subTest(engine=engine.fail_locate),                     self.assertLogs("control_vision.pipeline.live_score", level="WARNING"),                     self.assertRaisesRegex(RuntimeError, "probe frames .* may be broken"):
+                self.read(capture, engine, layout=None)
+
+    def test_an_unreadable_last_sample_marks_the_read_incomplete(self):
+        with self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            result = self.read(FakeCapture(100), FakeEngine(fail_reads={20}))
+        self.assertFalse(result["complete"])
+        self.assertIn("from 9.5 s", result["stopped_early"])
+        self.assertEqual(result["read_until_s"], 9.0)
 
     def test_complete_read(self):
         result = self.read(FakeCapture(100))
