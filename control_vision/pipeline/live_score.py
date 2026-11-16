@@ -272,11 +272,13 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
         samples: list[dict] = []
         failures = 0
         index = 0
+        stopped: str | None = None
         while index < frame_count:
             if cancel and cancel():
                 raise InterruptedError("Reading the live score overlay was cancelled.")
             if index % stride:
                 if not cap.grab():
+                    stopped = f"the video could not be decoded past {index / fps:.1f} s"
                     break
                 index += 1
                 continue
@@ -286,6 +288,8 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
                 failures += 1
                 logger.warning("Skipped undecodable frame %s in %s", index - 1, video_path.name)
                 if failures >= _MAX_CONSECUTIVE_READ_FAILURES:
+                    stopped = (f"{failures} sampled frames in a row could not be decoded "
+                               f"at {(index - 1) / fps:.1f} s")
                     break
                 continue
             failures = 0
@@ -298,7 +302,14 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
         cap.release()
     if not samples:
         raise RuntimeError(f"Could not read any frame of {video_path.name}.")
-    return {"source": "live_overlay", "sample_fps": sample_fps, "layout": layout.as_dict(), "samples": samples}
+    duration = frame_count / fps
+    if stopped:
+        # Events after this point are missing, so callers must not treat the
+        # proposals as covering the whole match.
+        logger.warning("Stopped reading the live overlay of %s early: %s", video_path.name, stopped)
+    return {"source": "live_overlay", "sample_fps": sample_fps, "layout": layout.as_dict(), "samples": samples,
+            "complete": stopped is None, "stopped_early": stopped,
+            "read_until_s": samples[-1]["t_s"], "duration_s": round(duration, 3)}
 
 
 # A reading counts once this many consecutive readable samples agree on it.
@@ -335,16 +346,26 @@ AUTO, TRANSITION, TELEOP, ENDED = "AUTO", "TRANSITION", "TELEOP", "ENDED"
 # (8 s or less), then counts 2:00 to 0:00 in TELEOP.
 _AUTO_END_CLOCK_S = 120
 _TRANSITION_MAX_CLOCK_S = 8
+# A stable clock at or above this after TELEOP or the end of a match is a new
+# match starting (its AUTO counts down from 2:30).
+_NEW_MATCH_MIN_CLOCK_S = 140
 
 
 def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> list[tuple[float, str]]:
-    """(time, phase) each time the match phase changes, from the stable clock."""
+    """(time, phase) each time the match phase changes, from the stable clock.
+
+    A clip may open on the previous match (its TELEOP or its 0:00 clock) or
+    run into the next one, so a clock that jumps back up to AUTO time after
+    TELEOP or the end starts a new AUTO.
+    """
     phases: list[tuple[float, str]] = []
     phase: str | None = None
     previous: int | None = None
     for t_s, clock in stable_steps(samples, "clock_s", min_samples):
         if phase is None:
-            new = AUTO if clock > _AUTO_END_CLOCK_S else TELEOP
+            new = AUTO if clock > _AUTO_END_CLOCK_S else ENDED if clock == 0 else TELEOP
+        elif phase in (TELEOP, ENDED) and clock >= _NEW_MATCH_MIN_CLOCK_S:
+            new = AUTO
         elif phase == AUTO and clock <= _TRANSITION_MAX_CLOCK_S and previous is not None and previous >= _AUTO_END_CLOCK_S - 2:
             new = TRANSITION
         elif phase == AUTO and _TRANSITION_MAX_CLOCK_S < clock < _AUTO_END_CLOCK_S:
@@ -442,10 +463,20 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
     phases = match_phases(samples, min_samples)
     events: list[dict] = []
     detail: dict = {"phases": phases, "corrections": []}
-    # A clip can start on the previous match's final score; the match starts
-    # from zero when AUTO begins, so only readings from then on count.
-    match_start = next((t_s for t_s, phase in phases if phase == AUTO), None)
-    in_match = samples if match_start is None else [s for s in samples if float(s["t_s"]) >= match_start]
+    # A clip can start on the previous match's final score or run into the
+    # next match. The match is the first AUTO that reaches TELEOP (else the
+    # last AUTO seen); only readings from its start to the next AUTO count.
+    autos = [index for index, (_, phase) in enumerate(phases) if phase == AUTO]
+    played = [index for index in autos
+              if any(phase == TELEOP for _, phase in phases[index + 1:next((a for a in autos if a > index), len(phases))])]
+    chosen = played[0] if played else (autos[-1] if autos else None)
+    in_match = samples
+    detail["match_start_s"] = detail["match_end_s"] = None
+    if chosen is not None:
+        start = phases[chosen][0]
+        end = next((phases[a][0] for a in autos if a > chosen), None)
+        detail["match_start_s"], detail["match_end_s"] = start, end
+        in_match = [s for s in samples if float(s["t_s"]) >= start and (end is None or float(s["t_s"]) < end)]
     for alliance in ("red", "blue"):
         tips = stable_steps(in_match, f"{alliance}_tips", min_samples)
         scores = stable_steps(in_match, f"{alliance}_score", min_samples)

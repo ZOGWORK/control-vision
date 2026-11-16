@@ -218,10 +218,89 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual([(e["event_type"], e["points"]) for e in events],
                          [("major_foul", 20), ("unclassified", 8)])
 
+    def test_clip_opening_on_the_previous_matchs_final_clock(self):
+        rows = [sample(t / 2, red=88, blue=40, red_tips=4, blue_tips=2, clock=0) for t in range(6)]
+        rows += timeline([(0.0, {"clock": 150}), (10.0, {"red": 20, "red_tips": 1, "clock": 140}),
+                          (40.0, {"clock": 110})])
+        for row in rows[6:]:
+            row["t_s"] += 3.0
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [ENDED, AUTO, TELEOP])
+        self.assertEqual(proposal["match_start_s"], 3.0)
+        self.assertEqual([(e["event_type"], e["t_s"]) for e in proposal["events"]], [("hive_tip_auto", 13.0)])
+
+    def test_clip_running_into_the_next_match_stops_at_its_auto(self):
+        rows = timeline([(5.0, {"clock": 110}), (20.0, {"red": 20, "red_tips": 1}), (30.0, {"clock": 0}),
+                         (35.0, {"clock": 150, "red": 0, "red_tips": 0}), (40.0, {"red": 20, "red_tips": 1})])
+        proposal = propose_events(rows)
+        self.assertEqual(proposal["match_end_s"], 35.0)
+        self.assertEqual([(e["event_type"], e["t_s"]) for e in proposal["events"]], [("hive_tip_teleop", 20.0)])
+
     def test_no_readings(self):
         proposal = propose_events([sample(0), sample(0.5)])
         self.assertEqual(proposal["events"], [])
         self.assertIsNone(summarize(proposal)["red"]["last_stable_score"])
+
+
+class FakeCapture:
+    """A 10 fps video of ``frames`` frames whose decoding fails from ``fail_at`` on."""
+
+    def __init__(self, frames, fail_at=None):
+        self.frames, self.fail_at, self.position = frames, fail_at, 0
+
+    def isOpened(self):
+        return True
+
+    def get(self, prop):
+        return {cv2.CAP_PROP_FPS: 10.0, cv2.CAP_PROP_FRAME_COUNT: float(self.frames)}[prop]
+
+    def set(self, prop, value):
+        self.position = int(value)
+
+    def _ok(self):
+        ok = self.fail_at is None or self.position < self.fail_at
+        self.position += 1
+        return ok
+
+    def grab(self):
+        return self._ok()
+
+    def read(self):
+        return (True, np.zeros((300, 1920, 3), np.uint8)) if self._ok() else (False, None)
+
+    def release(self):
+        pass
+
+
+class FakeEngine:
+    def text_rec(self, crops):
+        return [("0", 0.9) for _ in crops], 0.0
+
+
+class ReadOverlayTests(unittest.TestCase):
+    LAYOUT = layout_from_labels((719, 111, 778, 141), (1141, 108, 1207, 143), (300, 1920, 3))
+
+    def read(self, capture):
+        from pathlib import Path
+        from unittest.mock import patch
+        from control_vision.pipeline import live_score
+        with patch.object(live_score, "_engine", return_value=FakeEngine()), \
+                patch.object(live_score.cv2, "VideoCapture", return_value=capture):
+            return live_score.read_live_overlay(Path("match.mp4"), layout=self.LAYOUT, sample_fps=2.0)
+
+    def test_complete_read(self):
+        result = self.read(FakeCapture(100))
+        self.assertTrue(result["complete"])
+        self.assertIsNone(result["stopped_early"])
+        self.assertEqual(len(result["samples"]), 20)
+
+    def test_a_decode_failure_partway_is_reported(self):
+        with self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            result = self.read(FakeCapture(100, fail_at=42))
+        self.assertFalse(result["complete"])
+        self.assertIn("4.2", result["stopped_early"])
+        self.assertLess(result["read_until_s"], 4.2)
+        self.assertEqual(result["duration_s"], 10.0)
 
 
 if __name__ == "__main__":

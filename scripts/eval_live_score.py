@@ -65,7 +65,8 @@ def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> N
             result["error"] = str(exc)
         else:
             result.update(seconds=round(time.time() - started, 1), layout=reading["layout"],
-                          samples=reading["samples"])
+                          samples=reading["samples"], complete=reading["complete"],
+                          stopped_early=reading["stopped_early"])
         result["official"] = _official(official_dir, row["event_code"], result["match"])
         target.write_text(json.dumps(result), encoding="utf-8")
         print(row["file"], result.get("error", "ok"), flush=True)
@@ -82,6 +83,8 @@ def report(results_dir: Path) -> None:
         if "error" in result:
             failed.append(f"{path.stem}: {result['error']}")
             continue
+        if result.get("complete") is False:
+            failed.append(f"{path.stem}: read stopped early ({result.get('stopped_early')}); compared anyway")
         official = result.get("official")
         if not official:
             failed.append(f"{path.stem}: no official result")
