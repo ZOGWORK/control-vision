@@ -2052,13 +2052,16 @@ class MainWindow(QMainWindow):
         # Switching videos is blocked while reading, but never write one
         # video's events into another.
         if not self.db or self.video_id is None or self.video_id != self._live_video_id:
+            theme.set_tone(self.live_score_status, "danger")
+            self.live_score_status.setText("The live score overlay was read for a video that is no longer loaded, "
+                                           "so nothing was added to Review. Read it again for this video.")
             return
         try:
             # A read that stopped early replaces proposals only up to where it read.
             until = None if result.get("complete", True) else result.get("read_until_s")
             counts = self.db.replace_live_overlay_events(self.video_id, result["events"], until)
-        except ValueError as exc:
-            self.live_score_failed(str(exc)); return
+        except (ValueError, sqlite3.Error) as exc:
+            self.live_score_failed(f"the events could not be saved ({exc})"); return
         self.refresh_result_tables()
         events = result["events"]
         tips = sum(1 for event in events if event["event_type"].startswith("hive_tip"))

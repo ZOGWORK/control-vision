@@ -733,6 +733,19 @@ class LiveScoreUiTests(unittest.TestCase):
         self.window.live_score_done({"complete": True, "events": self.events})
         self.assertEqual(self._live_rows(self.video_id), [])
         self.assertEqual(self._live_rows(self.other_video), [])
+        self.assertIn("nothing was added to Review", self.window.live_score_status.text())
+        self.assertEqual(self.window.live_score_status.property("tone"), "danger")
+
+    def test_database_error_while_saving_is_reported_not_raised(self):
+        import sqlite3
+        self.window._live_video_id = self.video_id
+        self.window._live_active = True
+        with patch.object(self.db, "replace_live_overlay_events", side_effect=sqlite3.OperationalError("database is locked")):
+            self.window.live_score_done({"complete": True, "events": self.events})
+        text = self.window.live_score_status.text()
+        self.assertIn("could not be saved (database is locked)", text)
+        self.assertEqual(self.window.live_score_status.property("tone"), "danger")
+        self.assertFalse(self.window._live_active)
 
     def test_failure_reenables_the_button_and_shows_the_error(self):
         self.window._live_active = True
