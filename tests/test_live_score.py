@@ -264,6 +264,29 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, ENDED])
         self.assertIn("end-of-match", proposal["events"][0]["note"])
 
+    def test_clip_opening_in_the_countdown_keeps_its_tip_in_auto(self):
+        rows = timeline([(0.0, {"clock": 6}), (2.0, {"red": 20, "red_tips": 1, "clock": 5}),
+                         (8.0, {"clock": 120}), (20.0, {"clock": 108})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [TRANSITION, TELEOP])
+        self.assertEqual(proposal["events"][0]["event_type"], "hive_tip_auto")
+
+    def test_clip_opening_on_the_last_teleop_seconds_is_relabelled_teleop(self):
+        rows = timeline([(0.0, {"clock": 6}), (2.0, {"red": 20, "red_tips": 1, "clock": 4}), (7.0, {"clock": 0})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [TELEOP, ENDED])
+        self.assertEqual(proposal["events"][0]["event_type"], "hive_tip_teleop")
+
+    def test_clip_opening_on_the_last_teleop_seconds_then_the_next_match(self):
+        rows = timeline([(0.0, {"clock": 3}), (5.0, {"clock": 150}), (10.0, {"clock": 145})])
+        self.assertEqual([phase for _, phase in match_phases(rows)], [TELEOP, AUTO])
+
+    def test_cut_from_the_countdown_to_the_final_clock_ends_the_match(self):
+        rows = timeline([(5.0, {"clock": 121}), (6.0, {"clock": 7}), (8.0, {"clock": 0}), (12.0, {"red": 18})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, TRANSITION, ENDED])
+        self.assertIn("end-of-match", proposal["events"][0]["note"])
+
     def test_no_readings(self):
         proposal = propose_events([sample(0), sample(0.5)])
         self.assertEqual(proposal["events"], [])
@@ -273,22 +296,27 @@ class ProposalTests(unittest.TestCase):
 class FakeCapture:
     """A 10 fps video of ``frames`` frames whose decoding fails from ``fail_at`` on."""
 
-    def __init__(self, frames, fail_at=None):
+    def __init__(self, frames, fail_at=None, raise_at=(), refuse_rewind=False):
         self.frames, self.fail_at, self.position = frames, fail_at, 0
+        self.raise_at, self.refuse_rewind = set(raise_at), refuse_rewind
 
     def isOpened(self):
         return True
 
     def get(self, prop):
-        return {cv2.CAP_PROP_FPS: 10.0, cv2.CAP_PROP_FRAME_COUNT: float(self.frames)}[prop]
+        return {cv2.CAP_PROP_FPS: 10.0, cv2.CAP_PROP_FRAME_COUNT: float(self.frames),
+                cv2.CAP_PROP_POS_FRAMES: float(self.position)}[prop]
 
     def set(self, prop, value):
-        self.position = int(value)
+        if not (self.refuse_rewind and value == 0):
+            self.position = int(value)
 
     def _ok(self):
-        ok = self.fail_at is None or self.position < self.fail_at
+        position = self.position
         self.position += 1
-        return ok
+        if position in self.raise_at:
+            raise cv2.error("corrupt frame")
+        return self.fail_at is None or position < self.fail_at
 
     def grab(self):
         return self._ok()
@@ -346,6 +374,39 @@ class ReadOverlayTests(unittest.TestCase):
         with self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
             result = self.read(FakeCapture(100), FakeEngine(fail_locate=2), layout=None)
         self.assertEqual(result["layout"]["red_score"], list(self.LAYOUT.red_score))
+
+    def test_a_decoder_exception_skips_only_that_frame(self):
+        # Frame 10 is read (sampled every 5th frame), frame 11 is only grabbed.
+        with self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            result = self.read(FakeCapture(100, raise_at={10}))
+        self.assertTrue(result["complete"])
+        self.assertEqual(len(result["samples"]), 19)
+        with self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            result = self.read(FakeCapture(100, raise_at={11}))
+        self.assertFalse(result["complete"])
+        self.assertIn("1.1", result["stopped_early"])
+        self.assertEqual(len(result["samples"]), 3)
+
+    def test_a_probe_decoder_exception_moves_on_to_the_next_probe(self):
+        with self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            # Frame 50 is the first probe (and later a sampled frame, skipped).
+            result = self.read(FakeCapture(100, raise_at={50}), layout=None)
+        self.assertEqual(result["layout"]["red_score"], list(self.LAYOUT.red_score))
+        self.assertTrue(result["complete"])
+        self.assertEqual(len(result["samples"]), 19)
+
+    def test_a_refused_rewind_reopens_the_video_so_times_start_at_zero(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from control_vision.pipeline import live_score
+        stuck, fresh = FakeCapture(100, refuse_rewind=True), FakeCapture(100)
+        with patch.object(live_score, "_engine", return_value=FakeEngine()), \
+                patch.object(live_score.cv2, "VideoCapture", side_effect=[stuck, fresh]), \
+                self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            result = live_score.read_live_overlay(Path("match.mp4"), sample_fps=2.0)
+        self.assertEqual(result["samples"][0]["t_s"], 0.0)
+        self.assertEqual(len(result["samples"]), 20)
+        self.assertEqual(fresh.position, 100)
 
     def test_complete_read(self):
         result = self.read(FakeCapture(100))

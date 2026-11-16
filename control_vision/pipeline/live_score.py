@@ -235,6 +235,18 @@ def _engine():
     return RapidOCR()
 
 
+def _decode(cap, logger, video_path: Path, index: int, grab: bool = False):
+    """(ok, frame) for the next frame; a decoder that raises counts as a failed decode."""
+    try:
+        if grab:
+            return bool(cap.grab()), None
+        ok, frame = cap.read()
+        return bool(ok) and frame is not None, frame
+    except Exception:
+        logger.warning("The decoder raised on frame %s of %s", index, video_path.name, exc_info=True)
+        return False, None
+
+
 def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sample_fps: float = 2.0,
                       progress: Callable[[float, str], None] | None = None,
                       cancel: Callable[[], bool] | None = None) -> dict:
@@ -259,8 +271,8 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
         if layout is None:
             for fraction in _LOCATE_FRACTIONS:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(fraction * frame_count))
-                ok, frame = cap.read()
-                if ok and frame is not None:
+                ok, frame = _decode(cap, logger, video_path, int(fraction * frame_count))
+                if ok:
                     try:
                         layout = locate_overlay(engine, frame)
                     except Exception:
@@ -274,6 +286,14 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
                 raise RuntimeError(f"Could not find the live score overlay in {video_path.name}. The video needs "
                                    "the FTC Live overlay with the \"Red\" and \"Blue\" alliance labels.")
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            if cap.get(cv2.CAP_PROP_POS_FRAMES) != 0:
+                # Timestamps count frames from the start, so a backend that
+                # refuses to rewind must not continue from the probe position.
+                logger.warning("Could not rewind %s after locating the overlay; reopening it", video_path.name)
+                cap.release()
+                cap = cv2.VideoCapture(str(video_path))
+                if not cap.isOpened():
+                    raise RuntimeError(f"Could not read video file {video_path.name}.")
         stride = max(1, round(fps / sample_fps))
         samples: list[dict] = []
         failures = 0
@@ -283,15 +303,15 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
             if cancel and cancel():
                 raise InterruptedError("Reading the live score overlay was cancelled.")
             if index % stride:
-                if not cap.grab():
+                if not _decode(cap, logger, video_path, index, grab=True)[0]:
                     stopped = f"the video could not be decoded past {index / fps:.1f} s"
                     break
                 index += 1
                 continue
-            ok, frame = cap.read()
+            ok, frame = _decode(cap, logger, video_path, index)
             index += 1
             row = None
-            if ok and frame is not None:
+            if ok:
                 try:
                     row = read_frame(engine.text_rec, frame, layout)
                 except Exception:
@@ -378,8 +398,16 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
     previous: int | None = None
     for t_s, clock in stable_steps(samples, "clock_s", min_samples):
         if phase is None:
-            new = AUTO if clock > _AUTO_END_CLOCK_S else ENDED if clock == 0 else TELEOP
-        elif phase in (TELEOP, ENDED) and clock >= _NEW_MATCH_MIN_CLOCK_S:
+            # A clip opening on 0:01-0:08 may be in the TRANSITION countdown
+            # or the last seconds of TELEOP; it is taken as TRANSITION until
+            # the clock shows which (2:00 next, or 0:00).
+            new = (AUTO if clock > _AUTO_END_CLOCK_S else ENDED if clock == 0
+                   else TRANSITION if clock <= _TRANSITION_MAX_CLOCK_S else TELEOP)
+        elif phase in (TELEOP, ENDED, TRANSITION) and clock >= _NEW_MATCH_MIN_CLOCK_S:
+            # The countdown runs into 2:00, so 2:20 or more after it is the
+            # next match; an opening "TRANSITION" before it was TELEOP.
+            if phase == TRANSITION and len(phases) == 1:
+                phases[0] = (phases[0][0], TELEOP)
             new = AUTO
         elif (phase == AUTO and clock <= _TRANSITION_MAX_CLOCK_S and previous is not None
               and abs(previous - _AUTO_END_CLOCK_S) <= 2):
@@ -394,6 +422,14 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
             new = TELEOP
         elif phase == TRANSITION and clock > _TRANSITION_MAX_CLOCK_S:
             new = TELEOP
+        elif phase == TRANSITION and clock == 0:
+            # The countdown always runs into 2:00, never 0:00 (checked on
+            # every measured match), so an opening "TRANSITION" that reaches
+            # 0:00 was the end of TELEOP; one that followed AUTO is a cut to
+            # the post-match overlay.
+            if len(phases) == 1:
+                phases[0] = (phases[0][0], TELEOP)
+            new = ENDED
         elif phase == TELEOP and clock == 0:
             new = ENDED
         else:
