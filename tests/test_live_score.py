@@ -284,6 +284,23 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual([phase for _, phase in proposal["phases"]], [TELEOP, ENDED, AUTO])
         self.assertEqual(proposal["events"][-1]["event_type"], "hive_tip_auto")
 
+    def test_tip_before_the_clock_is_readable_takes_the_first_established_phase(self):
+        # The clip opens in TELEOP with the clock unreadable; the TIP at 2 s is a TELEOP TIP.
+        rows = timeline([(0.0, {"clock": None}), (2.0, {"red": 20, "red_tips": 1}), (8.0, {"clock": 100}),
+                         (20.0, {"clock": 88})])
+        proposal = propose_events(rows)
+        self.assertEqual(proposal["phases"][0][1], TELEOP)
+        self.assertEqual([(e["t_s"], e["event_type"], e["confidence"]) for e in proposal["events"]],
+                         [(2.0, "hive_tip_teleop", "medium")])
+
+    def test_tip_with_no_readable_clock_is_low_confidence_not_auto(self):
+        rows = timeline([(0.0, {"clock": None}), (2.0, {"red": 20, "red_tips": 1})])
+        proposal = propose_events(rows)
+        self.assertEqual(proposal["phases"], [])
+        [event] = proposal["events"]
+        self.assertEqual((event["event_type"], event["confidence"]), ("hive_tip_teleop", "low"))
+        self.assertIn("AUTO or TELEOP is unknown", event["note"])
+
     def test_clip_opening_on_the_last_teleop_seconds_then_the_next_match(self):
         rows = timeline([(0.0, {"clock": 3}), (5.0, {"clock": 150}), (10.0, {"clock": 145})])
         self.assertEqual([phase for _, phase in match_phases(rows)], [TELEOP, AUTO])
@@ -483,6 +500,43 @@ class ReadOverlayTests(unittest.TestCase):
         self.assertEqual(len(result["samples"]), 20)
         self.assertTrue(result["complete"])
 
+    def test_cancel_stops_decoding_forward_after_a_refused_probe_seek(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from control_vision.pipeline import live_score
+        captures: list = []
+
+        def open_capture(*_):
+            captures.append(FakeCapture(100, refuse_seek=True))
+            return captures[-1]
+
+        checks = 0
+
+        def cancel():
+            nonlocal checks
+            checks += 1
+            return checks > 3
+
+        with patch.object(live_score, "_engine", return_value=FakeEngine()), \
+                patch.object(live_score.cv2, "VideoCapture", side_effect=open_capture), \
+                self.assertLogs("control_vision.pipeline.live_score", level="WARNING"), \
+                self.assertRaises(InterruptedError):
+            live_score.read_live_overlay(Path("match.mp4"), sample_fps=2.0, cancel=cancel)
+        # Decoding forward to the first probe (frame 50) stopped a few frames in; across every capture opened,
+        # only those few frames were decoded (without the check it would probe on through the video first).
+        self.assertLess(sum(capture.position for capture in captures), 5)
+
+    def test_cancel_before_locating_the_overlay_decodes_nothing(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from control_vision.pipeline import live_score
+        capture = FakeCapture(100)
+        with patch.object(live_score, "_engine", return_value=FakeEngine()), \
+                patch.object(live_score.cv2, "VideoCapture", return_value=capture), \
+                self.assertRaises(InterruptedError):
+            live_score.read_live_overlay(Path("match.mp4"), sample_fps=2.0, cancel=lambda: True)
+        self.assertEqual(capture.decoded, [])
+
     def test_a_seek_that_raises_reopens_instead_of_escaping(self):
         from pathlib import Path
         from unittest.mock import patch
@@ -569,6 +623,23 @@ class EvalCacheTests(unittest.TestCase):
             self.assertTrue(result["complete"])
             self.assertEqual(list(out.glob("*.tmp")), [])
 
+    def test_read_redoes_a_result_missing_its_fields(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        for stale in ("{}", '{"event_code": "TEST", "match": 3}', "[]"):
+            with tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp)
+                footage, out = self._footage(folder), folder / "results"
+                out.mkdir()
+                (out / "clip.json").write_text(stale, encoding="utf-8")
+                reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+                with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                    self.script.read(footage, folder / "official", out, [])
+                reader.assert_called_once()
+                self.assertEqual(json.loads((out / "clip.json").read_text(encoding="utf-8"))["samples"], [])
+
     def test_report_lists_a_truncated_result_instead_of_failing(self):
         import contextlib
         import io
@@ -577,11 +648,14 @@ class EvalCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp)
             (out / "clip.json").write_text('{"file": "clip.mp4", "samp', encoding="utf-8")
+            # A failed read written by an older version (file and error only) keeps its message.
+            (out / "old.json").write_text('{"file": "old.mp4", "error": "no overlay"}', encoding="utf-8")
             printed = io.StringIO()
             with contextlib.redirect_stdout(printed):
                 self.script.report(out)
             self.assertIn("Alliance results compared: 0", printed.getvalue())
             self.assertIn("clip: result file is unreadable", printed.getvalue())
+            self.assertIn("old: no overlay", printed.getvalue())
 
 
 if __name__ == "__main__":

@@ -53,12 +53,20 @@ def _write_json(path: Path, data: dict) -> None:
 
 
 def _load_json(path: Path) -> dict | None:
-    """A cached result, or None when the file is not valid JSON (for example truncated by an older version)."""
+    """A cached result, or None when the file is unreadable: not valid JSON (for example truncated by an older
+    version), or missing the fields every written result has."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("error"), str):
+        return data  # a failed read; older versions wrote only file and error
+    if isinstance(data.get("event_code"), str) and isinstance(data.get("match"), int) \
+            and isinstance(data.get("samples"), list):
+        return data
+    return None
 
 
 def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> None:
@@ -139,6 +147,8 @@ def report(results_dir: Path) -> None:
 
 
 if __name__ == "__main__":
+    # The report marks mismatches with ✗; a Windows console's default code page cannot print it.
+    sys.stdout.reconfigure(encoding="utf-8")
     if len(sys.argv) >= 5 and sys.argv[1] == "read":
         read(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5:])
     elif len(sys.argv) == 3 and sys.argv[1] == "report":

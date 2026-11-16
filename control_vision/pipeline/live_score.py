@@ -248,11 +248,17 @@ def _decode(cap, logger, video_path: Path, index: int, grab: bool = False):
         return False, None
 
 
-def _seek(cap, logger, video_path: Path, target: int):
+def _check_cancel(cancel: Callable[[], bool] | None) -> None:
+    if cancel and cancel():
+        raise InterruptedError("Reading the live score overlay was cancelled.")
+
+
+def _seek(cap, logger, video_path: Path, target: int, cancel: Callable[[], bool] | None = None):
     """A capture whose next frame is ``target``.
 
     Some backends ignore or misplace a seek, so the position is checked; if it
-    is wrong the video is reopened and decoded forward to ``target``.
+    is wrong the video is reopened and decoded forward to ``target``, checking
+    ``cancel`` while it does (raises InterruptedError when cancelled).
     Returns (capture, ok); the old capture is released when replaced.
     """
     try:
@@ -270,6 +276,7 @@ def _seek(cap, logger, video_path: Path, target: int):
     if not cap.isOpened():
         raise RuntimeError(f"Could not read video file {video_path.name}.")
     for index in range(target):
+        _check_cancel(cancel)
         if not _decode(cap, logger, video_path, index, grab=True)[0]:
             return cap, False
     return cap, True
@@ -299,8 +306,9 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
         if layout is None:
             searched = 0
             for fraction in _LOCATE_FRACTIONS:
+                _check_cancel(cancel)
                 target = int(fraction * frame_count)
-                cap, ok = _seek(cap, logger, video_path, target)
+                cap, ok = _seek(cap, logger, video_path, target, cancel)
                 frame = None
                 if ok:
                     ok, frame = _decode(cap, logger, video_path, target)
@@ -327,7 +335,8 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
                                    "the FTC Live overlay with the \"Red\" and \"Blue\" alliance labels.")
             # Timestamps count frames from the start, so a backend that
             # refuses to rewind must not continue from the probe position.
-            cap, ok = _seek(cap, logger, video_path, 0)
+            _check_cancel(cancel)
+            cap, ok = _seek(cap, logger, video_path, 0, cancel)
         stride = max(1, round(fps / sample_fps))
         samples: list[dict] = []
         failures = 0
@@ -335,8 +344,7 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
         stopped: str | None = None
         failed_from = 0.0
         while index < frame_count:
-            if cancel and cancel():
-                raise InterruptedError("Reading the live score overlay was cancelled.")
+            _check_cancel(cancel)
             if index % stride:
                 if not _decode(cap, logger, video_path, index, grab=True)[0]:
                     stopped = f"the video could not be decoded past {index / fps:.1f} s"
@@ -636,11 +644,19 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
                     detail["corrections"].append({"alliance": alliance, "t_s": t_s, "removed_tip_t_s": removed})
         unpaired = list(tip_times)
         for t_s in tip_times:
-            phase = phase_at(phases, t_s)
-            events.append({"t_s": t_s, "points": TIP_POINTS, "scoring_alliance": alliance,
-                           "event_type": "hive_tip_auto" if phase in (None, AUTO, TRANSITION) else "hive_tip_teleop",
-                           "source": "live_overlay", "status": "flagged", "confidence": "medium",
-                           "note": "HIVE TIP count rose on the live overlay"})
+            # Before the first stable clock reading, the TIP belongs to the
+            # first phase that is established. With no readable clock at all
+            # the phase is unknown: propose TELEOP (most of the match) with low
+            # confidence and say so, rather than silently counting it as AUTO.
+            phase = phase_at(phases, t_s) or (phases[0][1] if phases else None)
+            event = {"t_s": t_s, "points": TIP_POINTS, "scoring_alliance": alliance,
+                     "event_type": "hive_tip_auto" if phase in (AUTO, TRANSITION) else "hive_tip_teleop",
+                     "source": "live_overlay", "status": "flagged", "confidence": "medium",
+                     "note": "HIVE TIP count rose on the live overlay"}
+            if phase is None:
+                event["confidence"] = "low"
+                event["note"] += "; the match clock was never readable, so AUTO or TELEOP is unknown"
+            events.append(event)
         open_rises: list[dict] = []
         for step, ((previous_t, before), (t_s, after)) in enumerate(zip(scores, scores[1:]), start=1):
             delta = after - before
