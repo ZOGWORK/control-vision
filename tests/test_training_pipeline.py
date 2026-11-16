@@ -196,6 +196,67 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(self.fake.feeds[0]["images"].shape, (1, 3, 640, 640))
         self.assertEqual(set(self.fake.env_at_init), {("False", "True")})
 
+    def _train_list(self, *lines):
+        listed = self.work / "train_list.txt"
+        listed.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+        return listed
+
+    def test_train_list_oversamples_audited_training_images(self):
+        listed = self._train_list("images/train/a.jpg", "./images/train/a.jpg", str(self.root / "images/train/a.jpg"))
+        seen = {}
+
+        def capture():
+            # The list Ultralytics trains on exists only while it trains.
+            [train] = self.fake.called("train")
+            data = json.loads(Path(train["data"]).read_text(encoding="utf-8"))
+            seen["data"] = data
+            seen["lines"] = Path(data["train"]).read_text(encoding="utf-8").splitlines()
+
+        self.fake.on_train = capture
+        code, stderr = self.run_main("--train-list", str(listed))
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(seen["lines"], [str((self.root / "images/train/a.jpg").resolve())] * 3)
+        self.assertEqual(seen["data"]["val"], "images/val")
+        record = self.record()
+        self.assertEqual(record["train_list"], {"file": str(listed.resolve()), "sha256": train_yolo._sha256(listed),
+                                                "lines": 3, "unique_images": 1, "train_images": 1,
+                                                "train_images_not_listed": 0})
+        # The audit and the dataset hash still cover images/train.
+        self.assertEqual(record["split_provenance"]["mode"], "match_audited")
+        self.assertEqual(record["dataset_sha256"], dataset_hash(self.root, self.config, self.data))
+        self.assertFalse(record["fine_tune"])
+
+    def test_train_list_entries_outside_images_train_are_refused_before_training(self):
+        (self.root / "notes.txt").write_text("", encoding="utf-8")
+        for entry, message in (("images/val/a.jpg", "not inside the training images"),
+                               ("images/train/../val/a.jpg", "not inside the training images"),
+                               ("../outside.jpg", "not inside the training images"),
+                               ("images/train/missing.jpg", "not an existing training image"),
+                               ("notes.txt", "not inside the training images"),
+                               ("images/train", "not an existing training image")):
+            with self.subTest(entry=entry):
+                code, stderr = self.run_main("--train-list", str(self._train_list("images/train/a.jpg", entry)))
+                self.assertEqual(code, 2)
+                self.assertIn(message, stderr)
+                self.assert_not_trained()
+        code, stderr = self.run_main("--train-list", str(self._train_list("", "  ")))
+        self.assertEqual(code, 2)
+        self.assertIn("names no images", stderr)
+        code, stderr = self.run_main("--train-list", str(self.work / "absent.txt"))
+        self.assertEqual(code, 2)
+        self.assertIn("Cannot read the train list", stderr)
+        self.assert_not_trained()
+
+    def test_fine_tune_names_the_optimizer_so_the_low_learning_rate_applies(self):
+        code, stderr = self.run_main("--fine-tune")
+        self.assertEqual(code, 0, stderr)
+        [train] = self.fake.called("train")
+        self.assertEqual({key: train[key] for key in train_yolo.FINE_TUNE_DEFAULTS}, train_yolo.FINE_TUNE_DEFAULTS)
+        self.assertEqual(train["optimizer"], "AdamW")
+        self.assertEqual((train["hsv_h"], train["plots"]), (0.0, False))  # the usual defaults still apply
+        self.assertTrue(self.record()["fine_tune"])
+        self.assertIsNone(self.record()["train_list"])
+
     def test_missing_manifest_is_refused_before_training(self):
         self.manifest.unlink()
         with patch.object(train_yolo, "validate_dataset", side_effect=AssertionError("images checked")):

@@ -43,6 +43,10 @@ TRAINING_PACKAGES = (("yaml", "PyYAML"), ("ultralytics", "ultralytics"),
 TRAINING_DEFAULTS: dict[str, Any] = {"lr0": 0.01, "patience": 20, "hsv_h": 0.0, "hsv_s": 0.2, "hsv_v": 0.2,
                                      # Plots fetch a font from the internet on first use.
                                      "plots": False}
+# --fine-tune: continue from trained BIOBUZZ weights. optimizer "auto" ignores lr0, so name the optimizer to make the
+# low learning rate take effect; a short warmup; mosaic off for the last epochs; stop sooner without improvement.
+FINE_TUNE_DEFAULTS: dict[str, Any] = {"optimizer": "AdamW", "lr0": 0.0005, "lrf": 0.1, "warmup_epochs": 1,
+                                      "close_mosaic": 5, "patience": 8}
 REQUIRED_RECORD_FIELDS = ("version", "date", "dataset_sha256", "classes", "training_config", "validation_metrics",
                           "split_provenance")
 MANIFEST_NAME = "split_manifest.csv"
@@ -252,6 +256,42 @@ def training_split_provenance(root: Path, config: dict, exploratory: bool = Fals
         raise ValueError(f"{MANIFEST_NAME}: {exc}") from None
     return {"mode": AUDITED, "manifest_sha256": audit["manifest_sha256"], "matches": audit["matches"],
             "events": audit["events"], "holdout_events": audit["holdout_events"], "images": audit["images"]}
+
+
+def train_list(root: Path, config: dict, list_file: Path) -> tuple[list[Path], dict]:
+    """The images named by a --train-list file, and what the record says about it.
+
+    The list chooses how often each training image is used (a line per use;
+    repeats oversample). data.yaml still names images/train, so the manifest
+    audit, label checks and dataset hash cover the same images as before; the
+    list may only name existing images inside that folder.
+    """
+    root = root.resolve()
+    train_dir = _split_images_dir(root, config, "train")
+    try:
+        text = list_file.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Cannot read the train list {list_file}: {exc}") from None
+    images: list[Path] = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        entry = line.strip()
+        if not entry:
+            continue
+        image = Path(entry)
+        image = (image if image.is_absolute() else root / image).resolve()
+        if not image.is_relative_to(train_dir):
+            raise ValueError(f"{list_file.name}:{line_number}: {entry} is not inside the training images "
+                             f"directory {train_dir}")
+        if image.suffix.lower() not in IMAGE_SUFFIXES or not image.is_file():
+            raise ValueError(f"{list_file.name}:{line_number}: {entry} is not an existing training image")
+        images.append(image)
+    if not images:
+        raise ValueError(f"The train list {list_file.name} names no images")
+    unique = set(images)
+    in_train = sum(1 for path in train_dir.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
+    return images, {"file": str(list_file.resolve()), "sha256": _sha256(list_file), "lines": len(images),
+                    "unique_images": len(unique), "train_images": in_train,
+                    "train_images_not_listed": in_train - len(unique)}
 
 
 def model_version_state(models_dir: Path, version: str) -> tuple[str, str]:
@@ -505,6 +545,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--exploratory-without-manifest", action="store_true",
                         help="Allow a local run without split_manifest.csv; its record says exploratory_unverified "
                              "and it is not a release model. A manifest that exists is still validated.")
+    parser.add_argument("--train-list", type=Path,
+                        help="Text file of training images to use, one per line (repeat a line to oversample). Each "
+                             "must be an existing image inside data.yaml's images/train, which is still audited.")
+    parser.add_argument("--fine-tune", action="store_true",
+                        help="Continue from trained BIOBUZZ weights with a low fixed learning rate "
+                             f"({', '.join(f'{k}={v}' for k, v in FINE_TUNE_DEFAULTS.items())})")
     args = parser.parse_args(argv)
     try:
         check_version(args.version)
@@ -530,6 +576,8 @@ def main(argv: list[str] | None = None) -> None:
                                                          args.exploratory_without_manifest)
             data_root = validate_dataset(args.data, config, len(names))
             dataset_sha256 = dataset_hash(data_root, config, args.data)
+            listed, list_record = (train_list(data_root, config, args.train_list) if args.train_list
+                                   else (None, None))
             onnx_path, metadata_path = stack.enter_context(reserve_model_version(models_dir, args.version))
         except ValueError as exc:
             parser.error(str(exc))
@@ -538,12 +586,18 @@ def main(argv: list[str] | None = None) -> None:
             print(f"UNVERIFIED EXPLORATORY RUN: {data_root} has no {MANIFEST_NAME}, so match-level split separation "
                   f"is not checked. The record will say {EXPLORATORY}; this is not a release model.", flush=True)
         train_args = {"epochs": args.epochs, "batch": args.batch, "imgsz": args.imgsz, "device": args.device,
-                      **TRAINING_DEFAULTS}
+                      **TRAINING_DEFAULTS, **(FINE_TUNE_DEFAULTS if args.fine_tune else {})}
         # Ultralytics resolves a relative `path` against its process CWD.
         # Pass the exact dataset root that was validated.
         temp = stack.enter_context(tempfile.TemporaryDirectory(prefix="control-vision-data-"))
         normalized_data = Path(temp) / "data.yaml"
-        normalized_data.write_text(yaml.safe_dump({**config, "path": str(data_root)}), encoding="utf-8")
+        normalized = {**config, "path": str(data_root)}
+        if listed is not None:
+            # Only now, after every check ran on images/train, does training read the list.
+            listed_file = Path(temp) / "train_list.txt"
+            listed_file.write_text("".join(f"{image}\n" for image in listed), encoding="utf-8")
+            normalized["train"] = str(listed_file)
+        normalized_data.write_text(yaml.safe_dump(normalized), encoding="utf-8")
         model = YOLO(str(args.base_weights))
         model.train(data=str(normalized_data), project=str(runs_dir), name=f"biobuzz-{args.version}", **train_args)
         trainer = model.trainer
@@ -566,6 +620,7 @@ def main(argv: list[str] | None = None) -> None:
                       "split_provenance": split_provenance, "classes": names, "base_weights": str(args.base_weights),
                       "base_weights_sha256": _sha256(args.base_weights), "best_checkpoint": str(best_pt),
                       "training_config": {"model": "yolo11n", **train_args},
+                      "fine_tune": args.fine_tune, "train_list": list_record,
                       "validation_metrics": metrics,
                       "export": {"format": "onnx", "imgsz": args.imgsz, "requested_opset": MIN_OPSET,
                                  "simplify": False},

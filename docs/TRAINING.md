@@ -28,6 +28,19 @@ These checks cannot detect visually similar frames from one match saved under di
 
 Ultralytics is told not to install packages or use the network (`YOLO_AUTOINSTALL=False`, `YOLO_OFFLINE=True`), and training plots are off because they download a font. The starting settings follow `docs/BUILD_BRIEF.md`: image size 640, 100 epochs, batch 16, `lr0` 0.01, patience 20. Colour augmentation is light because colour separates POLLEN from NECTAR and the two alliances: `hsv_h` 0.0, `hsv_s` 0.2, `hsv_v` 0.2. These are a starting point. Tune them on the val split, and the version record keeps the full training configuration.
 
+With the default `optimizer` (`auto`), Ultralytics chooses the optimizer and learning rate itself and ignores `lr0`. To continue from trained BIOBUZZ weights, add `--fine-tune`. It names the optimizer, so the low learning rate takes effect: `optimizer` AdamW, `lr0` 0.0005, `lrf` 0.1, `warmup_epochs` 1, `close_mosaic` 5, `patience` 8. The record's `fine_tune` is then `true`.
+
+### Oversampling with a train list
+
+`--train-list FILE` trains on a list of images instead of every image once. Write one image per line, as a path relative to the dataset root or an absolute path. Repeat a line to use that image more often, for example to give a rare class more weight.
+
+`data.yaml` still says `train: images/train`, so the split manifest audit, label checks and dataset hash run over that folder exactly as without a list. Every line must name an existing image inside it; a line pointing anywhere else stops the run before training. The record's `train_list` gives:
+- the list's path and SHA-256;
+- its line count and number of distinct images;
+- how many training images it leaves out.
+
+Choose what to oversample from train and val results only, never from holdout results.
+
 ## Publishing
 
 After training, the command validates the best checkpoint on the val split and records overall and per-class mAP50 and mAP50-95. It refuses to publish if validation returns no metrics or no robot metrics. It exports ONNX at opset 12 or newer, then checks the file in ONNX Runtime on CPU: it runs one blank image, checks that the output has 4 + number-of-classes channels, and checks that the class names stored in the ONNX file match `data.yaml`.
