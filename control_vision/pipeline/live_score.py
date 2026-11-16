@@ -261,7 +261,13 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(fraction * frame_count))
                 ok, frame = cap.read()
                 if ok and frame is not None:
-                    layout = locate_overlay(engine, frame)
+                    try:
+                        layout = locate_overlay(engine, frame)
+                    except Exception:
+                        # One bad probe frame must not stop the other probes.
+                        logger.warning("Could not search frame %d of %s for the overlay",
+                                       int(fraction * frame_count), video_path.name, exc_info=True)
+                        layout = None
                     if layout is not None:
                         break
             if layout is None:
@@ -284,16 +290,25 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
                 continue
             ok, frame = cap.read()
             index += 1
-            if not ok or frame is None:
-                failures += 1
+            row = None
+            if ok and frame is not None:
+                try:
+                    row = read_frame(engine.text_rec, frame, layout)
+                except Exception:
+                    # Skip one frame OCR cannot read rather than lose the
+                    # whole pass; repeated failures stop the read below.
+                    logger.warning("Could not read the overlay in frame %s of %s", index - 1, video_path.name,
+                                   exc_info=True)
+            else:
                 logger.warning("Skipped undecodable frame %s in %s", index - 1, video_path.name)
+            if row is None:
+                failures += 1
                 if failures >= _MAX_CONSECUTIVE_READ_FAILURES:
-                    stopped = (f"{failures} sampled frames in a row could not be decoded "
+                    stopped = (f"{failures} sampled frames in a row could not be decoded or read "
                                f"at {(index - 1) / fps:.1f} s")
                     break
                 continue
             failures = 0
-            row = read_frame(engine.text_rec, frame, layout)
             row["t_s"] = round((index - 1) / fps, 3)
             samples.append(row)
             if progress:
@@ -366,8 +381,13 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
             new = AUTO if clock > _AUTO_END_CLOCK_S else ENDED if clock == 0 else TELEOP
         elif phase in (TELEOP, ENDED) and clock >= _NEW_MATCH_MIN_CLOCK_S:
             new = AUTO
-        elif phase == AUTO and clock <= _TRANSITION_MAX_CLOCK_S and previous is not None and previous >= _AUTO_END_CLOCK_S - 2:
+        elif (phase == AUTO and clock <= _TRANSITION_MAX_CLOCK_S and previous is not None
+              and abs(previous - _AUTO_END_CLOCK_S) <= 2):
             new = TRANSITION
+        elif phase == AUTO and clock == 0:
+            # Cut from mid-AUTO straight to the 0:00 post-match overlay (the
+            # TRANSITION countdown only follows a clock at 2:00).
+            new = ENDED
         elif phase == AUTO and _TRANSITION_MAX_CLOCK_S < clock < _AUTO_END_CLOCK_S:
             # The TRANSITION countdown was not read (or the stream cut it):
             # a clock below 2:00 that is not a countdown is TELEOP.
@@ -403,6 +423,7 @@ MINOR_FOUL_POINTS = 5
 MAJOR_FOUL_POINTS = 20
 
 
+FOUL_POINTS = {"minor_foul": MINOR_FOUL_POINTS, "major_foul": MAJOR_FOUL_POINTS}
 # A correction is matched against at most this many of the latest open rises.
 _CORRECTION_LOOKBACK = 6
 
@@ -439,6 +460,9 @@ def _apply_correction(drop: int, open_rises: list[dict], events: list[dict], log
         else:
             rise["points"] -= remaining
             rise["note"] += f" (reduced by {remaining} by a later correction)"
+            if rise["event_type"] in FOUL_POINTS and rise["points"] != FOUL_POINTS[rise["event_type"]]:
+                # A foul credit is only ever 5 or 20; what is left is not one.
+                rise["event_type"] = "unclassified"
             log.append({"alliance": alliance, "t_s": t_s, "reduced_rise_t_s": rise["t_s"], "points": remaining})
             remaining = 0
     return remaining
@@ -499,12 +523,19 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
                            "source": "live_overlay", "status": "flagged", "confidence": "medium",
                            "note": "HIVE TIP count rose on the live overlay"})
         open_rises: list[dict] = []
-        for (_, before), (t_s, after) in zip(scores, scores[1:]):
+        for step, ((previous_t, before), (t_s, after)) in enumerate(zip(scores, scores[1:]), start=1):
             delta = after - before
             if delta > 0:
+                # The TIP count and the score are entered together, but either
+                # can become readable later. A TIP pairs with this rise if it
+                # is close in time or falls while the score showed this value
+                # (between the previous and the next score change).
+                next_t = scores[step + 1][0] if step + 1 < len(scores) else math.inf
                 explained = 0
                 while delta - explained >= TIP_POINTS:
-                    match = next((tip for tip in unpaired if abs(tip - t_s) <= _TIP_PAIRING_S), None)
+                    candidates = [tip for tip in unpaired
+                                  if abs(tip - t_s) <= _TIP_PAIRING_S or previous_t < tip < next_t]
+                    match = min(candidates, key=lambda tip: abs(tip - t_s), default=None)
                     if match is None:
                         break
                     unpaired.remove(match)

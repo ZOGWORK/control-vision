@@ -37,6 +37,7 @@ ROYAL_OAK = [
     (32.5, {"red": 28, "clock": 126}),
     (33.5, {"red": 31}),
     (34.5, {"red": 26}),
+    (36.5, {"clock": 120}),
     (38.0, {"clock": 7}),
     (41.0, {"red": 23}),
     (46.0, {"clock": 119}),
@@ -117,9 +118,17 @@ class CounterBoxTests(unittest.TestCase):
     def test_read_frame_marks_a_missing_counter_as_unread(self):
         frame = np.zeros((300, 1920, 3), np.uint8)
         layout = layout_from_labels((719, 111, 778, 141), (1141, 108, 1207, 143), (300, 1920, 3))
-        texts = iter([("43", 0.99), ("0", 0.98), ("", 0.0), ("", 0.0), ("1:36", 0.97)])
-        row = read_frame(lambda crops: ([next(texts) for _ in crops], 0.0), frame, layout)
-        self.assertEqual((row["red_score"], row["blue_score"], row["red_tips"], row["clock_s"]), (43, 0, None, 96))
+        seen = []
+
+        def recognise(crops):
+            # Any real crop reads as a number, so only the blank placeholder
+            # for a missing counter box can give an unread TIP count.
+            seen.extend(crops)
+            return [("" if crop.shape[:2] == (8, 8) and crop.min() == 255 else "7", 0.9) for crop in crops], 0.0
+
+        row = read_frame(recognise, frame, layout)
+        self.assertEqual((row["red_score"], row["red_tips"], row["blue_tips"]), (7, None, None))
+        self.assertEqual([crop.shape[:2] for crop in seen[2:4]], [(8, 8), (8, 8)])
 
 
 class StableStepTests(unittest.TestCase):
@@ -236,6 +245,25 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual(proposal["match_end_s"], 35.0)
         self.assertEqual([(e["event_type"], e["t_s"]) for e in proposal["events"]], [("hive_tip_teleop", 20.0)])
 
+    def test_tip_count_read_late_still_pairs_with_its_score(self):
+        # Score readable at 20 s, the TIP counter only at 27 s (beyond the 3 s window).
+        rows = timeline([(5.0, {"clock": 110}), (20.0, {"red": 20, "red_tips": None}),
+                         (27.0, {"red_tips": 1}), (40.0, {"red": 25})])
+        events = propose_events(rows)["events"]
+        self.assertEqual([(e["event_type"], e["points"]) for e in events],
+                         [("hive_tip_teleop", 20), ("minor_foul", 5)])
+
+    def test_partially_corrected_foul_is_no_longer_a_foul(self):
+        rows = timeline([(5.0, {"clock": 110}), (20.0, {"red": 20}), (25.0, {"red": 15})])
+        events = propose_events(rows)["events"]
+        self.assertEqual([(e["event_type"], e["points"]) for e in events], [("unclassified", 15)])
+
+    def test_cut_from_auto_to_the_final_clock_ends_the_match(self):
+        rows = timeline([(10.0, {"clock": 135}), (20.0, {"clock": 0}), (25.0, {"red": 18})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, ENDED])
+        self.assertIn("end-of-match", proposal["events"][0]["note"])
+
     def test_no_readings(self):
         proposal = propose_events([sample(0), sample(0.5)])
         self.assertEqual(proposal["events"], [])
@@ -273,20 +301,51 @@ class FakeCapture:
 
 
 class FakeEngine:
+    def __init__(self, fail_reads=(), fail_locate=0):
+        self.reads, self.fail_reads, self.fail_locate = 0, set(fail_reads), fail_locate
+
     def text_rec(self, crops):
+        self.reads += 1
+        if self.reads in self.fail_reads:
+            raise RuntimeError("ONNX error")
         return [("0", 0.9) for _ in crops], 0.0
+
+    def __call__(self, frame):
+        # Full-frame OCR used to locate the overlay: fail the first probes.
+        if self.fail_locate:
+            self.fail_locate -= 1
+            raise RuntimeError("bad probe frame")
+        return [[[[719, 111], [778, 111], [778, 141], [719, 141]], "Red", 0.99],
+                [[[1141, 108], [1207, 108], [1207, 143], [1141, 143]], "Blue", 0.99]], 0.0
 
 
 class ReadOverlayTests(unittest.TestCase):
     LAYOUT = layout_from_labels((719, 111, 778, 141), (1141, 108, 1207, 143), (300, 1920, 3))
 
-    def read(self, capture):
+    def read(self, capture, engine=None, layout=LAYOUT):
         from pathlib import Path
         from unittest.mock import patch
         from control_vision.pipeline import live_score
-        with patch.object(live_score, "_engine", return_value=FakeEngine()), \
+        with patch.object(live_score, "_engine", return_value=engine or FakeEngine()), \
                 patch.object(live_score.cv2, "VideoCapture", return_value=capture):
-            return live_score.read_live_overlay(Path("match.mp4"), layout=self.LAYOUT, sample_fps=2.0)
+            return live_score.read_live_overlay(Path("match.mp4"), layout=layout, sample_fps=2.0)
+
+    def test_one_ocr_failure_skips_only_that_frame(self):
+        with self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            result = self.read(FakeCapture(100), FakeEngine(fail_reads={3}))
+        self.assertTrue(result["complete"])
+        self.assertEqual(len(result["samples"]), 19)
+
+    def test_repeated_ocr_failures_stop_the_read_and_say_so(self):
+        with self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            result = self.read(FakeCapture(100), FakeEngine(fail_reads=set(range(4, 30))))
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(result["samples"]), 3)
+
+    def test_a_bad_probe_frame_moves_on_to_the_next_probe(self):
+        with self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            result = self.read(FakeCapture(100), FakeEngine(fail_locate=2), layout=None)
+        self.assertEqual(result["layout"]["red_score"], list(self.LAYOUT.red_score))
 
     def test_complete_read(self):
         result = self.read(FakeCapture(100))

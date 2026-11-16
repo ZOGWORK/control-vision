@@ -84,7 +84,9 @@ def report(results_dir: Path) -> None:
             failed.append(f"{path.stem}: {result['error']}")
             continue
         if result.get("complete") is False:
-            failed.append(f"{path.stem}: read stopped early ({result.get('stopped_early')}); compared anyway")
+            # Events after the cut are missing; comparing would understate them.
+            failed.append(f"{path.stem}: read stopped early ({result.get('stopped_early')})")
+            continue
         official = result.get("official")
         if not official:
             failed.append(f"{path.stem}: no official result")
