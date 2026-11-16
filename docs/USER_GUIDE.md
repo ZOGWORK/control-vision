@@ -8,7 +8,7 @@ Use Python 3.11 or newer, install the pinned packages in `requirements.txt`, and
 
 The sidebar lists the screens in workflow order: Home, Set up and process, Review queue, Scoring timeline, Cycles and stats, Highlights, and Score and export, then Settings and the BIOBUZZ rules. Ctrl+1 to Ctrl+9 open them in that order. Result screens stay unavailable until the current video has been processed successfully. Set up and process shows the five setup steps (match video, field calibration, zones and ROIs, robot identities, process) with the state of each; zones and ROIs are optional for processing. While a video is processed, a progress bar shows in the status bar.
 
-Anything you still need to check is shown in orange with a flag: flagged events and low-confidence values in the Review queue and Scoring timeline, a pending referee ruling, and an OCR scoreboard proposal. The yellow accent marks the main action on each screen. The Review queue entry in the sidebar shows how many events are pending review. Choose Light, Dark or Match Windows under Settings › Appearance; this choice is saved for the computer, not with the project.
+Anything you still need to check is shown in orange: flagged events and low-confidence values in the Review queue and Scoring timeline, which also carry a ⚑ flag, a pending referee ruling, and an OCR scoreboard proposal. The yellow accent marks the main action on each screen. The Review queue entry in the sidebar shows how many events are pending review. Choose Light, Dark or Match Windows under Settings › Appearance; this choice is saved for the computer, not with the project.
 
 ## Analyze a practice video or match
 
