@@ -531,5 +531,58 @@ class ReadOverlayTests(unittest.TestCase):
         self.assertEqual(result["duration_s"], 10.0)
 
 
+class EvalCacheTests(unittest.TestCase):
+    """scripts/eval_live_score.py: a truncated result file is redone, not fatal."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[1] / "scripts" / "eval_live_score.py"
+        spec = importlib.util.spec_from_file_location("eval_live_score", path)
+        cls.script = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.script)
+
+    def _footage(self, folder):
+        footage = folder / "footage"
+        footage.mkdir()
+        (footage / "FOOTAGE_MANIFEST.csv").write_text(
+            "file,event_code,match_label_on_screen\nclip.mp4,TEST,Qualification 3\n", encoding="utf-8")
+        return footage
+
+    def test_read_redoes_a_truncated_result(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out = self._footage(folder), folder / "results"
+            out.mkdir()
+            (out / "clip.json").write_text('{"file": "clip.mp4", "samp', encoding="utf-8")
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", out, [])
+            reader.assert_called_once()
+            import json
+            result = json.loads((out / "clip.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["match"], 3)
+            self.assertTrue(result["complete"])
+            self.assertEqual(list(out.glob("*.tmp")), [])
+
+    def test_report_lists_a_truncated_result_instead_of_failing(self):
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            (out / "clip.json").write_text('{"file": "clip.mp4", "samp', encoding="utf-8")
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                self.script.report(out)
+            self.assertIn("Alliance results compared: 0", printed.getvalue())
+            self.assertIn("clip: result file is unreadable", printed.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import sys
 import time
@@ -44,6 +45,22 @@ def _official(official_dir: Path, event_code: str, number: int) -> dict | None:
     return result
 
 
+def _write_json(path: Path, data: dict) -> None:
+    # Write a temporary file and rename it, so an interrupted run never leaves a truncated result behind.
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(json.dumps(data), encoding="utf-8")
+    os.replace(temp, path)
+
+
+def _load_json(path: Path) -> dict | None:
+    """A cached result, or None when the file is not valid JSON (for example truncated by an older version)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(footage / "FOOTAGE_MANIFEST.csv", encoding="utf-8") as handle:
@@ -52,15 +69,14 @@ def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> N
         if only and not any(part in row["file"] for part in only):
             continue
         target = out_dir / (Path(row["file"]).stem + ".json")
-        if target.exists():
-            cached = json.loads(target.read_text(encoding="utf-8"))
-            if "error" not in cached and cached.get("complete") is not False:
-                # Keep the read, but pick up an official result added since.
-                official = _official(official_dir, cached["event_code"], cached["match"])
-                if official != cached.get("official"):
-                    cached["official"] = official
-                    target.write_text(json.dumps(cached), encoding="utf-8")
-                continue  # a failed or stopped-early read is retried
+        cached = _load_json(target) if target.exists() else None
+        if cached is not None and "error" not in cached and cached.get("complete") is not False:
+            # Keep the read, but pick up an official result added since.
+            official = _official(official_dir, cached["event_code"], cached["match"])
+            if official != cached.get("official"):
+                cached["official"] = official
+                _write_json(target, cached)
+            continue  # a failed, stopped-early or unreadable result is read again
         match = re.search(r"Qualification (\d+)", row["match_label_on_screen"])
         if not match:
             continue
@@ -75,7 +91,7 @@ def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> N
                           samples=reading["samples"], complete=reading["complete"],
                           stopped_early=reading["stopped_early"])
         result["official"] = _official(official_dir, row["event_code"], result["match"])
-        target.write_text(json.dumps(result), encoding="utf-8")
+        _write_json(target, result)
         print(row["file"], result.get("error", "ok"), flush=True)
 
 
@@ -86,7 +102,10 @@ def report(results_dir: Path) -> None:
     exact = {field: 0 for field in FIELDS}
     compared = 0
     for path in sorted(results_dir.glob("*.json")):
-        result = json.loads(path.read_text(encoding="utf-8"))
+        result = _load_json(path)
+        if result is None:
+            failed.append(f"{path.stem}: result file is unreadable; run `read` again to redo it")
+            continue
         if "error" in result:
             failed.append(f"{path.stem}: {result['error']}")
             continue
