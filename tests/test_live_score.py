@@ -293,6 +293,24 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual([(e["t_s"], e["event_type"], e["confidence"]) for e in proposal["events"]],
                          [(2.0, "hive_tip_teleop", "medium")])
 
+    def test_auto_tip_before_the_first_clock_reading_is_kept(self):
+        # The clock is unreadable for AUTO's first seconds; the TIP at 2 s is stable before the clock (8 s).
+        rows = timeline([(0.0, {"clock": None}), (2.0, {"red": 20, "red_tips": 1}), (8.0, {"clock": 140}),
+                         (20.0, {"clock": 128})])
+        proposal = propose_events(rows)
+        self.assertEqual(proposal["phases"][0][1], AUTO)
+        self.assertEqual(proposal["match_start_s"], 0.0)
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(2.0, "hive_tip_auto")])
+
+    def test_previous_matchs_score_before_an_unreadable_clock_stays_out_of_the_match(self):
+        # The clip opens on the previous match's 88 with no readable clock; the overlay resets at 4 s.
+        rows = timeline([(0.0, {"clock": None, "red": 88, "red_tips": 3}), (4.0, {"red": 0, "red_tips": 0}),
+                         (8.0, {"clock": 140}), (12.0, {"red": 20, "red_tips": 1}), (20.0, {"clock": 128})])
+        proposal = propose_events(rows)
+        self.assertEqual(proposal["match_start_s"], 4.0)
+        self.assertEqual(proposal["corrections"], [])
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(12.0, "hive_tip_auto")])
+
     def test_tip_with_no_readable_clock_is_low_confidence_not_auto(self):
         rows = timeline([(0.0, {"clock": None}), (2.0, {"red": 20, "red_tips": 1})])
         proposal = propose_events(rows)

@@ -578,6 +578,35 @@ def _apply_correction(drop: int, open_rises: list[dict], events: list[dict], log
     return remaining
 
 
+_COUNTERS = ("red_score", "blue_score", "red_tips", "blue_tips")
+
+
+def _match_opening(samples: list[dict], auto_start: float) -> float:
+    """The earliest time before ``auto_start`` from which no counter goes down.
+
+    Scores and TIP counts only rise during a match (until a correction), so
+    walking back from the AUTO start, the first reading above a value seen
+    later belongs to the previous match and the window starts after it.
+    """
+    ordered = sorted(samples, key=lambda s: float(s["t_s"]))
+    ceiling = {key: math.inf for key in _COUNTERS}
+    for sample in ordered:
+        if float(sample["t_s"]) < auto_start:
+            continue
+        for key in _COUNTERS:
+            if ceiling[key] == math.inf and sample.get(key) is not None:
+                ceiling[key] = sample[key]
+    opening = auto_start
+    for sample in reversed([s for s in ordered if float(s["t_s"]) < auto_start]):
+        if any(sample.get(key) is not None and sample[key] > ceiling[key] for key in _COUNTERS):
+            break
+        for key in _COUNTERS:
+            if sample.get(key) is not None:
+                ceiling[key] = sample[key]
+        opening = float(sample["t_s"])
+    return opening
+
+
 def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> dict:
     """Turn overlay readings into flagged candidate scoring events.
 
@@ -625,6 +654,12 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
         detail["match_start_s"], detail["match_end_s"] = start, end
     if chosen is not None:
         start = phases[chosen][0]
+        if chosen == 0:
+            # No clock was readable before this AUTO, so readings before it may
+            # be its first seconds (a TIP entered while the clock was still
+            # unreadable). They are included back to where a counter was
+            # higher than later on, which is the previous match's score.
+            start = _match_opening(samples, start)
         end = next((phases[a][0] for a in starts if a > chosen), None)
         detail["match_start_s"], detail["match_end_s"] = start, end
         in_match = [s for s in samples if float(s["t_s"]) >= start and (end is None or float(s["t_s"]) < end)]
