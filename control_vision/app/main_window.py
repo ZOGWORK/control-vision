@@ -49,7 +49,7 @@ class FrameCanvas(QLabel):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(480, 270)
+        self.setMinimumSize(400, 225)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("background:#111827;color:#cbd5e1;border:1px solid #334155")
         self._frame_size = (0, 0)
@@ -104,7 +104,7 @@ class FieldMap(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(360, 360)
+        self.setMinimumSize(280, 280)
         self.tracks: dict[int, list[tuple[float, float, float]]] = {}
         self.current_time = 0.0
         self.zones: dict = {}
@@ -361,7 +361,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Control Vision — Match analysis")
         self.resize(1360, 860)
-        self.setMinimumSize(1100, 700)
+        # Sidebar, setup steps and the minimum video and map widths fit in 1280 px.
+        self.setMinimumSize(1280, 720)
         self.db: ProjectDatabase | None = None
         self.project_id = None
         self.video_id = None
@@ -731,7 +732,8 @@ class MainWindow(QMainWindow):
         self._ocr_thread = None
         self._ocr_active = False
         self.scoreboard_ocr = None
-        self._sync_nav()
+        # No video is loaded yet, so there are no results to show.
+        self._set_results_enabled(False)
         self._tab_changed(self.tabs.currentIndex())
         self._refresh_workflow()
 
@@ -749,6 +751,8 @@ class MainWindow(QMainWindow):
         self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._nav_rows: dict[int, int] = {}
         self._nav_labels: dict[int, str] = {}
+        self._nav_tooltips: dict[int, str] = {}
+        self._review_pending = 0
         section_font = QFont(self.font()); section_font.setPointSizeF(max(7.5, section_font.pointSizeF() - 1)); section_font.setBold(True)
         shortcut_number = 0
         for key, text in NAV_ENTRIES:
@@ -759,7 +763,8 @@ class MainWindow(QMainWindow):
             else:
                 item.setData(Qt.ItemDataRole.UserRole, key)
                 shortcut_number += 1
-                item.setToolTip(f"{text} (Ctrl+{shortcut_number})")
+                self._nav_tooltips[key] = f"{text} (Ctrl+{shortcut_number})"
+                item.setToolTip(self._nav_tooltips[key])
                 shortcut = QShortcut(QKeySequence(f"Ctrl+{shortcut_number}"), self)
                 shortcut.activated.connect(lambda index=key: self._go_to_tab(index))
                 self._nav_rows[key] = self.nav.count()
@@ -827,14 +832,21 @@ class MainWindow(QMainWindow):
             item = self.nav.item(row)
             flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled if self.tabs.isTabEnabled(index) else Qt.ItemFlag.NoItemFlags
             item.setFlags(flags)
-            if index in (2, 3, 4, 5, 6) and not self.tabs.isTabEnabled(index):
-                item.setToolTip(f"{self._nav_labels[index]}: process the video to see results")
+            item.setToolTip(self._nav_tooltip(index))
         self._tab_changed(self.tabs.currentIndex())
+
+    def _nav_tooltip(self, index: int) -> str:
+        if index in (2, 3, 4, 5, 6) and not self.tabs.isTabEnabled(index):
+            return f"{self._nav_labels[index]}: process the video to see results"
+        if index == 3 and self._review_pending:
+            return f"Review queue: {self._review_pending} event(s) pending review (Ctrl+3)"
+        return self._nav_tooltips[index]
 
     def _set_review_badge(self, flagged: int):
         item = self.nav.item(self._nav_rows[3])
         item.setText(f"Review queue  ({flagged})" if flagged else "Review queue")
-        item.setToolTip(f"Review queue: {flagged} event(s) pending review (Ctrl+3)" if flagged else "Review queue (Ctrl+3)")
+        self._review_pending = flagged
+        item.setToolTip(self._nav_tooltip(3))
         item.setForeground(QColor(self._tokens.pending_fg) if flagged else QColor(self._tokens.text))
 
     def theme_changed(self, *_):
