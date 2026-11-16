@@ -1545,11 +1545,14 @@ class MainWindow(QMainWindow):
         self.field_map.tracks = self.tracks; self.field_map.current_time = 0; self.field_map.update()
         self.refresh_result_tables()
         if not results_available:
+            unprocessed = video["analysis_status"] == "unprocessed"
+            # A run that did not finish is an error, like the Process step's failed state.
+            tone = "danger" if not unprocessed else ("pending" if warning_note else "info")
             self._show_status((
                 "This video has not been processed. Set up the field and run analysis to create results."
-                if video["analysis_status"] == "unprocessed"
+                if unprocessed
                 else "The last analysis did not finish. Saved results are hidden until this video is processed successfully."
-            ) + warning_note, "pending" if warning_note else "info")
+            ) + warning_note, tone)
 
     def select_corner(self):
         if self.video_path is None: return
@@ -1856,7 +1859,7 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self.score_compare.setText(f"Score unavailable: {exc}")
             theme.set_tone(self.score_compare, "danger")
-            self.ruling_status.setText(str(exc)); return
+            self.ruling_status.setText(str(exc)); theme.set_tone(self.ruling_status, "danger"); return
         flagged_count = sum(event["status"] == "flagged" for event in events)
         self.ruling_status.setText(self._ruling_status_text(board, flagged_count, robots))
         theme.set_tone(self.ruling_status, "pending" if board["pending_referee_ruling"] else None)
