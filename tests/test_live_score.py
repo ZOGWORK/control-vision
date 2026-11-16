@@ -288,6 +288,13 @@ class ProposalTests(unittest.TestCase):
         rows = timeline([(0.0, {"clock": 3}), (5.0, {"clock": 150}), (10.0, {"clock": 145})])
         self.assertEqual([phase for _, phase in match_phases(rows)], [TELEOP, AUTO])
 
+    def test_cut_from_two_minutes_to_the_final_clock_ends_the_match(self):
+        # The countdown never shows 0:00, so 2:00 then 0:00 is a cut to the end.
+        rows = timeline([(5.0, {"clock": 120}), (8.0, {"clock": 0}), (12.0, {"red": 18})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, ENDED])
+        self.assertIn("end-of-match", proposal["events"][0]["note"])
+
     def test_cut_from_the_countdown_to_the_final_clock_ends_the_match(self):
         rows = timeline([(5.0, {"clock": 121}), (6.0, {"clock": 7}), (8.0, {"clock": 0}), (12.0, {"red": 18})])
         proposal = propose_events(rows)
