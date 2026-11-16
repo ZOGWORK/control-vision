@@ -113,6 +113,21 @@ def _result_names(rows: list[dict]) -> dict[str, str]:
         salt += 1
 
 
+def _move_renamed_results(out_dir: Path, names: dict[str, str]) -> None:
+    """A clip's result written under an older name (before another clip came to share its stem) is moved to the
+    clip's current name, or removed if that already exists, so report never counts the clip twice."""
+    for path in sorted(out_dir.glob("*.json")):
+        result = _load_json(path)
+        file = result.get("file") if result else None
+        if file not in names or names[file] == path.name:
+            continue
+        current = out_dir / names[file]
+        if current.exists():
+            path.unlink()
+        else:
+            os.replace(path, current)
+
+
 def _clip_identity(path: Path) -> dict | None:
     """Size and modification time of the clip, so a file replaced under the same name is read again."""
     try:
@@ -124,9 +139,11 @@ def _clip_identity(path: Path) -> dict | None:
 
 def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    with open(footage / "FOOTAGE_MANIFEST.csv", encoding="utf-8") as handle:
+    # utf-8-sig also accepts a manifest saved with a BOM (Excel's default).
+    with open(footage / "FOOTAGE_MANIFEST.csv", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
     names = _result_names(rows)
+    _move_renamed_results(out_dir, names)
     for row in rows:
         if only and not any(part in row["file"] for part in only):
             continue

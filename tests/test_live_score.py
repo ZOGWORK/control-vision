@@ -304,6 +304,17 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual(proposal["match_start_s"], 0.0)
         self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(2.0, "hive_tip_auto")])
 
+    def test_countdown_after_an_unread_end_of_auto_keeps_the_auto_events(self):
+        # Last readable AUTO clock 2:15, then unreadable, then the countdown and 2:00: still one match.
+        rows = timeline([(0.0, {"clock": 145}), (3.0, {"red": 20, "red_tips": 1, "clock": 135}), (6.0, {"clock": None}),
+                         (12.0, {"clock": 7}), (16.0, {"clock": 120}), (18.0, {"clock": 118}),
+                         (25.0, {"red": 40, "red_tips": 2, "clock": 110}), (30.0, {"clock": 100})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, TELEOP])
+        self.assertEqual(proposal["match_start_s"], 0.0)
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]],
+                         [(3.0, "hive_tip_auto"), (25.0, "hive_tip_teleop")])
+
     def test_clip_opening_on_two_minutes_at_the_end_of_auto_keeps_teleop(self):
         # 2:00 at the end of AUTO, the countdown, then TELEOP from 2:00 with a TIP in it.
         rows = timeline([(0.0, {"clock": 120}), (4.0, {"clock": 6}), (10.0, {"clock": 120}),
@@ -764,6 +775,41 @@ class EvalCacheTests(unittest.TestCase):
             results = {json.loads(p.read_text(encoding="utf-8"))["file"]: p.name for p in out.glob("*.json")}
             self.assertEqual(sorted(results), ["a/q3.mkv", "q3.mp4", "solo.mp4"])
             self.assertEqual(results["solo.mp4"], "solo.json")  # a unique stem keeps its old name
+
+    def test_a_manifest_saved_with_a_bom_is_read(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage = folder / "footage"
+            footage.mkdir()
+            (footage / "FOOTAGE_MANIFEST.csv").write_text(
+                "file,event_code,match_label_on_screen\nclip.mp4,TEST,Qualification 3\n", encoding="utf-8-sig")
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", folder / "results", [])
+            reader.assert_called_once()
+
+    def test_a_result_renamed_by_a_new_clip_leaves_no_duplicate(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out = self._footage(folder), folder / "results"
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", out, [])
+                self.assertTrue((out / "clip.json").exists())
+                with open(footage / "FOOTAGE_MANIFEST.csv", "a", encoding="utf-8") as handle:
+                    handle.write("b/clip.mkv,TEST,Qualification 4\n")
+                self.script.read(footage, folder / "official", out, [])
+            files = sorted(json.loads(p.read_text(encoding="utf-8"))["file"] for p in out.glob("*.json"))
+            self.assertEqual(files, ["b/clip.mkv", "clip.mp4"])
+            self.assertFalse((out / "clip.json").exists())
+            self.assertEqual(reader.call_count, 2)  # clip.mp4's read moved to its new name, not redone
 
     def test_generated_result_names_never_collide(self):
         names = self.script._result_names([{"file": f} for f in ("a/q3.mkv", "q3.mp4", "a_q3_mkv.mp4", "Q3.avi")])
