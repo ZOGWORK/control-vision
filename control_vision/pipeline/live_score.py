@@ -523,6 +523,12 @@ def phase_at(phases: list[tuple[float, str]], t_s: float) -> str | None:
     return current
 
 
+def _phase_for(phases: list[tuple[float, str]], t_s: float) -> str | None:
+    """The phase an event at ``t_s`` belongs to. Before the first stable clock
+    reading it is the first phase that is established; None with no phases."""
+    return phase_at(phases, t_s) or (phases[0][1] if phases else None)
+
+
 # A score step within this many seconds of a TIP count step of the same
 # alliance is that TIP being entered.
 _TIP_PAIRING_S = 3.0
@@ -683,7 +689,7 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
             # first phase that is established. With no readable clock at all
             # the phase is unknown: propose TELEOP (most of the match) with low
             # confidence and say so, rather than silently counting it as AUTO.
-            phase = phase_at(phases, t_s) or (phases[0][1] if phases else None)
+            phase = _phase_for(phases, t_s)
             event = {"t_s": t_s, "points": TIP_POINTS, "scoring_alliance": alliance,
                      "event_type": "hive_tip_auto" if phase in (AUTO, TRANSITION) else "hive_tip_teleop",
                      "source": "live_overlay", "status": "flagged", "confidence": "medium",
@@ -713,7 +719,7 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
                 rest = delta - explained
                 if rest <= 0:
                     continue
-                phase = phase_at(phases, t_s)
+                phase = _phase_for(phases, t_s)
                 if phase == TELEOP and rest == MINOR_FOUL_POINTS:
                     event_type, note = "minor_foul", "Score rose 5 during TELEOP without a TIP: likely a MINOR FOUL credit"
                 elif phase == TELEOP and rest == MAJOR_FOUL_POINTS:

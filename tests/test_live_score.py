@@ -109,7 +109,9 @@ class CounterBoxTests(unittest.TestCase):
 
     def test_prefers_the_box_nearest_the_team_numbers(self):
         self.assertEqual(counter_box(band_with_counter(checkmark_panel=True), "right"), (250, 25, 290, 75))
-        self.assertEqual(counter_box(band_with_counter(checkmark_panel=True), "left"), (20, 10, 110, 90))
+        # Blue mirrors red: the digit box is nearest the team numbers (left), the panel further out (right).
+        blue = np.ascontiguousarray(band_with_counter(checkmark_panel=True)[:, ::-1])
+        self.assertEqual(counter_box(blue, "left"), (90, 25, 130, 75))
 
     def test_no_counter_box(self):
         self.assertIsNone(counter_box(band_with_counter(digit_box=False), "right"))
@@ -301,6 +303,12 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual(proposal["phases"][0][1], AUTO)
         self.assertEqual(proposal["match_start_s"], 0.0)
         self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(2.0, "hive_tip_auto")])
+
+    def test_auto_foul_before_the_first_clock_reading_is_a_major_foul(self):
+        rows = timeline([(0.0, {"clock": None}), (2.0, {"red": 20}), (8.0, {"clock": 140}), (20.0, {"clock": 128})])
+        proposal = propose_events(rows)
+        self.assertEqual([(e["t_s"], e["event_type"], e["points"]) for e in proposal["events"]],
+                         [(2.0, "major_foul", 20)])
 
     def test_previous_matchs_score_before_an_unreadable_clock_stays_out_of_the_match(self):
         # The clip opens on the previous match's 88 with no readable clock; the overlay resets at 4 s.
@@ -702,6 +710,57 @@ class EvalCacheTests(unittest.TestCase):
             reader.assert_called_once()
             self.assertEqual(json.loads((out / "clip.json").read_text(encoding="utf-8"))["match"], 3)
 
+    def test_cached_samples_of_the_wrong_shape_are_read_again(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        for samples in ([{"t_s": 0.0, "red_score": "x"}], [{"red_score": 5}], [{"t_s": 0.0, "red_tips": True}], [3]):
+            with tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp)
+                footage, out = self._footage(folder), folder / "results"
+                out.mkdir()
+                (out / "clip.json").write_text(json.dumps({"file": "clip.mp4", "event_code": "TEST", "match": 3,
+                                                           "samples": samples, "complete": True}), encoding="utf-8")
+                reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+                with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                    self.script.read(footage, folder / "official", out, [])
+                reader.assert_called_once()
+
+    def test_clips_sharing_a_name_stem_keep_separate_results(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out = folder / "footage", folder / "results"
+            footage.mkdir()
+            (footage / "FOOTAGE_MANIFEST.csv").write_text(
+                "file,event_code,match_label_on_screen\nq3.mp4,TEST,Qualification 3\na/q3.mkv,TEST,Qualification 4\n"
+                "solo.mp4,TEST,Qualification 5\n", encoding="utf-8")
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", out, [])
+                self.script.read(footage, folder / "official", out, [])  # the second run reuses all three
+            self.assertEqual(reader.call_count, 3)
+            names = sorted(p.name for p in out.glob("*.json"))
+            self.assertEqual(names, ["a_q3_mkv.json", "q3_mp4.json", "solo.json"])
+            self.assertEqual(json.loads((out / "a_q3_mkv.json").read_text(encoding="utf-8"))["match"], 4)
+
+    def test_a_result_path_that_cannot_be_read_is_listed_not_fatal(self):
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            (out / "bad.json").mkdir()
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                self.script.report(out)
+            self.assertIn("bad: result file is unreadable", printed.getvalue())
+
     def test_report_lists_a_malformed_result_and_still_compares_the_others(self):
         import contextlib
         import io
@@ -724,7 +783,8 @@ class EvalCacheTests(unittest.TestCase):
                 self.script.report(out)
             text = printed.getvalue()
             self.assertIn("Alliance results compared: 2", text)
-            self.assertIn("bad: result file is malformed", text)
+            # Samples without t_s are rejected on loading (unreadable), so `read` redoes them.
+            self.assertIn("bad: result file is unreadable", text)
             self.assertIn("bad-official: result file is malformed", text)
 
     def test_report_lists_a_truncated_result_instead_of_failing(self):

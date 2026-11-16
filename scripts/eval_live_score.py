@@ -63,22 +63,54 @@ def _load_json(path: Path) -> dict | None:
     version), or missing the fields every written result has."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (OSError, ValueError):  # unreadable path (e.g. a directory), JSONDecodeError, UnicodeDecodeError
         return None
     if not isinstance(data, dict):
         return None
     if isinstance(data.get("error"), str):
         return data  # a failed read; older versions wrote only file and error
     if isinstance(data.get("event_code"), str) and isinstance(data.get("match"), int) \
-            and isinstance(data.get("samples"), list):
+            and isinstance(data.get("samples"), list) and all(map(_valid_sample, data["samples"])):
         return data
     return None
+
+
+def _number(value, kind=(int, float)) -> bool:
+    return isinstance(value, kind) and not isinstance(value, bool)
+
+
+def _valid_sample(sample) -> bool:
+    """One overlay reading as read_live_overlay writes it: a time, and each counter a number or None."""
+    return isinstance(sample, dict) and _number(sample.get("t_s")) \
+        and all(sample.get(key) is None or _number(sample[key], int) for key in _SAMPLE_COUNTERS) \
+        and (sample.get("clock_s") is None or _number(sample["clock_s"]))
+
+
+_SAMPLE_COUNTERS = ("red_score", "blue_score", "red_tips", "blue_tips")
+
+
+def _result_names(rows: list[dict]) -> dict[str, str]:
+    """Result file name per manifest file. The name stem alone, as before, unless two files share it; then the
+    path, with separators and the extension spelled out, keeps each clip's result apart."""
+    stems: dict[str, int] = {}
+    for row in rows:
+        stem = Path(row["file"]).stem
+        stems[stem] = stems.get(stem, 0) + 1
+    names = {}
+    for row in rows:
+        path = Path(row["file"])
+        if stems[path.stem] == 1:
+            names[row["file"]] = path.stem + ".json"
+        else:
+            names[row["file"]] = re.sub(r"[^A-Za-z0-9_-]+", "_", path.as_posix()) + ".json"
+    return names
 
 
 def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(footage / "FOOTAGE_MANIFEST.csv", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
+    names = _result_names(rows)
     for row in rows:
         if only and not any(part in row["file"] for part in only):
             continue
@@ -86,7 +118,7 @@ def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> N
         if not match:
             continue
         result: dict = {"file": row["file"], "event_code": row["event_code"], "match": int(match.group(1))}
-        target = out_dir / (Path(row["file"]).stem + ".json")
+        target = out_dir / names[row["file"]]
         cached = _load_json(target) if target.exists() else None
         same_clip = cached is not None and all(cached.get(key) == result[key] for key in ("file", "event_code", "match"))
         if same_clip and "error" not in cached and cached.get("complete") is not False:
