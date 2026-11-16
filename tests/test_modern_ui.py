@@ -141,6 +141,36 @@ class ShellWindowTests(unittest.TestCase):
         window.tabs.setCurrentIndex(0)
         self.assertEqual(window.nav.currentRow(), window._nav_rows[0])
 
+    def test_results_screens_are_unavailable_before_any_video_is_processed(self):
+        window = self.window
+        for index in range(2, 7):
+            self.assertFalse(window.tabs.isTabEnabled(index), index)
+        window._go_to_tab(4)
+        self.assertNotEqual(window.tabs.currentIndex(), 4)
+
+    def test_sidebar_tooltips_follow_availability(self):
+        window = self.window
+        self.assertIn("process the video", window.nav.item(window._nav_rows[4]).toolTip())
+        window._set_results_enabled(True)
+        self.assertEqual(window.nav.item(window._nav_rows[4]).toolTip(), "Scoring timeline (Ctrl+4)")
+        window._set_review_badge(2)
+        window._sync_nav()
+        self.assertIn("2 event(s) pending", window.nav.item(window._nav_rows[3]).toolTip())
+        window._set_review_badge(0)
+        self.assertEqual(window.nav.item(window._nav_rows[3]).toolTip(), "Review queue (Ctrl+3)")
+
+    def test_minimum_window_width_fits_every_panel(self):
+        # Fixed and minimum widths only, so the check does not depend on installed fonts.
+        from PySide6.QtWidgets import QFrame, QScrollArea, QSplitter
+        window = self.window
+        sidebar = window.findChild(QFrame, "Sidebar")
+        steps = next(area for area in window.findChildren(QScrollArea) if area.maximumWidth() == area.minimumWidth())
+        splitter = next(s for s in window.findChildren(QSplitter) if s.indexOf(window.canvas) >= 0)
+        needed = (sidebar.minimumWidth() + 2 * 24 + steps.minimumWidth() + 16 + window.canvas.minimumWidth()
+                  + splitter.handleWidth() + window.field_map.minimumWidth())
+        self.assertLessEqual(needed, window.minimumWidth())
+        self.assertLessEqual(window.minimumWidth(), window.width())
+
     def test_navigation_to_a_disabled_tab_is_refused(self):
         window = self.window
         window.tabs.setCurrentIndex(1)
@@ -200,7 +230,9 @@ class ShellWindowTests(unittest.TestCase):
     def test_pending_referee_ruling_and_ocr_proposal_use_the_pending_tone(self):
         self.db.set_match_type(self.video, "playoff")
         self.db.set_match_ruling(self.video, "playoff", playoff_disqualified={"red", "blue"})
+        self.db.set_analysis_status(self.video, "ready")
         self.attach()
+        self.window._set_results_enabled(True)
         self.window.load_match_ruling()
         self.window.update_score_comparison()
         self.assertIn("PENDING REFEREE RULING", self.window.ruling_status.text())
