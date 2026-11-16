@@ -325,6 +325,23 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual([(e["t_s"], e["event_type"], e["points"]) for e in proposal["events"]],
                          [(2.0, "major_foul", 20)])
 
+    def test_stream_cutting_from_auto_into_the_next_matchs_auto_starts_a_new_match(self):
+        rows = timeline([(0.0, {"clock": 140}), (2.0, {"red": 20, "red_tips": 1}),
+                         (5.0, {"clock": 150, "red": 0, "red_tips": 0}), (8.0, {"blue": 20, "blue_tips": 1}),
+                         (12.0, {"clock": 121}), (13.0, {"clock": 7}), (17.0, {"clock": 120}), (19.0, {"clock": 118})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, AUTO, TRANSITION, TELEOP])
+        self.assertEqual(proposal["match_start_s"], 5.0)
+        self.assertEqual([(e["t_s"], e["scoring_alliance"]) for e in proposal["events"]], [(8.0, "blue")])
+
+    def test_teleop_clock_jumping_up_is_a_cut_into_another_match(self):
+        rows = timeline([(0.0, {"clock": 100}), (2.0, {"red": 20, "red_tips": 1}),
+                         (5.0, {"clock": 115, "red": 0, "red_tips": 0}), (8.0, {"red": 20, "red_tips": 1})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [TELEOP, TELEOP])
+        self.assertEqual(proposal["match_end_s"], 5.0)
+        self.assertEqual([e["t_s"] for e in proposal["events"]], [2.0])
+
     def test_no_readings(self):
         proposal = propose_events([sample(0), sample(0.5)])
         self.assertEqual(proposal["events"], [])

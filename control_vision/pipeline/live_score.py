@@ -432,6 +432,11 @@ _TRANSITION_MAX_CLOCK_S = 8
 # clock above 2:00 after them or the end of a match is the next match's AUTO
 # (a stream may cut into it anywhere from 2:30 down).
 _NEW_MATCH_MIN_CLOCK_S = _AUTO_END_CLOCK_S + 1
+# Within AUTO or TELEOP the clock only counts down, so a stable rise of this
+# much is a cut into another match. (The only rise in a match, 0:01 to 2:00
+# at the end of the countdown, happens in TRANSITION.) A repeated phase in
+# match_phases marks such a new match.
+_NEW_MATCH_MIN_RISE_S = 5
 
 
 def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> list[tuple[float, str]]:
@@ -451,6 +456,13 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
             # the clock shows which (2:00 next, or 0:00).
             new = (AUTO if clock > _AUTO_END_CLOCK_S else ENDED if clock == 0
                    else TRANSITION if clock <= _TRANSITION_MAX_CLOCK_S else TELEOP)
+        elif (phase in (AUTO, TELEOP) and previous is not None and clock >= previous + _NEW_MATCH_MIN_RISE_S
+              and not (phase == TELEOP and clock >= _NEW_MATCH_MIN_CLOCK_S)):
+            # Same phase, later match: record it again so the match boundary shows.
+            phases.append((t_s, AUTO if clock > _AUTO_END_CLOCK_S else TELEOP))
+            phase = phases[-1][1]
+            previous = clock
+            continue
         elif phase == ENDED and 0 < clock <= _AUTO_END_CLOCK_S:
             # After 0:00 the clock only moves again in the next match: a cut
             # into its countdown or TELEOP (its AUTO was not shown).
@@ -583,7 +595,9 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
     autos = [index for index, (_, phase) in enumerate(phases) if phase == AUTO]
     # A clock moving again after the end (a cut into the next match's
     # countdown or TELEOP) also starts another match.
-    cuts = [index for index in range(1, len(phases)) if phases[index - 1][1] == ENDED and phases[index][1] != AUTO]
+    # So does a repeated TELEOP (the clock jumped up within TELEOP).
+    cuts = [index for index in range(1, len(phases)) if phases[index][1] != AUTO
+            and (phases[index - 1][1] == ENDED or phases[index - 1][1] == phases[index][1] == TELEOP)]
     starts = sorted(autos + cuts)
     played = [index for index in autos
               if any(phase == TELEOP for _, phase in phases[index + 1:next((a for a in starts if a > index), len(phases))])]

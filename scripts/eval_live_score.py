@@ -55,6 +55,11 @@ def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> N
         if target.exists():
             cached = json.loads(target.read_text(encoding="utf-8"))
             if "error" not in cached and cached.get("complete") is not False:
+                # Keep the read, but pick up an official result added since.
+                official = _official(official_dir, cached["event_code"], cached["match"])
+                if official != cached.get("official"):
+                    cached["official"] = official
+                    target.write_text(json.dumps(cached), encoding="utf-8")
                 continue  # a failed or stopped-early read is retried
         match = re.search(r"Qualification (\d+)", row["match_label_on_screen"])
         if not match:
