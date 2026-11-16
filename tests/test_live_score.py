@@ -301,6 +301,30 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, TRANSITION, ENDED])
         self.assertIn("end-of-match", proposal["events"][0]["note"])
 
+    def test_cut_from_the_end_into_the_next_matchs_teleop_ends_the_match_there(self):
+        rows = timeline([(0.0, {"clock": 60}), (2.0, {"red": 20, "red_tips": 1}), (5.0, {"clock": 0}),
+                         (10.0, {"clock": 100, "red": 5, "red_tips": 0}), (14.0, {"red": 25, "red_tips": 1})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [TELEOP, ENDED, TELEOP])
+        self.assertEqual(proposal["match_end_s"], 10.0)
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(2.0, "hive_tip_teleop")])
+
+    def test_clip_opening_on_the_last_final_score_then_cutting_into_teleop_reads_that_match(self):
+        rows = timeline([(0.0, {"clock": 0, "red": 80, "red_tips": 3}), (5.0, {"clock": 100, "red": 0, "red_tips": 0}),
+                         (8.0, {"red": 20, "red_tips": 1})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [ENDED, TELEOP])
+        self.assertEqual(proposal["match_start_s"], 5.0)
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(8.0, "hive_tip_teleop")])
+
+    def test_correction_cancels_the_latest_rises_that_add_up(self):
+        # A 20 (major foul), then 5 and 15; a 20 drop withdraws the 5 and 15.
+        rows = timeline([(0.0, {"clock": 100}), (2.0, {"red": 20}), (6.0, {"red": 25}), (10.0, {"red": 40}),
+                         (14.0, {"red": 20})])
+        proposal = propose_events(rows)
+        self.assertEqual([(e["t_s"], e["event_type"], e["points"]) for e in proposal["events"]],
+                         [(2.0, "major_foul", 20)])
+
     def test_no_readings(self):
         proposal = propose_events([sample(0), sample(0.5)])
         self.assertEqual(proposal["events"], [])
@@ -310,8 +334,9 @@ class ProposalTests(unittest.TestCase):
 class FakeCapture:
     """A 10 fps video of ``frames`` frames whose decoding fails from ``fail_at`` on."""
 
-    def __init__(self, frames, fail_at=None, raise_at=(), refuse_rewind=False, refuse_seek=False, decoded=None):
-        self.frames, self.fail_at, self.position = frames, fail_at, 0
+    def __init__(self, frames, fail_at=None, raise_at=(), refuse_rewind=False, refuse_seek=False, decoded=None,
+                 raise_seek=False):
+        self.frames, self.fail_at, self.position, self.raise_seek = frames, fail_at, 0, raise_seek
         self.raise_at, self.refuse_rewind, self.refuse_seek = set(raise_at), refuse_rewind, refuse_seek
         # Positions of the frames decoded with read(), shared across reopened captures.
         self.decoded = decoded if decoded is not None else []
@@ -324,6 +349,8 @@ class FakeCapture:
                 cv2.CAP_PROP_POS_FRAMES: float(self.position)}[prop]
 
     def set(self, prop, value):
+        if self.raise_seek:
+            raise cv2.error("seek not supported")
         if not (self.refuse_seek or (self.refuse_rewind and value == 0)):
             self.position = int(value)
 
@@ -437,6 +464,18 @@ class ReadOverlayTests(unittest.TestCase):
         self.assertEqual(decoded[:2], [50, 35])
         self.assertEqual(result["samples"][0]["t_s"], 0.0)
         self.assertEqual(len(result["samples"]), 20)
+        self.assertTrue(result["complete"])
+
+    def test_a_seek_that_raises_reopens_instead_of_escaping(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from control_vision.pipeline import live_score
+        decoded: list = []
+        with patch.object(live_score, "_engine", return_value=FakeEngine()),                 patch.object(live_score.cv2, "VideoCapture",
+                             side_effect=lambda *_: FakeCapture(100, raise_seek=True, decoded=decoded)),                 self.assertLogs("control_vision.pipeline.live_score", level="WARNING"):
+            result = live_score.read_live_overlay(Path("match.mp4"), sample_fps=2.0)
+        self.assertEqual(decoded[0], 50)
+        self.assertEqual(result["samples"][0]["t_s"], 0.0)
         self.assertTrue(result["complete"])
 
     def test_no_searchable_probe_is_a_reader_failure_not_a_missing_overlay(self):

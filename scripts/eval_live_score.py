@@ -52,8 +52,10 @@ def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> N
         if only and not any(part in row["file"] for part in only):
             continue
         target = out_dir / (Path(row["file"]).stem + ".json")
-        if target.exists() and "error" not in json.loads(target.read_text(encoding="utf-8")):
-            continue  # a failed read is retried
+        if target.exists():
+            cached = json.loads(target.read_text(encoding="utf-8"))
+            if "error" not in cached and cached.get("complete") is not False:
+                continue  # a failed or stopped-early read is retried
         match = re.search(r"Qualification (\d+)", row["match_label_on_screen"])
         if not match:
             continue
