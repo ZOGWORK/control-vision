@@ -30,18 +30,24 @@ FIELDS = ("auto_tips", "teleop_tips", "foul_credit")
 
 
 def _official(official_dir: Path, event_code: str, number: int) -> dict | None:
+    """The official result of one qualification match, or None when it is missing or the file is malformed (a bad
+    official file must not stop the read of every other clip)."""
     path = official_dir / f"{event_code}.json"
     if not path.is_file():
         return None
-    matches = json.loads(path.read_text(encoding="utf-8"))
-    match = next((m for m in matches if m.get("tournamentLevel") == "Quals" and m.get("id") == number), None)
-    if not match or not match.get("scores"):
+    try:
+        matches = json.loads(path.read_text(encoding="utf-8"))
+        match = next((m for m in matches if m.get("tournamentLevel") == "Quals" and m.get("id") == number), None)
+        if not match or not match.get("scores"):
+            return None
+        result = {}
+        for alliance in ("red", "blue"):
+            s = match["scores"][alliance]
+            result[alliance] = {"auto_tips": s["autoHiveTips"], "teleop_tips": s["dcHiveTips"],
+                                "foul_credit": s["penaltyPointsByOpp"], "total": s["totalPoints"]}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:  # JSONDecodeError is a ValueError
+        print(f"Official results {path.name} are unreadable for Q{number}: {exc!r}", file=sys.stderr, flush=True)
         return None
-    result = {}
-    for alliance in ("red", "blue"):
-        s = match["scores"][alliance]
-        result[alliance] = {"auto_tips": s["autoHiveTips"], "teleop_tips": s["dcHiveTips"],
-                            "foul_credit": s["penaltyPointsByOpp"], "total": s["totalPoints"]}
     return result
 
 
@@ -76,19 +82,22 @@ def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> N
     for row in rows:
         if only and not any(part in row["file"] for part in only):
             continue
-        target = out_dir / (Path(row["file"]).stem + ".json")
-        cached = _load_json(target) if target.exists() else None
-        if cached is not None and "error" not in cached and cached.get("complete") is not False:
-            # Keep the read, but pick up an official result added since.
-            official = _official(official_dir, cached["event_code"], cached["match"])
-            if official != cached.get("official"):
-                cached["official"] = official
-                _write_json(target, cached)
-            continue  # a failed, stopped-early or unreadable result is read again
         match = re.search(r"Qualification (\d+)", row["match_label_on_screen"])
         if not match:
             continue
         result: dict = {"file": row["file"], "event_code": row["event_code"], "match": int(match.group(1))}
+        target = out_dir / (Path(row["file"]).stem + ".json")
+        cached = _load_json(target) if target.exists() else None
+        same_clip = cached is not None and all(cached.get(key) == result[key] for key in ("file", "event_code", "match"))
+        if same_clip and "error" not in cached and cached.get("complete") is not False:
+            # Keep the read, but pick up an official result added since.
+            official = _official(official_dir, result["event_code"], result["match"])
+            if official != cached.get("official"):
+                cached["official"] = official
+                _write_json(target, cached)
+            continue
+        # A failed, stopped-early or unreadable result is read again, and so is one written for a different
+        # manifest row (a corrected event or match label, or another file with the same name stem).
         started = time.time()
         try:
             reading = read_live_overlay(footage / row["file"])
@@ -125,16 +134,24 @@ def report(results_dir: Path) -> None:
         if not official:
             failed.append(f"{path.stem}: no official result")
             continue
-        summary = summarize(propose_events(result["samples"]))
-        for alliance in ("red", "blue"):
-            got = tuple(summary[alliance][field] for field in FIELDS)
-            want = tuple(official[alliance][field] for field in FIELDS)
+        try:
+            # Compute both alliances before counting either, so a malformed file adds nothing.
+            summary = summarize(propose_events(result["samples"]))
+            rows = []
+            for alliance in ("red", "blue"):
+                got = tuple(summary[alliance][field] for field in FIELDS)
+                want = tuple(official[alliance][field] for field in FIELDS)
+                rows.append((alliance, got, want, summary[alliance]["last_stable_score"], official[alliance]["total"]))
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            failed.append(f"{path.stem}: result file is malformed ({exc!r}); run `read` again to redo it")
+            continue
+        for alliance, got, want, last_score, total in rows:
             compared += 1
             for field, a, b in zip(FIELDS, got, want):
                 exact[field] += a == b
             mark = "" if got == want else " ✗"
             lines.append(f"| {result['event_code']} Q{result['match']} | {alliance} | {' / '.join(map(str, got))}{mark} | "
-                         f"{' / '.join(map(str, want))} | {summary[alliance]['last_stable_score']} | {official[alliance]['total']} |")
+                         f"{' / '.join(map(str, want))} | {last_score} | {total} |")
     print(f"Alliance results compared: {compared}\n")
     for field in FIELDS:
         print(f"- {field.replace('_', ' ')}: {exact[field]} / {compared} exact")

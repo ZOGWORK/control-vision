@@ -535,7 +535,9 @@ class ReadOverlayTests(unittest.TestCase):
                 patch.object(live_score.cv2, "VideoCapture", return_value=capture), \
                 self.assertRaises(InterruptedError):
             live_score.read_live_overlay(Path("match.mp4"), sample_fps=2.0, cancel=lambda: True)
+        # Nothing was read or grabbed (grab() advances the position without recording a decode).
         self.assertEqual(capture.decoded, [])
+        self.assertEqual(capture.position, 0)
 
     def test_a_seek_that_raises_reopens_instead_of_escaping(self):
         from pathlib import Path
@@ -639,6 +641,73 @@ class EvalCacheTests(unittest.TestCase):
                     self.script.read(footage, folder / "official", out, [])
                 reader.assert_called_once()
                 self.assertEqual(json.loads((out / "clip.json").read_text(encoding="utf-8"))["samples"], [])
+
+    def test_a_bad_official_file_does_not_stop_the_read(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out, official = self._footage(folder), folder / "results", folder / "official"
+            with open(footage / "FOOTAGE_MANIFEST.csv", "a", encoding="utf-8") as handle:
+                handle.write("other.mp4,GOOD,Qualification 4\n")
+            official.mkdir()
+            (official / "TEST.json").write_text('[{"tournamentLevel": "Quals", "id": 3, "sco', encoding="utf-8")
+            (official / "GOOD.json").write_text(json.dumps([{"tournamentLevel": "Quals", "id": 4, "scores": {
+                "red": {}, "blue": {}}}]), encoding="utf-8")  # scores without the fields
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader, \
+                    patch("sys.stderr"):
+                self.script.read(footage, official, out, [])
+            self.assertEqual(reader.call_count, 2)
+            for stem in ("clip", "other"):
+                result = json.loads((out / f"{stem}.json").read_text(encoding="utf-8"))
+                self.assertIsNone(result["official"])
+                self.assertEqual(result["samples"], [])
+
+    def test_a_result_written_for_another_manifest_row_is_read_again(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out = self._footage(folder), folder / "results"
+            out.mkdir()
+            # The manifest now says Qualification 3; the cached read was made when it said 2.
+            (out / "clip.json").write_text(json.dumps({"file": "clip.mp4", "event_code": "TEST", "match": 2,
+                                                       "samples": [], "complete": True}), encoding="utf-8")
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", out, [])
+            reader.assert_called_once()
+            self.assertEqual(json.loads((out / "clip.json").read_text(encoding="utf-8"))["match"], 3)
+
+    def test_report_lists_a_malformed_result_and_still_compares_the_others(self):
+        import contextlib
+        import io
+        import json
+        import tempfile
+        from pathlib import Path
+        official = {alliance: {"auto_tips": 0, "teleop_tips": 0, "foul_credit": 0, "total": 0}
+                    for alliance in ("red", "blue")}
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            (out / "bad.json").write_text(json.dumps({"event_code": "T", "match": 1, "samples": [{"red_score": 5}],
+                                                      "complete": True, "official": official}), encoding="utf-8")
+            (out / "bad-official.json").write_text(json.dumps({"event_code": "T", "match": 2, "samples": [],
+                                                               "complete": True, "official": {"red": {}}}),
+                                                   encoding="utf-8")
+            (out / "good.json").write_text(json.dumps({"event_code": "T", "match": 3, "samples": [],
+                                                       "complete": True, "official": official}), encoding="utf-8")
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                self.script.report(out)
+            text = printed.getvalue()
+            self.assertIn("Alliance results compared: 2", text)
+            self.assertIn("bad: result file is malformed", text)
+            self.assertIn("bad-official: result file is malformed", text)
 
     def test_report_lists_a_truncated_result_instead_of_failing(self):
         import contextlib
