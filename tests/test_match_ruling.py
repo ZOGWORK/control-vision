@@ -391,6 +391,8 @@ class MatchRulingUiTests(unittest.TestCase):
         self.addCleanup(warning.stop)
         self.window = MainWindow()
         self.window.db, self.window.project_id, self.window.video_id = self.db, self.project, self.video
+        # The video is analysed, so its result screens (Export holds the ruling) are available.
+        self.window._set_results_enabled(True)
         self.window.load_match_ruling()
         self.window.update_score_comparison()
 
