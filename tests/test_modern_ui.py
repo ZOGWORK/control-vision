@@ -237,6 +237,10 @@ class ShellWindowTests(unittest.TestCase):
         self.window.update_score_comparison()
         self.assertIn("PENDING REFEREE RULING", self.window.ruling_status.text())
         self.assertEqual(self.window.ruling_status.property("tone"), "pending")
+        with patch.object(self.window, "current_scoreboard", side_effect=ValueError("invalid stored ruling")):
+            self.window.update_score_comparison()
+        self.assertEqual(self.window.ruling_status.text(), "invalid stored ruling")
+        self.assertEqual(self.window.ruling_status.property("tone"), "danger")
         self.window.show_scoreboard_ocr({"frames_sampled": 5, "red": {"value": 40, "confidence": 0.9},
                                          "blue": {"value": 30, "confidence": 0.9}})
         self.assertEqual(self.window.scoreboard_ocr_status.property("tone"), "pending")
@@ -289,9 +293,40 @@ class ShellWindowTests(unittest.TestCase):
         self.assertIn("Could not open project", window.progress_label.text())
         self.assertEqual(window.progress_label.property("tone"), "danger")
 
+    def test_loading_a_video_whose_analysis_did_not_finish_shows_an_error(self):
+        from control_vision.app import main_window as mw
+        import numpy as np
+        window = self.window
+        self.attach()
+        Path(self.db.path.parent / "Q1.mp4").write_bytes(b"")
+        self.db.connection.execute("UPDATE videos SET path=? WHERE id=?", (str(self.db.path.parent / "Q1.mp4"), self.video))
+        self.db.connection.commit()
+        frame = np.zeros((72, 128, 3), dtype=np.uint8)
+        for status, tone in (("failed", "danger"), ("running", "danger"), ("unprocessed", "info")):
+            self.db.set_analysis_status(self.video, status)
+            with patch.object(mw, "probe_video", return_value=dict(META, warnings=[])), \
+                    patch.object(mw.cv2, "VideoCapture") as capture:
+                capture.return_value.read.return_value = (True, frame)
+                window.load_saved_video_id(self.video)
+            self.assertEqual(window.progress_label.property("tone"), tone, status)
+
     def test_progress_bar_shows_only_while_processing(self):
+        from control_vision.app import main_window as mw
         window = self.window
         self.assertTrue(window.status_progress.isHidden())
+        self.attach()
+        window.video_path = Path("Q1.mp4")
+        window.corners = [[0, 0], [100, 0], [100, 100], [0, 100]]
+        window.seed_points = [(self.robot, 10, 10)]
+        window.tracking_mode.setCurrentIndex(window.tracking_mode.findData("seeded_optical_flow"))
+        # Start a run without a real worker thread; process() itself must show the bar.
+        with patch.object(mw, "ProcessingWorker"), patch.object(mw, "QThread") as thread:
+            window.process()
+        self.addCleanup(lambda: [handler.close() for handler in window.logger.handlers])
+        thread.return_value.start.assert_called_once()
+        self.assertFalse(window.status_progress.isHidden())
+        self.assertEqual(window.status_progress.value(), 0)
+        self.assertEqual(window._step_widgets["process"][0].property("state"), "running")
         window.show_progress("Tracking", 42.4, "frame 10")
         self.assertEqual(window.status_progress.value(), 42)
         self.assertIn("42%", window._step_widgets["process"][1].text())
