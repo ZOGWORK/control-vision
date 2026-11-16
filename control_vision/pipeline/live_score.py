@@ -224,6 +224,7 @@ def read_frame(recognizer, frame: np.ndarray, layout: OverlayLayout) -> dict:
 RAPIDOCR_REQUIREMENT = "rapidocr-onnxruntime==1.4.4"
 _LOCATE_FRACTIONS = (0.5, 0.35, 0.65, 0.2, 0.8)
 _MAX_CONSECUTIVE_READ_FAILURES = 5
+_READ_FIELDS = ("red_score", "blue_score", "red_tips", "blue_tips", "clock_s")
 
 
 def _engine():
@@ -370,7 +371,13 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
     finally:
         cap.release()
     if not samples:
-        raise RuntimeError(f"Could not read any frame of {video_path.name}.")
+        reason = f": {stopped}" if stopped else ""
+        raise RuntimeError(f"Could not read any frame of {video_path.name}{reason}.")
+    if not any(sample.get(key) is not None for sample in samples for key in _READ_FIELDS):
+        # Every frame decoded but no field parsed: the overlay is not there
+        # (or not where the layout says), which is not a scoreless match.
+        raise RuntimeError(f"No score, clock or HIVE TIP count could be read from the overlay in {video_path.name} "
+                           f"({len(samples)} sampled frames); check that it shows the FTC Live overlay.")
     duration = frame_count / fps
     if stopped:
         # Events after this point are missing, so callers must not treat the
@@ -415,9 +422,10 @@ AUTO, TRANSITION, TELEOP, ENDED = "AUTO", "TRANSITION", "TELEOP", "ENDED"
 # (8 s or less), then counts 2:00 to 0:00 in TELEOP.
 _AUTO_END_CLOCK_S = 120
 _TRANSITION_MAX_CLOCK_S = 8
-# A stable clock at or above this after TELEOP or the end of a match is a new
-# match starting (its AUTO counts down from 2:30).
-_NEW_MATCH_MIN_CLOCK_S = 140
+# TELEOP never shows more than 2:00 and the countdown at most 0:08, so a stable
+# clock above 2:00 after them or the end of a match is the next match's AUTO
+# (a stream may cut into it anywhere from 2:30 down).
+_NEW_MATCH_MIN_CLOCK_S = _AUTO_END_CLOCK_S + 1
 
 
 def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> list[tuple[float, str]]:
@@ -438,8 +446,8 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
             new = (AUTO if clock > _AUTO_END_CLOCK_S else ENDED if clock == 0
                    else TRANSITION if clock <= _TRANSITION_MAX_CLOCK_S else TELEOP)
         elif phase in (TELEOP, ENDED, TRANSITION) and clock >= _NEW_MATCH_MIN_CLOCK_S:
-            # The countdown runs into 2:00, so 2:20 or more after it is the
-            # next match; an opening "TRANSITION" before it was TELEOP.
+            # The countdown runs into 2:00, so a clock above 2:00 after it is
+            # the next match; an opening "TRANSITION" before it was TELEOP.
             if phase == TRANSITION and len(phases) == 1:
                 phases[0] = (phases[0][0], TELEOP)
             new = AUTO
