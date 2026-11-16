@@ -339,8 +339,10 @@ class SeedMatchingTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertGreaterEqual(events[0]["t_s"], 1.0)
 
-    def test_every_non_robot_class_counts_as_a_goal_element(self):
-        # Four-class models: class 3 (blue_nectar) arriving in the ROI is flagged.
+    def test_goal_element_classes_1_to_3_count_and_class_4_does_not(self):
+        # Four-class models: class 3 (blue_nectar) arriving in the ROI is flagged. Class 4 is in no supported
+        # schema; its box sits more than 35 px (the ROI candidate de-duplication radius) from the class-3 box,
+        # so counting it would add a second event instead of being merged into the first.
         import numpy as np
         from types import SimpleNamespace
 
@@ -362,7 +364,7 @@ class SeedMatchingTests(unittest.TestCase):
             # Class 3 (blue_nectar) arrives; class 4 (not in any supported schema) is ignored.
             balls = [] if frame_index < 16 else [SimpleNamespace(cls=[3], xyxy=np.array([[85, 40, 95, 50]]),
                                                                   conf=[0.9], id=[12]),
-                                                  SimpleNamespace(cls=[4], xyxy=np.array([[60, 40, 70, 50]]),
+                                                  SimpleNamespace(cls=[4], xyxy=np.array([[40, 80, 50, 90]]),
                                                                   conf=[0.9], id=[13])]
             frame_index += 1
             return [SimpleNamespace(boxes=[robot, *balls])]
