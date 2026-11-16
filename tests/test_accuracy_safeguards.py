@@ -711,6 +711,112 @@ class ReviewSelectionTests(unittest.TestCase):
             window.close()
 
 
+class LiveScoreUiTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        from PySide6.QtWidgets import QApplication
+        from control_vision.app.main_window import MainWindow
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        self.app = QApplication.instance() or QApplication([])
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.db = ProjectDatabase(Path(self.folder.name) / "project.sqlite")
+        project_id = self.db.add_project("live")
+        meta = {"duration_s": 160, "fps": 30, "width": 1280, "height": 720}
+        self.video_id = self.db.add_video(project_id, Path("match.mp4"), meta)
+        self.other_video = self.db.add_video(project_id, Path("other.mp4"), meta)
+        self.db.set_analysis_status(self.video_id, "ready")
+        self.window = MainWindow()
+        self.window.db = self.db
+        self.window.video_id = self.video_id
+        self.addCleanup(self.db.close)
+        self.addCleanup(self.window.close)
+        self.events = [
+            {"t_s": 20.0, "points": 20, "scoring_alliance": "red", "event_type": "hive_tip_auto", "confidence": "high"},
+            {"t_s": 70.0, "points": 5, "scoring_alliance": "blue", "event_type": "minor_foul", "confidence": "medium"},
+            {"t_s": 150.0, "points": 5, "scoring_alliance": "red", "event_type": "unclassified", "confidence": "low"},
+        ]
+
+    def _live_rows(self, video_id):
+        return [row for row in self.db.events_for_video(video_id) if row["source"] == "live_overlay"]
+
+    def test_finished_read_adds_flagged_events_and_says_what_it_found(self):
+        self.window._live_video_id = self.video_id
+        self.window._live_active = True
+        self.window.read_live_score_btn.setEnabled(False)
+        self.window.live_score_done({"complete": True, "stopped_early": None, "read_until_s": 160.0,
+                                     "duration_s": 160.0, "events": self.events, "match_start_s": 5.0})
+        self.assertEqual(len(self._live_rows(self.video_id)), 3)
+        self.assertFalse(self.window._live_active)
+        self.assertTrue(self.window.read_live_score_btn.isEnabledTo(self.window.read_live_score_btn.parentWidget()))
+        text = self.window.live_score_status.text()
+        self.assertIn("3 proposed events (1 HIVE TIPS, 1 foul credits, 1 other score changes)", text)
+        self.assertIn("3 added to Review", text)
+        self.assertEqual(self.window.live_score_status.property("tone"), "pending")
+
+    def test_incomplete_read_warns_that_later_events_are_missing(self):
+        self.window._live_video_id = self.video_id
+        self.window.live_score_done({"complete": False, "stopped_early": "decode failures", "read_until_s": 64.0,
+                                     "duration_s": 160.0, "events": self.events[:1], "match_start_s": 5.0})
+        text = self.window.live_score_status.text()
+        self.assertIn("stopped early (decode failures)", text)
+        self.assertIn("after 64 s are missing", text)
+        self.assertEqual(self.window.live_score_status.property("tone"), "danger")
+
+    def test_incomplete_reread_keeps_proposals_beyond_where_it_stopped(self):
+        self.window._live_video_id = self.video_id
+        self.window.live_score_done({"complete": True, "events": self.events})
+        self.window.live_score_done({"complete": False, "stopped_early": "decode failures", "read_until_s": 64.0,
+                                     "events": self.events[:1]})
+        self.assertEqual(sorted(row["t_s"] for row in self._live_rows(self.video_id)), [20.0, 70.0, 150.0])
+
+    def test_result_for_another_video_is_not_written(self):
+        self.window._live_video_id = self.other_video
+        self.window.live_score_done({"complete": True, "events": self.events})
+        self.assertEqual(self._live_rows(self.video_id), [])
+        self.assertEqual(self._live_rows(self.other_video), [])
+        self.assertIn("nothing was added to Review", self.window.live_score_status.text())
+        self.assertEqual(self.window.live_score_status.property("tone"), "danger")
+
+    def test_database_error_while_saving_is_reported_not_raised(self):
+        import sqlite3
+        self.window._live_video_id = self.video_id
+        self.window._live_active = True
+        with patch.object(self.db, "replace_live_overlay_events", side_effect=sqlite3.OperationalError("database is locked")):
+            self.window.live_score_done({"complete": True, "events": self.events})
+        text = self.window.live_score_status.text()
+        self.assertIn("could not be saved (database is locked)", text)
+        self.assertEqual(self.window.live_score_status.property("tone"), "danger")
+        self.assertFalse(self.window._live_active)
+
+    def test_failure_reenables_the_button_and_shows_the_error(self):
+        self.window._live_active = True
+        self.window.read_live_score_btn.setEnabled(False)
+        self.window.live_score_failed("No FTC Live overlay found")
+        self.assertFalse(self.window._live_active)
+        self.assertTrue(self.window.read_live_score_btn.isEnabledTo(self.window.read_live_score_btn.parentWidget()))
+        self.assertIn("No FTC Live overlay found", self.window.live_score_status.text())
+
+    def test_worker_reports_a_proposal_and_a_cancel(self):
+        from control_vision.app.main_window import LiveScoreWorker
+
+        reading = {"samples": [], "complete": True, "stopped_early": None, "read_until_s": 9.0, "duration_s": 9.0}
+        worker = LiveScoreWorker(Path("match.mp4"))
+        results, failures = [], []
+        worker.done.connect(results.append)
+        worker.failed.connect(failures.append)
+        with patch("control_vision.app.main_window.read_live_overlay", return_value=reading), \
+             patch("control_vision.app.main_window.propose_events",
+                   return_value={"events": self.events, "match_start_s": 1.0}):
+            worker.run()
+        self.assertEqual(results[0]["events"], self.events)
+        self.assertEqual(results[0]["match_start_s"], 1.0)
+        with patch("control_vision.app.main_window.read_live_overlay", side_effect=InterruptedError):
+            worker.run()
+        self.assertIn("cancelled", failures[0])
+
+
 class ShutdownTests(unittest.TestCase):
     def test_active_analysis_blocks_project_and_video_switches(self):
         from types import SimpleNamespace
@@ -719,8 +825,8 @@ class ShutdownTests(unittest.TestCase):
         class ActiveThread:
             def isRunning(self): return True
 
-        for slot in ("_thread", "_ocr_thread"):
-            window = SimpleNamespace(_thread=None, _ocr_thread=None)
+        for slot in ("_thread", "_ocr_thread", "_live_thread"):
+            window = SimpleNamespace(_thread=None, _ocr_thread=None, _live_thread=None)
             setattr(window, slot, ActiveThread())
             with self.subTest(slot=slot), \
                  patch("control_vision.app.main_window.QMessageBox.information") as notice, \
@@ -766,6 +872,8 @@ class ShutdownTests(unittest.TestCase):
             _worker=Worker(), _thread=Thread(), _ocr_worker=None, _ocr_thread=None,
             processing_done=lambda *_: None, processing_failed=lambda *_: None,
             scoreboard_ocr_done=lambda *_: None, scoreboard_ocr_failed=lambda *_: None,
+            _live_worker=None, _live_thread=None,
+            live_score_done=lambda *_: None, live_score_failed=lambda *_: None,
             capture=SimpleNamespace(release=lambda: calls.append("release")),
             db=SimpleNamespace(close=lambda: calls.append("db_close")),
         )
@@ -773,6 +881,39 @@ class ShutdownTests(unittest.TestCase):
         MainWindow.closeEvent(fake, event)
         self.assertLess(calls.index("wait"), calls.index("db_close"))
         self.assertEqual(calls[-1], "accept")
+
+    def test_close_that_times_out_reconnects_the_worker_so_its_state_clears(self):
+        from types import SimpleNamespace
+        from control_vision.app.main_window import MainWindow
+
+        calls = []
+        class Signal:
+            def __init__(self, name): self.name = name
+            def disconnect(self, slot): calls.append(("disconnect", self.name))
+            def connect(self, slot): calls.append(("connect", self.name, slot))
+        class Worker:
+            def __init__(self):
+                self.done, self.failed = Signal("done"), Signal("failed")
+            def cancel(self): calls.append("cancel")
+        class Thread:
+            def isRunning(self): return True
+            def quit(self): pass
+            def wait(self, timeout): return False
+        done_slot, failed_slot = (lambda *_: None), (lambda *_: None)
+        fake = SimpleNamespace(
+            _worker=None, _thread=None, _ocr_worker=None, _ocr_thread=None,
+            _live_worker=Worker(), _live_thread=Thread(),
+            processing_done=None, processing_failed=None, scoreboard_ocr_done=None, scoreboard_ocr_failed=None,
+            live_score_done=done_slot, live_score_failed=failed_slot,
+            statusBar=lambda: SimpleNamespace(showMessage=lambda text: calls.append("message")),
+            capture=None, db=SimpleNamespace(close=lambda: calls.append("db_close")),
+        )
+        event = SimpleNamespace(accept=lambda: calls.append("accept"), ignore=lambda: calls.append("ignore"))
+        MainWindow.closeEvent(fake, event)
+        self.assertIn(("connect", "done", done_slot), calls)
+        self.assertIn(("connect", "failed", failed_slot), calls)
+        self.assertEqual(calls[-1], "ignore")
+        self.assertNotIn("db_close", calls)
 
 
 class VideoIngestTests(unittest.TestCase):

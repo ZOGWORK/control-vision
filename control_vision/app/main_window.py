@@ -32,6 +32,7 @@ from control_vision.pipeline.manual_tracking import track_seeded_video
 from control_vision.pipeline.cycles import count_zone_cycles
 from control_vision.pipeline.clips import create_highlight, thumbnail
 from control_vision.pipeline.stats import robot_statistics
+from control_vision.pipeline.live_score import propose_events, read_live_overlay
 from control_vision.pipeline.scoreboard_ocr import read_scoreboard
 from control_vision.scout.exports import export_scout_json, export_stats_csv, match_scoreboard
 from control_vision.storage.database import ProjectDatabase
@@ -224,6 +225,35 @@ class ScoreboardOcrWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class LiveScoreWorker(QObject):
+    """Reads the live score overlay and proposes events, off the UI thread."""
+    progress = Signal(float, str)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, video_path: Path):
+        super().__init__()
+        self.video_path = video_path
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def run(self):
+        try:
+            reading = read_live_overlay(self.video_path,
+                                        progress=lambda percent, detail: self.progress.emit(percent, detail),
+                                        cancel=lambda: self.cancelled)
+            proposal = propose_events(reading["samples"])
+            self.done.emit({"complete": reading["complete"], "stopped_early": reading["stopped_early"],
+                            "read_until_s": reading["read_until_s"], "duration_s": reading["duration_s"],
+                            "events": proposal["events"], "match_start_s": proposal.get("match_start_s")})
+        except InterruptedError:
+            self.failed.emit("Reading the live score overlay was cancelled.")
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class IdentityDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -267,11 +297,13 @@ def missing_robot_labels(robots, robot_ids, track_rows) -> list[str]:
 
 
 def _video_switch_blocked(window) -> bool:
-    if getattr(window, "_processing_active", False) or getattr(window, "_ocr_active", False):
+    if (getattr(window, "_processing_active", False) or getattr(window, "_ocr_active", False)
+            or getattr(window, "_live_active", False)):
         QMessageBox.information(window, "Analysis in progress",
                                 "Wait for processing or scoreboard OCR to finish, or cancel processing, before changing projects or videos.")
         return True
-    for thread in (getattr(window, "_thread", None), getattr(window, "_ocr_thread", None)):
+    for thread in (getattr(window, "_thread", None), getattr(window, "_ocr_thread", None),
+                   getattr(window, "_live_thread", None)):
         try:
             if thread is not None and thread.isRunning():
                 QMessageBox.information(window, "Analysis in progress",
@@ -597,6 +629,15 @@ class MainWindow(QMainWindow):
         self.scoreboard_ocr_status.setAccessibleName("Scoreboard OCR status")
         ocr_row = QHBoxLayout(); ocr_row.addWidget(self.read_scoreboard_btn); ocr_row.addWidget(self.use_ocr_btn); ocr_row.addStretch(1)
         score_layout.addLayout(ocr_row); score_layout.addWidget(self.scoreboard_ocr_status)
+        self.read_live_score_btn = QPushButton("Read live score overlay")
+        self.read_live_score_btn.setToolTip("Read the FTC Live overlay through the match and add its HIVE TIPS, foul credits "
+                                            "and other score changes to Review as flagged events.")
+        self.live_score_status = _label("The live overlay gives each alliance's score changes with their time. Events are "
+                                        "added to Review flagged, with no robot: choose the robot only if the video shows it.",
+                                        tone="info", wrap=True)
+        self.live_score_status.setAccessibleName("Live score overlay status")
+        live_row = QHBoxLayout(); live_row.addWidget(self.read_live_score_btn); live_row.addStretch(1)
+        score_layout.addLayout(live_row); score_layout.addWidget(self.live_score_status)
         self.score_compare = _label("Video totals include confirmed events only.", tone="info", wrap=True)
         self.score_compare.setAccessibleName("Score comparison")
         score_layout.addWidget(self.score_compare)
@@ -702,6 +743,7 @@ class MainWindow(QMainWindow):
         self.json_export_btn.clicked.connect(self.export_json)
         self.photos_export_btn.clicked.connect(self.export_photos)
         self.read_scoreboard_btn.clicked.connect(self.start_scoreboard_ocr)
+        self.read_live_score_btn.clicked.connect(self.start_live_score)
         self.use_ocr_btn.clicked.connect(self.apply_scoreboard_ocr)
         self.official_red.textChanged.connect(self.update_score_comparison)
         self.official_blue.textChanged.connect(self.update_score_comparison)
@@ -731,6 +773,10 @@ class MainWindow(QMainWindow):
         self._ocr_worker = None
         self._ocr_thread = None
         self._ocr_active = False
+        self._live_worker = None
+        self._live_thread = None
+        self._live_active = False
+        self._live_video_id = None
         self.scoreboard_ocr = None
         # No video is loaded yet, so there are no results to show.
         self._set_results_enabled(False)
@@ -1977,6 +2023,66 @@ class MainWindow(QMainWindow):
         self.scoreboard_ocr_status.setText(f"Scoreboard OCR did not finish: {message}")
         self._ocr_active = False
 
+    def start_live_score(self):
+        if not self._results_current(): return
+        if not self.db or not self.video_path or self.video_id is None:
+            QMessageBox.information(self, "Load a video", "Import or load a video before reading its live score overlay."); return
+        self.read_live_score_btn.setEnabled(False)
+        self._live_video_id = self.video_id
+        self._live_worker = LiveScoreWorker(self.video_path)
+        self._live_thread = QThread(self)
+        self._live_worker.moveToThread(self._live_thread)
+        self._live_thread.started.connect(self._live_worker.run)
+        self._live_worker.progress.connect(self.show_live_score_progress)
+        self._live_worker.done.connect(self.live_score_done)
+        self._live_worker.failed.connect(self.live_score_failed)
+        self._live_worker.done.connect(self._live_thread.quit)
+        self._live_worker.failed.connect(self._live_thread.quit)
+        self._live_thread.finished.connect(self._live_thread.deleteLater)
+        self._live_active = True
+        self._live_thread.start()
+
+    def show_live_score_progress(self, percent: float, detail: str):
+        theme.set_tone(self.live_score_status, "info")
+        self.live_score_status.setText(f"Reading the live score overlay — {percent:.0f}% — {detail}")
+
+    def live_score_done(self, result: dict):
+        self._live_active = False
+        self.read_live_score_btn.setEnabled(True)
+        # Switching videos is blocked while reading, but never write one
+        # video's events into another.
+        if not self.db or self.video_id is None or self.video_id != self._live_video_id:
+            theme.set_tone(self.live_score_status, "danger")
+            self.live_score_status.setText("The live score overlay was read for a video that is no longer loaded, "
+                                           "so nothing was added to Review. Read it again for this video.")
+            return
+        try:
+            # A read that stopped early replaces proposals only up to where it read.
+            until = None if result.get("complete", True) else result.get("read_until_s")
+            counts = self.db.replace_live_overlay_events(self.video_id, result["events"], until)
+        except (ValueError, sqlite3.Error) as exc:
+            self.live_score_failed(f"the events could not be saved ({exc})"); return
+        self.refresh_result_tables()
+        events = result["events"]
+        tips = sum(1 for event in events if event["event_type"].startswith("hive_tip"))
+        fouls = sum(1 for event in events if event["event_type"].endswith("_foul"))
+        message = (f"Live overlay read: {len(events)} proposed events ({tips} HIVE TIPS, {fouls} foul credits, "
+                   f"{len(events) - tips - fouls} other score changes); {counts['added']} added to Review, "
+                   f"{counts['kept']} already reviewed or clipped kept. Check each one against the video.")
+        tone = "pending"
+        if not result.get("complete", True):
+            message += (f" The read stopped early ({result.get('stopped_early')}), so events after "
+                        f"{result.get('read_until_s', 0):.0f} s are missing.")
+            tone = "danger"
+        theme.set_tone(self.live_score_status, tone)
+        self.live_score_status.setText(message)
+
+    def live_score_failed(self, message: str):
+        self._live_active = False
+        self.read_live_score_btn.setEnabled(True)
+        theme.set_tone(self.live_score_status, "danger")
+        self.live_score_status.setText(f"Reading the live score overlay did not finish: {message}")
+
     def apply_scoreboard_ocr(self):
         if not self.scoreboard_ocr:
             return
@@ -2126,6 +2232,7 @@ class MainWindow(QMainWindow):
         for worker, thread, done_slot, failed_slot in (
             (self._worker, self._thread, self.processing_done, self.processing_failed),
             (self._ocr_worker, self._ocr_thread, self.scoreboard_ocr_done, self.scoreboard_ocr_failed),
+            (self._live_worker, self._live_thread, self.live_score_done, self.live_score_failed),
         ):
             if worker:
                 worker.cancel()
@@ -2141,6 +2248,11 @@ class MainWindow(QMainWindow):
             if running:
                 thread.quit()
                 if not thread.wait(30000):
+                    # The window stays open, so the worker's completion must
+                    # still clear its busy state when it finally finishes.
+                    if worker:
+                        worker.done.connect(done_slot)
+                        worker.failed.connect(failed_slot)
                     self.statusBar().showMessage("Still cancelling processing; close again after it finishes.")
                     event.ignore()
                     return
