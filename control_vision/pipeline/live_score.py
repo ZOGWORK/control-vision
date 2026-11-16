@@ -247,6 +247,27 @@ def _decode(cap, logger, video_path: Path, index: int, grab: bool = False):
         return False, None
 
 
+def _seek(cap, logger, video_path: Path, target: int):
+    """A capture whose next frame is ``target``.
+
+    Some backends ignore or misplace a seek, so the position is checked; if it
+    is wrong the video is reopened and decoded forward to ``target``.
+    Returns (capture, ok); the old capture is released when replaced.
+    """
+    cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+    if cap.get(cv2.CAP_PROP_POS_FRAMES) == target:
+        return cap, True
+    logger.warning("Could not seek %s to frame %d; reopening it and decoding forward", video_path.name, target)
+    cap.release()
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not read video file {video_path.name}.")
+    for index in range(target):
+        if not _decode(cap, logger, video_path, index, grab=True)[0]:
+            return cap, False
+    return cap, True
+
+
 def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sample_fps: float = 2.0,
                       progress: Callable[[float, str], None] | None = None,
                       cancel: Callable[[], bool] | None = None) -> dict:
@@ -269,36 +290,43 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
         if not math.isfinite(fps) or fps <= 0 or frame_count <= 0:
             raise RuntimeError(f"Could not read video timing from {video_path.name}.")
         if layout is None:
+            searched = 0
             for fraction in _LOCATE_FRACTIONS:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(fraction * frame_count))
-                ok, frame = _decode(cap, logger, video_path, int(fraction * frame_count))
+                target = int(fraction * frame_count)
+                cap, ok = _seek(cap, logger, video_path, target)
+                frame = None
                 if ok:
-                    try:
-                        layout = locate_overlay(engine, frame)
-                    except Exception:
-                        # One bad probe frame must not stop the other probes.
-                        logger.warning("Could not search frame %d of %s for the overlay",
-                                       int(fraction * frame_count), video_path.name, exc_info=True)
-                        layout = None
-                    if layout is not None:
-                        break
+                    ok, frame = _decode(cap, logger, video_path, target)
+                if not ok or frame is None:
+                    continue
+                try:
+                    layout = locate_overlay(engine, frame)
+                except Exception:
+                    # One bad probe frame must not stop the other probes.
+                    logger.warning("Could not search frame %d of %s for the overlay",
+                                   target, video_path.name, exc_info=True)
+                    continue
+                searched += 1
+                if layout is not None:
+                    break
+            if layout is None and not searched:
+                # No probe frame could be decoded and searched: the reader
+                # (decoder or OCR install) failed, not the video's overlay.
+                raise RuntimeError(f"Could not decode or search any of the {len(_LOCATE_FRACTIONS)} probe frames of "
+                                   f"{video_path.name} for the live score overlay; the video or the OCR install "
+                                   "may be broken (see the log).")
             if layout is None:
                 raise RuntimeError(f"Could not find the live score overlay in {video_path.name}. The video needs "
                                    "the FTC Live overlay with the \"Red\" and \"Blue\" alliance labels.")
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            if cap.get(cv2.CAP_PROP_POS_FRAMES) != 0:
-                # Timestamps count frames from the start, so a backend that
-                # refuses to rewind must not continue from the probe position.
-                logger.warning("Could not rewind %s after locating the overlay; reopening it", video_path.name)
-                cap.release()
-                cap = cv2.VideoCapture(str(video_path))
-                if not cap.isOpened():
-                    raise RuntimeError(f"Could not read video file {video_path.name}.")
+            # Timestamps count frames from the start, so a backend that
+            # refuses to rewind must not continue from the probe position.
+            cap, ok = _seek(cap, logger, video_path, 0)
         stride = max(1, round(fps / sample_fps))
         samples: list[dict] = []
         failures = 0
         index = 0
         stopped: str | None = None
+        failed_from = 0.0
         while index < frame_count:
             if cancel and cancel():
                 raise InterruptedError("Reading the live score overlay was cancelled.")
@@ -322,6 +350,8 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
             else:
                 logger.warning("Skipped undecodable frame %s in %s", index - 1, video_path.name)
             if row is None:
+                if not failures:
+                    failed_from = (index - 1) / fps
                 failures += 1
                 if failures >= _MAX_CONSECUTIVE_READ_FAILURES:
                     stopped = (f"{failures} sampled frames in a row could not be decoded or read "
@@ -333,6 +363,10 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
             samples.append(row)
             if progress:
                 progress(min(100.0, 100.0 * index / frame_count), f"Read live score at {row['t_s']:.1f}s")
+        if stopped is None and failures:
+            # The video ended during a run of unreadable frames: that tail
+            # was not read.
+            stopped = f"the last {failures} sampled frame(s), from {failed_from:.1f} s, could not be decoded or read"
     finally:
         cap.release()
     if not samples:
