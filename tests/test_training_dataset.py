@@ -279,12 +279,15 @@ class ClassNameTests(unittest.TestCase):
     def test_supported_class_maps(self):
         self.assertEqual(class_names({"names": {0: "robot"}}), ["robot"])
         self.assertEqual(class_names({"names": ["robot", "pollen", "nectar"]}), ["robot", "pollen", "nectar"])
+        four = ["robot", "yellow_pollen", "red_nectar", "blue_nectar"]
+        self.assertEqual(class_names({"names": dict(enumerate(four))}), four)
 
     def test_broken_class_maps_raise_plain_value_errors(self):
         cases = {"class IDs 0, 1, 2": {"names": {1: "robot"}},
                  "must be a mapping": None,
                  "needs a names list": {"path": "."},
-                 "Supported classes": {"names": ["pollen", "robot"]}}
+                 "Supported classes": {"names": ["pollen", "robot"]},
+                 "yellow_pollen": {"names": ["robot", "red_nectar", "blue_nectar", "yellow_pollen"]}}
         for message, config in cases.items():
             with self.subTest(config=config):
                 with self.assertRaisesRegex(ValueError, message):

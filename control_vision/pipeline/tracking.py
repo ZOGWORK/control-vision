@@ -317,7 +317,9 @@ def track_video(
                     if class_id == 0:
                         tid = int(box.id[0]) if box.id is not None else -1
                         detections.append((tid, center_x, y2, conf, (x1, y1, x2, y2)))
-                    elif class_id in (1, 2) and goal_roi and point_in_polygon(center_x, center_y, goal_roi):
+                    elif class_id >= 1 and goal_roi and point_in_polygon(center_x, center_y, goal_roi):
+                        # Every non-robot class is a scoring element (POLLEN and
+                        # NECTAR, or yellow/red/blue in the four-class schema).
                         track_id = int(box.id[0]) if box.id is not None else -1
                         roi_balls.append((center_x, center_y, conf, track_id))
             if sampled < 30 and not detections:
