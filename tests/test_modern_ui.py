@@ -267,6 +267,28 @@ class ShellWindowTests(unittest.TestCase):
         self.assertIn("Calibration not saved", window.progress_label.text())
         self.assertEqual(window.progress_label.property("tone"), "danger")
 
+    def test_failed_project_switch_shows_no_project_or_video(self):
+        from control_vision.app import main_window as mw
+        window = self.window
+        self.attach()
+        window.video_path = Path("Q1.mp4")
+        window.refresh_home()
+        self.assertIn("event", window.page_context.text())
+        window.db = ProjectDatabase(self.db.path)  # the window closes its own handle
+        with patch.object(mw.QFileDialog, "getOpenFileName", return_value=("missing.sqlite", "")), \
+                patch.object(mw, "ProjectDatabase", side_effect=OSError("disk unavailable")), \
+                patch.object(mw.QMessageBox, "critical") as critical:
+            window.open_project()
+        critical.assert_called_once()
+        self.assertIsNone(window.db)
+        self.assertIsNone(window.project_id)
+        self.assertIsNone(window.video_path)
+        self.assertEqual(window.page_context.text(), "No project open")
+        self.assertEqual(window.context_label.text(), "No project open")
+        self.assertEqual(window._step_widgets["video"][0].property("state"), "current")
+        self.assertIn("Could not open project", window.progress_label.text())
+        self.assertEqual(window.progress_label.property("tone"), "danger")
+
     def test_progress_bar_shows_only_while_processing(self):
         window = self.window
         self.assertTrue(window.status_progress.isHidden())
