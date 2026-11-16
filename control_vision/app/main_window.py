@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import json
+import sqlite3
 import csv
 import shutil
 import sys
@@ -12,15 +13,15 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, QUrl
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QPolygonF, QIcon
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal, QUrl
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QIcon, QShortcut
 from PySide6.QtCore import QPointF
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
     QPushButton, QSlider, QSpinBox, QStatusBar, QVBoxLayout, QWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QDoubleSpinBox, QInputDialog, QHeaderView, QListWidgetItem, QCheckBox, QTextBrowser,
-    QGroupBox,
+    QGroupBox, QFrame, QGridLayout, QProgressBar, QScrollArea, QSplitter,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -35,6 +36,11 @@ from control_vision.pipeline.scoreboard_ocr import read_scoreboard
 from control_vision.scout.exports import export_scout_json, export_stats_csv, match_scoreboard
 from control_vision.storage.database import ProjectDatabase
 from control_vision.game.scoreboard import classify_match_time
+from control_vision.app import theme
+
+# Review and timeline rows keep the stored status and confidence for re-tinting.
+EVENT_STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
+EVENT_CONFIDENCE_ROLE = Qt.ItemDataRole.UserRole + 2
 
 
 class FrameCanvas(QLabel):
@@ -43,7 +49,7 @@ class FrameCanvas(QLabel):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(640, 360)
+        self.setMinimumSize(400, 225)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("background:#111827;color:#cbd5e1;border:1px solid #334155")
         self._frame_size = (0, 0)
@@ -98,7 +104,7 @@ class FieldMap(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(360, 360)
+        self.setMinimumSize(280, 280)
         self.tracks: dict[int, list[tuple[float, float, float]]] = {}
         self.current_time = 0.0
         self.zones: dict = {}
@@ -277,11 +283,86 @@ def _video_switch_blocked(window) -> bool:
     return False
 
 
+def workflow_steps(*, project_open: bool, video_name: str | None, corners: int, field_zones: int, rois: int,
+                   robots: int, analysis_status: str | None, processing: bool) -> list[dict]:
+    """State of each setup step shown in the Analysis panel, in workflow order.
+
+    Each step is ``{"key", "title", "state", "detail"}`` where state is one of
+    done, current, todo, optional, running or failed. "current" marks the first
+    required step that is not done; zones and ROIs are optional for processing.
+    """
+    video_done = video_name is not None
+    steps = [
+        {"key": "video", "title": "Match video", "done": video_done, "required": True,
+         "detail": video_name if video_done else ("Import or load a match video." if project_open
+                                                  else "Create or open a project first.")},
+        {"key": "calibrate", "title": "Field calibration", "done": corners == 4, "required": True,
+         "detail": f"{corners}/4 corners selected" if corners != 4 else "4/4 corners saved"},
+        {"key": "zones", "title": "Zones and ROIs", "done": bool(field_zones or rois), "required": False,
+         "detail": (f"{field_zones} zone(s) · {rois} ROI(s)" if field_zones or rois
+                    else "Optional: draw zones for cycles and ROIs for scoreboard OCR.")},
+        {"key": "robots", "title": "Robot identities", "done": robots > 0, "required": True,
+         "detail": f"{robots}/4 robots seeded"},
+        {"key": "process", "title": "Process", "done": analysis_status == "ready", "required": True,
+         "detail": {"ready": "Analysis ready. Review flagged events next.",
+                    "failed": "The last analysis did not finish.",
+                    "running": "Analysis did not finish. Process again."}.get(
+                        analysis_status or "", "Not processed yet.")},
+    ]
+    current_found = False
+    for step in steps:
+        if step["key"] == "process" and processing:
+            step["state"], step["detail"] = "running", "Processing…"
+            current_found = True
+        elif step["key"] == "process" and analysis_status in {"failed", "running"} and video_done:
+            step["state"] = "failed"
+        elif step["done"]:
+            step["state"] = "done"
+        elif not step["required"]:
+            step["state"] = "optional"
+        elif not current_found and (project_open or step["key"] == "video"):
+            step["state"] = "current"
+            current_found = True
+        else:
+            step["state"] = "todo"
+        del step["done"], step["required"]
+    return steps
+
+
+NAV_ENTRIES = (
+    ("section", "Project"), (0, "Home"),
+    ("section", "Match workflow"), (1, "Set up and process"), (3, "Review queue"), (4, "Scoring timeline"),
+    (2, "Cycles and stats"), (5, "Highlights"), (6, "Score and export"),
+    ("section", "App"), (7, "Settings"), (8, "BIOBUZZ rules"),
+)
+
+
+def _card() -> QFrame:
+    frame = QFrame()
+    frame.setProperty("card", True)
+    return frame
+
+
+def _label(text: str, role: str | None = None, tone: str | None = None, wrap: bool = False) -> QLabel:
+    label = QLabel(text)
+    if role: label.setProperty("role", role)
+    if tone: label.setProperty("tone", tone)
+    label.setWordWrap(wrap)
+    return label
+
+
+def _primary(button: QPushButton) -> QPushButton:
+    button.setProperty("variant", "primary")
+    return button
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Control Vision — Match analysis")
-        self.resize(1180, 800)
+        self.resize(1360, 860)
+        # Sidebar, setup steps and the minimum video and map widths fit in 1280 px.
+        self.setMinimumSize(1280, 720)
         self.db: ProjectDatabase | None = None
         self.project_id = None
         self.video_id = None
@@ -300,136 +381,248 @@ class MainWindow(QMainWindow):
         self.logger = None
         self.current_time = 0.0
         self.duration = 0.0
+        self._project_name = None
+        self._step_widgets: dict[str, tuple[QLabel, QLabel]] = {}
+        self._theme_mode = theme.saved_mode()
+        self._tokens = theme.apply_theme(QApplication.instance(), self._theme_mode)
         self.setStatusBar(QStatusBar())
+        self.status_progress = QProgressBar(); self.status_progress.setRange(0, 100)
+        self.status_progress.setFixedWidth(180); self.status_progress.setAccessibleName("Processing progress")
+        self.status_progress.hide()
+        self.context_label = QLabel("No project open")
+        self.statusBar().addPermanentWidget(self.status_progress)
+        self.statusBar().addPermanentWidget(self.context_label)
 
-        root = QWidget(); layout = QVBoxLayout(root)
-        toolbar = QHBoxLayout()
-        self.project_btn = QPushButton("New Project")
-        self.open_project_btn = QPushButton("Open Project")
-        self.video_btn = QPushButton("Import Video")
-        self.load_video_btn = QPushButton("Load Saved Video")
-        self.corner_btn = QPushButton("Calibrate: select 4 corners")
-        self.robot_btn = QPushButton("Seed robots")
-        self.reuse_calibration_btn = QPushButton("Reuse Calibration")
-        self.process_btn = QPushButton("Process")
-        self.cancel_btn = QPushButton("Cancel")
+        # Analysis: setup steps on the left in workflow order, video and map on the right.
+        root = QWidget(); root.setObjectName("Page"); layout = QHBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(16)
+        self.project_btn = _primary(QPushButton("&New project"))
+        self.open_project_btn = QPushButton("&Open project")
+        self.video_btn = QPushButton("Import video")
+        self.load_video_btn = QPushButton("Load saved video")
+        self.corner_btn = QPushButton("Select 4 corners")
+        self.corner_btn.setToolTip("Click the field corners in order: top-left, top-right, bottom-right, bottom-left.")
+        self.robot_btn = QPushButton("Seed a robot")
+        self.robot_btn.setToolTip("Click a robot near its ground-contact point, then enter its team and alliance.")
+        self.reuse_calibration_btn = QPushButton("Reuse calibration")
+        self.reuse_calibration_btn.setToolTip("Copy corners and zones from another video in this project.")
+        self.process_btn = _primary(QPushButton("Process match"))
+        self.cancel_btn = QPushButton("Cancel"); self.cancel_btn.setProperty("variant", "danger")
         self.sample_rate = QComboBox(); self.sample_rate.addItems(["5", "6", "7", "8", "9", "10"]); self.sample_rate.setCurrentText("8")
-        for button in (self.project_btn, self.open_project_btn, self.video_btn, self.load_video_btn, self.corner_btn, self.robot_btn, self.process_btn, self.cancel_btn):
-            toolbar.addWidget(button)
-        toolbar.addWidget(QLabel("Sample fps")); toolbar.addWidget(self.sample_rate)
-        layout.addLayout(toolbar)
-        zone_toolbar = QHBoxLayout()
+        self.sample_rate.setAccessibleName("Sample rate (frames per second)")
         self.zone_type = QComboBox(); self.zone_type.addItems(["scoring", "pickup", "park"])
-        self.zone_btn = QPushButton("Draw Zone")
+        self.zone_type.setAccessibleName("Zone type")
+        self.zone_btn = QPushButton("Draw zone")
         self.goal_roi_btn = QPushButton("Draw scoring-element ROI")
-        self.red_score_roi_btn = QPushButton("Set red scoreboard ROI")
-        self.blue_score_roi_btn = QPushButton("Set blue scoreboard ROI")
-        self.zone_remove_combo = QComboBox(); self.zone_remove_btn = QPushButton("Remove selected zone")
-        self.zone_help = QLabel("Draw zones on the map; double-click to finish a polygon. Geometry is user supplied.")
-        zone_toolbar.addWidget(self.reuse_calibration_btn); zone_toolbar.addWidget(self.zone_type); zone_toolbar.addWidget(self.zone_btn); zone_toolbar.addWidget(self.goal_roi_btn); zone_toolbar.addWidget(self.red_score_roi_btn); zone_toolbar.addWidget(self.blue_score_roi_btn); zone_toolbar.addWidget(self.zone_remove_combo); zone_toolbar.addWidget(self.zone_remove_btn); zone_toolbar.addWidget(self.zone_help, 1)
-        layout.addLayout(zone_toolbar)
+        self.red_score_roi_btn = QPushButton("Red score ROI")
+        self.red_score_roi_btn.setToolTip("Set red scoreboard ROI: outline the red score digits on the final results screen.")
+        self.blue_score_roi_btn = QPushButton("Blue score ROI")
+        self.blue_score_roi_btn.setToolTip("Set blue scoreboard ROI: outline the blue score digits on the final results screen.")
+        self.zone_remove_combo = QComboBox(); self.zone_remove_combo.setAccessibleName("Zone or ROI to remove")
+        self.zone_remove_btn = QPushButton("Remove")
+        self.zone_remove_btn.setToolTip("Remove the selected zone or ROI")
+        self.zone_help = _label("Draw zones on the map; double-click to finish a polygon. Geometry is user supplied.",
+                                role="muted", wrap=True)
+        self.zone_btn.setToolTip(self.zone_help.text())
+        fps_label = QLabel("Sample &fps"); fps_label.setBuddy(self.sample_rate)
 
-        body = QHBoxLayout()
+        steps_page = QWidget(); steps_layout = QVBoxLayout(steps_page)
+        steps_layout.setContentsMargins(0, 0, 4, 0); steps_layout.setSpacing(8)
+        steps_layout.addWidget(self._step_card("video", 1, "Match video", [[self.video_btn, self.load_video_btn]]))
+        steps_layout.addWidget(self._step_card("calibrate", 2, "Field calibration", [[self.corner_btn, self.reuse_calibration_btn]]))
+        steps_layout.addWidget(self._step_card("zones", 3, "Zones and ROIs", [
+            [self.zone_type, self.zone_btn], [self.goal_roi_btn], [self.red_score_roi_btn, self.blue_score_roi_btn],
+            [self.zone_remove_combo, self.zone_remove_btn]]))
+        steps_layout.addWidget(self._step_card("robots", 4, "Robot identities", [[self.robot_btn]]))
+        steps_layout.addWidget(self._step_card("process", 5, "Process", [[fps_label, self.sample_rate, self.cancel_btn], [self.process_btn]]))
+        steps_layout.addStretch(1)
+        steps_scroll = QScrollArea(); steps_scroll.setObjectName("PageScroll"); steps_scroll.setWidgetResizable(True)
+        steps_scroll.setWidget(steps_page); steps_scroll.setFixedWidth(312)
+        steps_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(steps_scroll)
+
+        viewer = QVBoxLayout(); viewer.setSpacing(8)
         self.canvas = FrameCanvas(); self.field_map = FieldMap()
-        body.addWidget(self.canvas, 3); body.addWidget(self.field_map, 2)
-        layout.addLayout(body, 1)
+        self.canvas.setAccessibleName("Match video frame"); self.field_map.setAccessibleName("Field map")
+        splitter = QSplitter(Qt.Orientation.Horizontal); splitter.addWidget(self.canvas); splitter.addWidget(self.field_map)
+        splitter.setStretchFactor(0, 3); splitter.setStretchFactor(1, 2); splitter.setChildrenCollapsible(False)
+        viewer.addWidget(splitter, 1)
         bottom = QHBoxLayout()
         self.slider = QSlider(Qt.Orientation.Horizontal); self.slider.setRange(0, 1000)
-        self.time_label = QLabel("00:00 / 00:00")
+        self.slider.setAccessibleName("Video position")
+        self.time_label = QLabel("00:00 / 00:00"); self.time_label.setProperty("role", "muted")
         bottom.addWidget(self.slider, 1); bottom.addWidget(self.time_label)
-        layout.addLayout(bottom)
-        self.progress_label = QLabel("Create a project, import a video, calibrate and seed robot identities to begin.")
-        layout.addWidget(self.progress_label)
-        self.log_view = QListWidget(); self.log_view.setMaximumHeight(100)
-        layout.addWidget(self.log_view)
+        viewer.addLayout(bottom)
+        self.progress_label = _label("Create a project, import a video, calibrate and seed robot identities to begin.",
+                                     tone="info", wrap=True)
+        self.progress_label.setAccessibleName("Analysis status")
+        viewer.addWidget(self.progress_label)
+        viewer.addWidget(self.zone_help)
+        viewer.addWidget(_label("Run log", role="muted"))
+        self.log_view = QListWidget(); self.log_view.setMaximumHeight(96); self.log_view.setAccessibleName("Run log")
+        viewer.addWidget(self.log_view)
+        layout.addLayout(viewer, 1)
+
         self.tabs = QTabWidget()
-        home_page = QWidget(); home_layout = QVBoxLayout(home_page)
-        self.home_project_label = QLabel("No project is open")
-        self.home_project_label.setStyleSheet("font-size:20px;font-weight:600")
-        self.home_recent = QListWidget()
+        home_page = QWidget(); home_page.setObjectName("Page"); home_layout = QHBoxLayout(home_page)
+        home_layout.setContentsMargins(0, 0, 0, 0); home_layout.setSpacing(16)
+        home_main = QVBoxLayout(); home_main.setSpacing(16)
+        project_card = _card(); project_layout = QVBoxLayout(project_card); project_layout.setContentsMargins(20, 18, 20, 18)
+        self.home_project_label = _label("No project is open", role="title")
+        self.home_project_path = _label("Create a project folder, or open an existing Control Vision project database.",
+                                        role="muted", wrap=True)
+        self.home_project_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        project_actions = QHBoxLayout()
+        project_actions.addWidget(self.project_btn); project_actions.addWidget(self.open_project_btn); project_actions.addStretch(1)
+        project_layout.addWidget(self.home_project_label); project_layout.addWidget(self.home_project_path)
+        project_layout.addSpacing(6); project_layout.addLayout(project_actions)
+        home_main.addWidget(project_card)
+        videos_card = _card(); videos_layout = QVBoxLayout(videos_card); videos_layout.setContentsMargins(20, 18, 20, 18)
+        videos_layout.addWidget(_label("Match videos", role="section"))
+        videos_layout.addWidget(_label("Recent videos in this project — double-click to load.", role="muted"))
+        self.home_recent = QListWidget(); self.home_recent.setAccessibleName("Recent videos in this project")
         self.home_recent.itemDoubleClicked.connect(lambda item: self.load_saved_video_id(item.data(Qt.ItemDataRole.UserRole)))
+        self.home_empty = _label("No videos yet. Import a match video to start.", role="muted")
         home_actions = QHBoxLayout()
-        home_new = QPushButton("New Project"); home_open = QPushButton("Open Project")
-        home_import = QPushButton("Import Video"); home_load = QPushButton("Load Selected Video")
-        home_new.clicked.connect(self.new_project); home_open.clicked.connect(self.open_project)
+        home_import = QPushButton("&Import video"); home_load = QPushButton("&Load selected video")
         home_import.clicked.connect(self.import_video)
         home_load.clicked.connect(lambda: self.load_saved_video_id(self.home_recent.currentItem().data(Qt.ItemDataRole.UserRole) if self.home_recent.currentItem() else None))
-        for button in (home_new, home_open, home_import, home_load): home_actions.addWidget(button)
-        home_layout.addWidget(self.home_project_label); home_layout.addLayout(home_actions)
-        home_layout.addWidget(QLabel("Recent videos in this project — double-click to load")); home_layout.addWidget(self.home_recent)
+        home_actions.addWidget(home_import); home_actions.addWidget(home_load); home_actions.addStretch(1)
+        videos_layout.addWidget(self.home_recent, 1); videos_layout.addWidget(self.home_empty); videos_layout.addLayout(home_actions)
+        home_main.addWidget(videos_card, 1)
+        home_layout.addLayout(home_main, 1)
+        guide_card = _card(); guide_card.setFixedWidth(330); guide_layout = QVBoxLayout(guide_card)
+        guide_layout.setContentsMargins(20, 18, 20, 18)
+        guide_layout.addWidget(_label("Workflow", role="section"))
+        guide = _label(
+            "<ol style='margin-left:-18px'>"
+            "<li><b>Import</b> a match video into the project.</li>"
+            "<li><b>Calibrate</b>: click the four field corners.</li>"
+            "<li><b>Zones</b>: draw pickup, scoring and park zones and any ROIs.</li>"
+            "<li><b>Seed robots</b>: click each robot and enter its team.</li>"
+            "<li><b>Process</b> the match on this computer.</li>"
+            "<li><b>Review</b> every flagged event against the video.</li>"
+            "<li><b>Export</b> statistics, Scout JSON and clips.</li></ol>"
+            "<p>Candidates stay <b>pending review</b> until you confirm them. Unknown beats wrong: "
+            "leave a value unassigned when the video does not show it.</p>", wrap=True)
+        guide.setTextFormat(Qt.TextFormat.RichText)
+        guide_layout.addWidget(guide); guide_layout.addStretch(1)
+        home_layout.addWidget(guide_card)
         self.tabs.addTab(home_page, "Home / Projects")
         self.tabs.addTab(root, "Analysis")
         self.cycles_table = QTableWidget(0, 6)
         self.cycles_table.setHorizontalHeaderLabels(["Team", "Alliance", "Start", "End", "Pickup", "Scoring"])
         self.cycles_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.cycles_table.cellDoubleClicked.connect(self.jump_to_cycle)
-        cycles_page = QWidget(); cycles_layout = QVBoxLayout(cycles_page)
+        cycles_page = QWidget(); cycles_page.setObjectName("Page"); cycles_layout = QVBoxLayout(cycles_page)
+        cycles_layout.setContentsMargins(0, 0, 0, 0)
         self.stats_table = QTableWidget(0, 9)
         self.stats_table.setHorizontalHeaderLabels(["Team", "Alliance", "Cycles", "Avg cycle (s)", "Top speed (ft/s)", "Distance (ft)", "Time per zone (s)", "Confirmed points", "Ranking points"])
         self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        cycles_layout.addWidget(QLabel("Zone-trip cycle list. Cycle counts use pickup-to-scoring zone transitions and have medium confidence until ball detection is available."))
-        cycles_layout.addWidget(self.cycles_table); cycles_layout.addWidget(QLabel("Per-robot movement statistics")); cycles_layout.addWidget(self.stats_table)
-        self.tabs.addTab(cycles_page, "Cycles & Stats")
+        cycles_layout.addWidget(_label("Zone-trip cycle list. Cycle counts use pickup-to-scoring zone transitions and have medium confidence until ball detection is available.", tone="info", wrap=True))
+        cycles_layout.addWidget(_label("Zone-trip cycles — double-click to seek", role="section"))
+        cycles_layout.addWidget(self.cycles_table, 3); cycles_layout.addWidget(_label("Per-robot movement statistics", role="section")); cycles_layout.addWidget(self.stats_table, 2)
+        self.tabs.addTab(cycles_page, "Cycles && Stats")
         self.review_table = QTableWidget(0, 9)
         self.review_table.setHorizontalHeaderLabels(["Time", "Team", "Robot alliance", "Points to", "Event type", "Points", "Confidence", "Status", "Clip"])
         self.review_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.review_table.cellDoubleClicked.connect(self.preview_review_event)
-        review_page = QWidget(); review_layout = QVBoxLayout(review_page)
-        review_layout.addWidget(QLabel("Zone crossings are candidates only. Enter points after reviewing the video clip; unconfirmed events do not count toward the video total."))
-        review_layout.addWidget(self.review_table)
+        review_page = QWidget(); review_page.setObjectName("Page"); review_layout = QVBoxLayout(review_page)
+        review_layout.setContentsMargins(0, 0, 0, 0)
+        review_layout.addWidget(_label("Zone crossings are candidates only. Enter points after reviewing the video clip; unconfirmed events do not count toward the video total.", tone="pending", wrap=True))
+        review_layout.addWidget(_label("Pending events — double-click to preview the clip or seek the video", role="muted"))
+        review_layout.addWidget(self.review_table, 1)
         scoring_config_path = Path(__file__).resolve().parents[1] / "config" / "scoring_biobuzz.json"
         self.scoring_config = json.loads(scoring_config_path.read_text(encoding="utf-8"))
         self.event_types = {entry["id"]: entry for entry in self.scoring_config["review_event_types"]}
-        review_controls = QHBoxLayout(); self.review_robot = QComboBox(); self.review_points = QSpinBox(); self.review_points.setRange(-999, 999)
+        self.review_robot = QComboBox(); self.review_points = QSpinBox(); self.review_points.setRange(-999, 999)
+        self.review_robot.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.review_robot.setMinimumContentsLength(16)
         self.review_alliance = QComboBox(); self.review_alliance.addItem("Robot alliance", None); self.review_alliance.addItem("Red", "red"); self.review_alliance.addItem("Blue", "blue")
         self.review_confidence = QComboBox(); self.review_confidence.addItems(["low", "medium", "high"])
         self.review_type = QComboBox(); self.review_type.addItem("Unclassified / other", "unclassified")
         for event_type in self.scoring_config["review_event_types"]: self.review_type.addItem(event_type["label"], event_type["id"])
-        self.confirm_btn = QPushButton("Confirm"); self.reject_btn = QPushButton("Reject")
-        review_controls.addWidget(QLabel("Event")); review_controls.addWidget(self.review_type); review_controls.addWidget(QLabel("Attributed robot")); review_controls.addWidget(self.review_robot); review_controls.addWidget(QLabel("Points")); review_controls.addWidget(self.review_points); review_controls.addWidget(QLabel("Points go to")); review_controls.addWidget(self.review_alliance); review_controls.addWidget(QLabel("Confidence")); review_controls.addWidget(self.review_confidence); review_controls.addWidget(self.confirm_btn); review_controls.addWidget(self.reject_btn)
-        review_layout.addLayout(review_controls)
-        self.review_rule_hint = QLabel("Scoring is awarded to an alliance under the manual; select robot attribution and point recipient separately."); self.review_rule_hint.setWordWrap(True); review_layout.addWidget(self.review_rule_hint)
+        self.review_type.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.review_type.setMinimumContentsLength(16)
+        self.confirm_btn = _primary(QPushButton("&Confirm")); self.reject_btn = QPushButton("Re&ject")
+        self.reject_btn.setProperty("variant", "danger")
+        review_box = QGroupBox("Review selected event"); review_grid = QGridLayout(review_box)
+        review_grid.setHorizontalSpacing(12); review_grid.setVerticalSpacing(6)
+        for column, (text, widget, name) in enumerate((
+                ("&Event type", self.review_type, "Event type"),
+                ("Attributed &robot", self.review_robot, "Attributed robot"),
+                ("&Points", self.review_points, "Points"),
+                ("Points &go to", self.review_alliance, "Alliance receiving the points"),
+                ("Con&fidence", self.review_confidence, "Confidence"))):
+            label = QLabel(text); label.setBuddy(widget); widget.setAccessibleName(name)
+            review_grid.addWidget(label, 0, column); review_grid.addWidget(widget, 1, column)
+        review_grid.setColumnStretch(0, 3); review_grid.setColumnStretch(1, 3)
+        review_buttons = QHBoxLayout(); review_buttons.addWidget(self.confirm_btn); review_buttons.addWidget(self.reject_btn)
+        review_grid.addLayout(review_buttons, 1, 5)
+        self.review_rule_hint = _label("Scoring is awarded to an alliance under the manual; select robot attribution and point recipient separately.", tone="info", wrap=True)
+        review_grid.addWidget(self.review_rule_hint, 2, 0, 1, 6)
+        review_layout.addWidget(review_box)
         self.tabs.addTab(review_page, "Review Queue")
         self.scoring_table = QTableWidget(0, 8)
         self.scoring_table.setHorizontalHeaderLabels(["Time", "Team", "Robot alliance", "Points to", "Event type", "Points", "Confidence", "Status"])
         self.scoring_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.scoring_table.cellDoubleClicked.connect(self.jump_to_event)
-        scoring_page = QWidget(); scoring_layout = QVBoxLayout(scoring_page)
+        scoring_page = QWidget(); scoring_page.setObjectName("Page"); scoring_layout = QVBoxLayout(scoring_page)
+        scoring_layout.setContentsMargins(0, 0, 0, 0)
         self.add_event_btn = QPushButton("Add scoring event at current video time")
-        scoring_layout.addWidget(self.add_event_btn); scoring_layout.addWidget(self.scoring_table)
+        scoring_actions = QHBoxLayout(); scoring_actions.addWidget(_label("All events — double-click to seek the video", role="muted"), 1)
+        scoring_actions.addWidget(self.add_event_btn)
+        scoring_layout.addLayout(scoring_actions); scoring_layout.addWidget(self.scoring_table, 1)
         self.tabs.addTab(scoring_page, "Scoring Timeline")
         self.clip_list = QListWidget(); self.clip_list.itemDoubleClicked.connect(self.preview_selected_clip)
-        clips_page = QWidget(); clips_layout = QVBoxLayout(clips_page)
-        self.generate_clips_btn = QPushButton("Generate highlight clips for scoring candidates")
+        self.clip_list.setIconSize(QSize(120, 68)); self.clip_list.setSpacing(2); self.clip_list.setAccessibleName("Highlight clips")
+        clips_page = QWidget(); clips_page.setObjectName("Page"); clips_layout = QVBoxLayout(clips_page)
+        clips_layout.setContentsMargins(0, 0, 0, 0)
+        self.generate_clips_btn = _primary(QPushButton("Generate highlight clips for scoring candidates"))
         self.preview_clip_btn = QPushButton("Preview selected clip")
         self.clip_export_btn = QPushButton("Export selected clip")
-        clips_controls = QHBoxLayout(); clips_controls.addWidget(self.generate_clips_btn); clips_controls.addWidget(self.preview_clip_btn); clips_controls.addWidget(self.clip_export_btn)
-        clips_layout.addLayout(clips_controls); clips_layout.addWidget(self.clip_list); self.tabs.addTab(clips_page, "Highlights")
-        export_page = QWidget(); export_layout = QVBoxLayout(export_page)
+        clips_controls = QHBoxLayout(); clips_controls.addWidget(self.generate_clips_btn); clips_controls.addWidget(self.preview_clip_btn); clips_controls.addWidget(self.clip_export_btn); clips_controls.addStretch(1)
+        clips_layout.addLayout(clips_controls); clips_layout.addWidget(self.clip_list, 1); self.tabs.addTab(clips_page, "Highlights")
+        export_page = QWidget(); export_page.setObjectName("Page"); export_layout = QVBoxLayout(export_page)
+        export_layout.setContentsMargins(0, 0, 8, 0); export_layout.setSpacing(4)
         self.official_red = QLineEdit(); self.official_blue = QLineEdit(); self.official_red.setPlaceholderText("Optional"); self.official_blue.setPlaceholderText("Optional")
-        official_row = QHBoxLayout(); official_row.addWidget(QLabel("Scoreboard / official red total")); official_row.addWidget(self.official_red); official_row.addWidget(QLabel("Scoreboard / official blue total")); official_row.addWidget(self.official_blue)
-        export_layout.addLayout(official_row)
+        self.official_red.setAccessibleName("Scoreboard / official red total"); self.official_blue.setAccessibleName("Scoreboard / official blue total")
+        score_box = QGroupBox("Official score"); score_layout = QVBoxLayout(score_box)
+        official_row = QHBoxLayout(); official_row.addWidget(QLabel("Scoreboard / official red total")); official_row.addWidget(self.official_red); official_row.addSpacing(16); official_row.addWidget(QLabel("Scoreboard / official blue total")); official_row.addWidget(self.official_blue)
+        score_layout.addLayout(official_row)
         self.read_scoreboard_btn = QPushButton("Read final scoreboard from video")
         self.use_ocr_btn = QPushButton("Use OCR reading in score comparison")
         self.use_ocr_btn.setEnabled(False)
-        self.scoreboard_ocr_status = QLabel("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
-        self.scoreboard_ocr_status.setWordWrap(True)
-        ocr_row = QHBoxLayout(); ocr_row.addWidget(self.read_scoreboard_btn); ocr_row.addWidget(self.use_ocr_btn)
-        export_layout.addLayout(ocr_row); export_layout.addWidget(self.scoreboard_ocr_status)
-        self.score_compare = QLabel("Video totals include confirmed events only."); export_layout.addWidget(self.score_compare)
+        self.scoreboard_ocr_status = _label("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.", tone="info", wrap=True)
+        self.scoreboard_ocr_status.setAccessibleName("Scoreboard OCR status")
+        ocr_row = QHBoxLayout(); ocr_row.addWidget(self.read_scoreboard_btn); ocr_row.addWidget(self.use_ocr_btn); ocr_row.addStretch(1)
+        score_layout.addLayout(ocr_row); score_layout.addWidget(self.scoreboard_ocr_status)
+        self.score_compare = _label("Video totals include confirmed events only.", tone="info", wrap=True)
+        self.score_compare.setAccessibleName("Score comparison")
+        score_layout.addWidget(self.score_compare)
+        export_layout.addWidget(score_box)
         export_layout.addWidget(self._build_ruling_box())
+        rp_box = QGroupBox("Ranking Point thresholds"); rp_layout = QVBoxLayout(rp_box)
         rp_row = QHBoxLayout()
         self.swarm_threshold = QSpinBox(); self.swarm_threshold.setRange(0, 999); self.swarm_threshold.setValue(16)
         self.pollinator_1_threshold = QSpinBox(); self.pollinator_1_threshold.setRange(0, 99); self.pollinator_1_threshold.setValue(4)
         self.pollinator_2_threshold = QSpinBox(); self.pollinator_2_threshold.setRange(0, 99); self.pollinator_2_threshold.setValue(7)
-        for widget in (QLabel("SWARM threshold"), self.swarm_threshold, QLabel("POLLINATOR 1 tips"), self.pollinator_1_threshold, QLabel("POLLINATOR 2 tips"), self.pollinator_2_threshold): rp_row.addWidget(widget)
-        export_layout.addLayout(rp_row)
-        self.ranking_summary = QLabel("Ranking Points follow the selected event thresholds."); self.ranking_summary.setWordWrap(True); export_layout.addWidget(self.ranking_summary)
-        self.csv_export_btn = QPushButton("Export statistics CSV"); self.json_export_btn = QPushButton("Export Scout JSON")
+        for text, spin in (("SWARM threshold", self.swarm_threshold), ("POLLINATOR 1 tips", self.pollinator_1_threshold), ("POLLINATOR 2 tips", self.pollinator_2_threshold)):
+            spin.setAccessibleName(text); rp_row.addWidget(QLabel(text)); rp_row.addWidget(spin); rp_row.addSpacing(12)
+        rp_row.addStretch(1)
+        rp_layout.addLayout(rp_row)
+        self.ranking_summary = _label("Ranking Points follow the selected event thresholds.", wrap=True); rp_layout.addWidget(self.ranking_summary)
+        export_layout.addWidget(rp_box)
+        self.csv_export_btn = QPushButton("Export statistics CSV"); self.json_export_btn = _primary(QPushButton("Export Scout JSON"))
         self.photos_export_btn = QPushButton("Export robot photos")
-        export_row = QHBoxLayout(); export_row.addWidget(self.csv_export_btn); export_row.addWidget(self.json_export_btn); export_row.addWidget(self.photos_export_btn); export_layout.addLayout(export_row)
-        self.tabs.addTab(export_page, "Export")
-        settings_page = QWidget(); settings_layout = QFormLayout(settings_page)
+        files_box = QGroupBox("Export files"); export_row = QHBoxLayout(files_box)
+        export_row.addWidget(self.json_export_btn); export_row.addWidget(self.csv_export_btn); export_row.addWidget(self.photos_export_btn); export_row.addStretch(1)
+        export_layout.addWidget(files_box); export_layout.addStretch(1)
+        self.tabs.addTab(self._scroll_page(export_page), "Export")
+        settings_page = QWidget(); settings_page.setObjectName("Page"); settings_outer = QVBoxLayout(settings_page)
+        settings_outer.setContentsMargins(0, 0, 8, 0)
+        tracking_box = QGroupBox("Tracking"); settings_layout = QFormLayout(tracking_box)
+        settings_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft); settings_layout.setVerticalSpacing(10)
         self.model_path_edit = QLineEdit(); self.reid_path_edit = QLineEdit(); self.ffmpeg_path_edit = QLineEdit()
         self.tracking_mode = QComboBox(); self.tracking_mode.addItem("YOLO11 local model (recommended with trained weights)", "yolo")
         self.tracking_mode.addItem("Seeded optical flow preview (no model; not accurate enough for scoring)", "seeded_optical_flow")
@@ -438,14 +631,44 @@ class MainWindow(QMainWindow):
         reid_row = QHBoxLayout(); reid_row.addWidget(self.reid_path_edit); reid_row.addWidget(self.reid_browse_btn)
         ffmpeg_row = QHBoxLayout(); ffmpeg_row.addWidget(self.ffmpeg_path_edit); ffmpeg_row.addWidget(self.ffmpeg_browse_btn)
         self.confidence_spin = QDoubleSpinBox(); self.confidence_spin.setRange(0.05, 0.95); self.confidence_spin.setSingleStep(0.05); self.confidence_spin.setValue(0.25)
-        self.settings_save_btn = QPushButton("Save settings")
-        settings_layout.addRow("Tracking method", self.tracking_mode); settings_layout.addRow("YOLO11n ONNX model", model_row); settings_layout.addRow("Optional local ReID embeddings (ONNX) or compatible YOLO .pt", reid_row); settings_layout.addRow("FFmpeg executable (blank uses PATH)", ffmpeg_row); settings_layout.addRow("Detection confidence", self.confidence_spin); settings_layout.addRow("Sample rate (frames per second)", self.sample_rate); settings_layout.addRow(self.settings_save_btn)
-        self.tabs.addTab(settings_page, "Settings")
-        rules_page = QWidget(); rules_layout = QVBoxLayout(rules_page)
+        self.settings_save_btn = _primary(QPushButton("Save settings"))
+        settings_layout.addRow("Tracking method", self.tracking_mode); settings_layout.addRow("YOLO11n ONNX model", model_row); settings_layout.addRow("Optional local ReID embeddings (ONNX) or compatible YOLO .pt", reid_row); settings_layout.addRow("FFmpeg executable (blank uses PATH)", ffmpeg_row); settings_layout.addRow("Detection confidence", self.confidence_spin)
+        settings_layout.addRow(_label("Tracking settings and the sample rate (set in Set up and process) are saved with the active project.", role="muted", wrap=True))
+        save_row = QHBoxLayout(); save_row.addWidget(self.settings_save_btn); save_row.addStretch(1)
+        settings_layout.addRow(save_row)
+        settings_outer.addWidget(tracking_box)
+        appearance_box = QGroupBox("Appearance"); appearance_layout = QFormLayout(appearance_box)
+        self.theme_combo = QComboBox()
+        for label_text, mode in (("Match Windows", "system"), ("Light", "light"), ("Dark", "dark")):
+            self.theme_combo.addItem(label_text, mode)
+        self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(self._theme_mode)))
+        self.theme_combo.setAccessibleName("Theme")
+        theme_label = QLabel("&Theme"); theme_label.setBuddy(self.theme_combo)
+        appearance_layout.addRow(theme_label, self.theme_combo)
+        appearance_layout.addRow(_label("Saved for this computer, not with the project.", role="muted"))
+        settings_outer.addWidget(appearance_box); settings_outer.addStretch(1)
+        self.tabs.addTab(self._scroll_page(settings_page), "Settings")
+        rules_page = QWidget(); rules_page.setObjectName("Page"); rules_layout = QVBoxLayout(rules_page)
+        rules_layout.setContentsMargins(0, 0, 0, 0)
         self.rules_browser = QTextBrowser(); self.rules_browser.setOpenExternalLinks(True)
         self.rules_browser.setMarkdown(self.build_rules_reference())
         rules_layout.addWidget(self.rules_browser); self.tabs.addTab(rules_page, "BIOBUZZ Rules")
-        self.setCentralWidget(self.tabs)
+        for table in (self.cycles_table, self.stats_table, self.review_table, self.scoring_table):
+            table.setAlternatingRowColors(True)
+            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setShowGrid(False)
+            table.verticalHeader().setVisible(False)
+            table.verticalHeader().setDefaultSectionSize(30)
+        for table in (self.review_table, self.scoring_table):
+            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for table, name in ((self.cycles_table, "Zone-trip cycles"), (self.stats_table, "Per-robot statistics"),
+                            (self.review_table, "Review queue"), (self.scoring_table, "Scoring timeline")):
+            table.setAccessibleName(name)
+        self.tabs.tabBar().hide()
+        self.tabs.setDocumentMode(True)
+        self.setCentralWidget(self._build_shell())
+        self.tabs.currentChanged.connect(self._tab_changed)
 
         self.project_btn.clicked.connect(self.new_project)
         self.open_project_btn.clicked.connect(self.open_project)
@@ -495,6 +718,11 @@ class MainWindow(QMainWindow):
         self.model_browse_btn.clicked.connect(self.browse_model)
         self.reid_browse_btn.clicked.connect(self.browse_reid)
         self.ffmpeg_browse_btn.clicked.connect(self.browse_ffmpeg)
+        self.theme_combo.currentIndexChanged.connect(self.theme_changed)
+        try:
+            QApplication.instance().styleHints().colorSchemeChanged.connect(self._system_scheme_changed)
+        except AttributeError:  # Qt older than 6.5 has no colour-scheme hint.
+            pass
         self.timer = QTimer(self); self.timer.setInterval(100); self.timer.timeout.connect(self.refresh_video)
         self._mode = None
         self._worker = None
@@ -504,6 +732,188 @@ class MainWindow(QMainWindow):
         self._ocr_thread = None
         self._ocr_active = False
         self.scoreboard_ocr = None
+        # No video is loaded yet, so there are no results to show.
+        self._set_results_enabled(False)
+        self._tab_changed(self.tabs.currentIndex())
+        self._refresh_workflow()
+
+    # ----- Shell: sidebar navigation, page header, theme -----
+
+    def _build_shell(self) -> QWidget:
+        shell = QWidget(); shell_layout = QHBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0); shell_layout.setSpacing(0)
+        sidebar = QFrame(); sidebar.setObjectName("Sidebar"); sidebar.setFixedWidth(212)
+        side_layout = QVBoxLayout(sidebar); side_layout.setContentsMargins(12, 16, 12, 12); side_layout.setSpacing(4)
+        app_name = QLabel("Control Vision"); app_name.setObjectName("AppName")
+        tagline = QLabel("BIOBUZZ match scouting"); tagline.setObjectName("AppTagline")
+        side_layout.addWidget(app_name); side_layout.addWidget(tagline); side_layout.addSpacing(12)
+        self.nav = QListWidget(); self.nav.setObjectName("Nav"); self.nav.setAccessibleName("Sections")
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._nav_rows: dict[int, int] = {}
+        self._nav_labels: dict[int, str] = {}
+        self._nav_tooltips: dict[int, str] = {}
+        self._review_pending = 0
+        section_font = QFont(self.font()); section_font.setPointSizeF(max(7.5, section_font.pointSizeF() - 1)); section_font.setBold(True)
+        shortcut_number = 0
+        for key, text in NAV_ENTRIES:
+            item = QListWidgetItem(text.upper() if key == "section" else text)
+            if key == "section":
+                item.setFlags(Qt.ItemFlag.NoItemFlags); item.setFont(section_font)
+                item.setSizeHint(QSize(0, 30))
+            else:
+                item.setData(Qt.ItemDataRole.UserRole, key)
+                shortcut_number += 1
+                self._nav_tooltips[key] = f"{text} (Ctrl+{shortcut_number})"
+                item.setToolTip(self._nav_tooltips[key])
+                shortcut = QShortcut(QKeySequence(f"Ctrl+{shortcut_number}"), self)
+                shortcut.activated.connect(lambda index=key: self._go_to_tab(index))
+                self._nav_rows[key] = self.nav.count()
+                self._nav_labels[key] = text
+            self.nav.addItem(item)
+        self.nav.currentItemChanged.connect(self._nav_selected)
+        side_layout.addWidget(self.nav, 1)
+        shell_layout.addWidget(sidebar)
+        content = QWidget(); content.setObjectName("Page"); content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 18, 24, 16); content_layout.setSpacing(12)
+        self.page_title = QLabel(""); self.page_title.setObjectName("PageTitle")
+        self.page_context = QLabel(""); self.page_context.setObjectName("PageContext")
+        header = QVBoxLayout(); header.setSpacing(2); header.addWidget(self.page_title); header.addWidget(self.page_context)
+        content_layout.addLayout(header)
+        content_layout.addWidget(self.tabs, 1)
+        shell_layout.addWidget(content, 1)
+        return shell
+
+    def _scroll_page(self, page: QWidget) -> QScrollArea:
+        scroll = QScrollArea(); scroll.setObjectName("PageScroll"); scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        return scroll
+
+    def _step_card(self, key: str, number: int, title: str, rows) -> QFrame:
+        card = _card(); card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(12, 8, 12, 10); card_layout.setSpacing(6)
+        head = QHBoxLayout(); head.setSpacing(8)
+        number_label = _label(str(number), role="step-number")
+        head.addWidget(number_label); head.addWidget(_label(title, role="section"), 1)
+        card_layout.addLayout(head)
+        state_label = _label("", role="step-state", wrap=True)
+        state_label.setAccessibleName(f"{title} status")
+        card_layout.addWidget(state_label)
+        for row in rows:
+            if isinstance(row, QWidget):
+                card_layout.addWidget(row); continue
+            row_layout = QHBoxLayout(); row_layout.setSpacing(6)
+            for widget in row: row_layout.addWidget(widget, 0 if isinstance(widget, QLabel) else 1)
+            card_layout.addLayout(row_layout)
+        self._step_widgets[key] = (number_label, state_label)
+        return card
+
+    def _go_to_tab(self, index: int):
+        if self.tabs.isTabEnabled(index):
+            self.tabs.setCurrentIndex(index)
+
+    def _nav_selected(self, current, previous):
+        if current is None: return
+        index = current.data(Qt.ItemDataRole.UserRole)
+        if index is None: return
+        if self.tabs.isTabEnabled(int(index)):
+            self.tabs.setCurrentIndex(int(index))
+        else:
+            self._sync_nav()
+
+    def _tab_changed(self, index: int):
+        row = self._nav_rows.get(index)
+        if row is not None and self.nav.currentRow() != row:
+            self.nav.blockSignals(True); self.nav.setCurrentRow(row); self.nav.blockSignals(False)
+        self.page_title.setText(self._nav_labels.get(index, self.tabs.tabText(index)))
+
+    def _sync_nav(self):
+        """Mirror tab availability and the current tab in the sidebar."""
+        for index, row in self._nav_rows.items():
+            item = self.nav.item(row)
+            flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled if self.tabs.isTabEnabled(index) else Qt.ItemFlag.NoItemFlags
+            item.setFlags(flags)
+            item.setToolTip(self._nav_tooltip(index))
+        self._tab_changed(self.tabs.currentIndex())
+
+    def _nav_tooltip(self, index: int) -> str:
+        if index in (2, 3, 4, 5, 6) and not self.tabs.isTabEnabled(index):
+            return f"{self._nav_labels[index]}: process the video to see results"
+        if index == 3 and self._review_pending:
+            return f"Review queue: {self._review_pending} event(s) pending review (Ctrl+3)"
+        return self._nav_tooltips[index]
+
+    def _set_review_badge(self, flagged: int):
+        item = self.nav.item(self._nav_rows[3])
+        item.setText(f"Review queue  ({flagged})" if flagged else "Review queue")
+        self._review_pending = flagged
+        item.setToolTip(self._nav_tooltip(3))
+        item.setForeground(QColor(self._tokens.pending_fg) if flagged else QColor(self._tokens.text))
+
+    def theme_changed(self, *_):
+        mode = self.theme_combo.currentData()
+        if mode not in theme.THEME_MODES: return
+        theme.save_mode(mode)
+        self._theme_mode = mode
+        self._apply_theme()
+
+    def _system_scheme_changed(self, *_):
+        if self._theme_mode == "system":
+            self._apply_theme()
+
+    def _apply_theme(self):
+        self._tokens = theme.apply_theme(QApplication.instance(), self._theme_mode)
+        for table in (self.review_table, self.scoring_table):
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)
+                if item is not None:
+                    self._paint_event_row(table, row, item.data(EVENT_STATUS_ROLE), item.data(EVENT_CONFIDENCE_ROLE))
+        flagged = sum(1 for event in self.events if event["status"] == "flagged")
+        self._set_review_badge(flagged)
+
+    def _paint_event_row(self, table: QTableWidget, row: int, status, confidence):
+        """Tint a review or timeline row so pending and low-confidence events stand out."""
+        first = table.item(row, 0)
+        if first is not None:
+            first.setData(EVENT_STATUS_ROLE, status); first.setData(EVENT_CONFIDENCE_ROLE, confidence)
+        background, foreground = theme.row_colours(self._tokens, status, confidence)
+        for column in range(table.columnCount()):
+            item = table.item(row, column)
+            if item is None: continue
+            item.setBackground(QBrush(QColor(background)) if background else QBrush())
+            item.setForeground(QBrush(QColor(foreground)) if foreground else QBrush())
+
+    def _show_status(self, text: str, tone: str = "info"):
+        """Show an analysis message; every message sets its own tone so none inherits the last one."""
+        theme.set_tone(self.progress_label, tone)
+        self.progress_label.setText(text)
+
+    def _refresh_workflow(self):
+        """Update the setup steps, the page context line and the status bar context."""
+        status = None
+        if self.db and self.video_id is not None:
+            # This only updates labels and runs on error paths too (a failed
+            # save, a locked database), so it must never raise over them.
+            try:
+                row = self.db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (self.video_id,)).fetchone()
+                status = str(row["analysis_status"]) if row else None
+            except (sqlite3.Error, TypeError, KeyError, IndexError):
+                status = None
+        field_zones = sum(1 for name in self.zones if not str(name).endswith("_roi"))
+        steps = workflow_steps(project_open=bool(self.db and self.project_id is not None),
+                               video_name=self.video_path.name if self.video_path else None,
+                               corners=len(self.corners), field_zones=field_zones, rois=len(self.zones) - field_zones,
+                               robots=len(self.seed_points), analysis_status=status,
+                               processing=self._processing_active)
+        for step in steps:
+            number_label, state_label = self._step_widgets[step["key"]]
+            theme.set_state(number_label, step["state"]); theme.set_state(state_label, step["state"])
+            number_label.setText("✓" if step["state"] == "done" else str(list(self._step_widgets).index(step["key"]) + 1))
+            state_label.setText(step["detail"])
+        parts = [self._project_name or "No project open"]
+        if self.video_path is not None:
+            parts.append(self.video_path.name)
+        self.page_context.setText("  ·  ".join(parts))
+        self.context_label.setText("  ·  ".join(parts))
 
     def project_dir(self) -> Path | None:
         return self.db.path.parent if self.db else None
@@ -751,13 +1161,24 @@ class MainWindow(QMainWindow):
     def refresh_home(self):
         self.home_recent.clear()
         if not self.db or self.project_id is None:
+            self._project_name = None
             self.home_project_label.setText("No project is open")
+            self.home_project_path.setText("Create a project folder, or open an existing Control Vision project database.")
+            self.home_empty.setText("Open a project to see its match videos.")
+            self.home_empty.show()
+            self._refresh_workflow()
             return
         project = self.db.connection.execute("SELECT name FROM projects WHERE id=?", (self.project_id,)).fetchone()
-        self.home_project_label.setText(f"{project['name']} — {self.db.path}")
-        for row in self.db.connection.execute("SELECT id,path,event_code,match_number,duration_s FROM videos WHERE project_id=? ORDER BY id DESC LIMIT 20", (self.project_id,)):
-            label = f"{Path(row['path']).name}  ·  {row['event_code'] or 'Practice'} {row['match_number'] or ''}  ·  {row['duration_s'] or 0:.0f}s"
+        self._project_name = project["name"]
+        self.home_project_label.setText(project["name"])
+        self.home_project_path.setText(str(self.db.path))
+        for row in self.db.connection.execute("SELECT id,path,event_code,match_number,duration_s,analysis_status FROM videos WHERE project_id=? ORDER BY id DESC LIMIT 20", (self.project_id,)):
+            state = {"ready": "Analysed", "unprocessed": "Not processed"}.get(row["analysis_status"], "Analysis did not finish")
+            label = f"{Path(row['path']).name}  ·  {row['event_code'] or 'Practice'} {row['match_number'] or ''}  ·  {row['duration_s'] or 0:.0f}s  ·  {state}"
             item = QListWidgetItem(label); item.setData(Qt.ItemDataRole.UserRole, int(row['id'])); self.home_recent.addItem(item)
+        self.home_empty.setText("No videos yet. Import a match video to start.")
+        self.home_empty.setVisible(self.home_recent.count() == 0)
+        self._refresh_workflow()
 
     def load_settings(self):
         folder = self.project_dir()
@@ -811,6 +1232,7 @@ class MainWindow(QMainWindow):
         if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
         message = "Scoring-element ROI saved. Ball-count changes remain flagged for human review." if name == "goal_roi" else f"{name.replace('_', ' ').title()} saved for local multi-frame OCR."
         self.statusBar().showMessage(message)
+        self._refresh_workflow()
 
     def remove_selected_zone(self):
         name = self.zone_remove_combo.currentText()
@@ -822,6 +1244,7 @@ class MainWindow(QMainWindow):
         self.field_map.zones = self.zones; self.field_map.update()
         self.db.save_calibration(self.video_id, self.corners, self.zones)
         self.zone_remove_combo.removeItem(self.zone_remove_combo.currentIndex())
+        self._refresh_workflow()
 
     def zone_map_click(self, x: float, y: float):
         if not self._drawing_zone: return
@@ -845,6 +1268,7 @@ class MainWindow(QMainWindow):
         self.field_map.zones = self.zones; self.field_map.draft = []; self._drawing_zone = False
         self.db.save_calibration(self.video_id, self.corners, self.zones)
         self.field_map.update(); self.statusBar().showMessage(f"Saved zone '{clean_name}'.")
+        self._refresh_workflow()
 
     def reuse_calibration(self):
         if self.video_id is None or self.metadata is None:
@@ -869,6 +1293,7 @@ class MainWindow(QMainWindow):
         self.field_map.zones = self.zones; self.canvas.named_rois = {key: val.get("points", []) for key, val in self.zones.items() if key.endswith("_roi")}; self.canvas.roi_points = self.zones.get("goal_roi", {}).get("points", []); self.field_map.update()
         if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
         self.statusBar().showMessage("Corners and user-drawn zones copied. Confirm they align with this camera view before processing.")
+        self._refresh_workflow()
 
     def new_project(self):
         if _video_switch_blocked(self): return
@@ -892,6 +1317,7 @@ class MainWindow(QMainWindow):
             # The previous database is already closed; never keep using it.
             if self.db: self.db.close()
             self.db, self.project_id = None, None
+            self._clear_closed_project(f"Could not create project: {exc}")
             QMessageBox.critical(self, "Could not create project", str(exc))
 
     def open_project(self):
@@ -913,7 +1339,14 @@ class MainWindow(QMainWindow):
             self.refresh_home()
         except Exception as exc:
             self.db = None
+            self.project_id = None
+            self._clear_closed_project(f"Could not open project: {exc}")
             QMessageBox.critical(self, "Could not open project", str(exc))
+
+    def _clear_closed_project(self, message: str):
+        """After a failed project switch the previous project is closed: show no project or video."""
+        self.reset_video_state()
+        self._show_status(message, "danger")
 
     def reset_video_state(self):
         """Clear match-specific UI state when switching projects."""
@@ -941,8 +1374,7 @@ class MainWindow(QMainWindow):
         self.zone_remove_combo.clear()
         self.official_red.clear()
         self.official_blue.clear()
-        self.use_ocr_btn.setEnabled(False)
-        self.scoreboard_ocr_status.setText("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
+        self.show_scoreboard_ocr(None)
         self.load_match_ruling()
         self.swarm_threshold.setValue(16); self.pollinator_1_threshold.setValue(4); self.pollinator_2_threshold.setValue(7)
         self.cycles_table.setRowCount(0)
@@ -951,7 +1383,7 @@ class MainWindow(QMainWindow):
         self.scoring_table.setRowCount(0)
         self.clip_list.clear()
         self._set_results_enabled(False)
-        self.progress_label.setText("Project opened. Load or import a match video to begin.")
+        self._show_status("Project opened. Load or import a match video to begin.")
         self.slider.setValue(0)
         self.refresh_result_tables()
         self.refresh_home()
@@ -972,8 +1404,10 @@ class MainWindow(QMainWindow):
             self.clip_list.clear()
             if 2 <= self.tabs.currentIndex() <= 6:
                 self.tabs.setCurrentIndex(1)
+            self._set_review_badge(0)
         for index in range(2, 7):
             self.tabs.setTabEnabled(index, enabled)
+        self._sync_nav()
 
     def _results_current(self) -> bool:
         if not self.db or self.video_id is None:
@@ -1017,8 +1451,7 @@ class MainWindow(QMainWindow):
         self.scoreboard_ocr = None
         self.corners.clear(); self.seed_points.clear(); self.robot_labels.clear(); self.tracks.clear(); self.zones.clear(); self.cycles.clear(); self.events = []
         self.zone_remove_combo.clear(); self.official_red.clear(); self.official_blue.clear()
-        self.use_ocr_btn.setEnabled(False)
-        self.scoreboard_ocr_status.setText("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
+        self.show_scoreboard_ocr(None)
         self.load_match_ruling()
         self.swarm_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["swarm_leave_park_points"]))
         self.pollinator_1_threshold.setValue(int(self.scoring_config["ranking_points"]["thresholds_by_event_type"]["standard"]["pollinator_1_hive_tips"]))
@@ -1033,7 +1466,7 @@ class MainWindow(QMainWindow):
         self.slider.setValue(0)
         message = f"{path.name}: {metadata['width']}×{metadata['height']}, {metadata['fps']:.2f} fps, {self.duration:.1f} s"
         if video_warnings: message += " — warning: " + " ".join(video_warnings)
-        self.progress_label.setText(message)
+        self._show_status(message, "pending" if video_warnings else "info")
         self.statusBar().showMessage("Video imported. Select the field corners in this order: top-left, top-right, bottom-right, bottom-left.")
         self.refresh_home()
 
@@ -1104,7 +1537,7 @@ class MainWindow(QMainWindow):
         self.canvas.show_frame(frame, [(int(x), int(y), str(index + 1)) for index, (x, y) in enumerate(self.corners)])
         self.refresh_home()
         warning_note = (" Warning: " + " ".join(metadata["warnings"])) if metadata.get("warnings") else ""
-        self.progress_label.setText(f"Loaded {path.name}. Corners: {len(self.corners)}/4; seeded identities: {len(self.seed_points)}.{warning_note}")
+        self._show_status(f"Loaded {path.name}. Corners: {len(self.corners)}/4; seeded identities: {len(self.seed_points)}.{warning_note}", "pending" if warning_note else "info")
         rows = self.db.connection.execute("SELECT robot_id,t_s,x_ft,y_ft FROM tracks WHERE robot_id IN (SELECT id FROM robots WHERE video_id=?) ORDER BY frame", (self.video_id,)).fetchall() if results_available else []
         track_by_id = {}
         for row in rows: track_by_id.setdefault(row["robot_id"], []).append((row["t_s"], row["x_ft"], row["y_ft"]))
@@ -1112,11 +1545,14 @@ class MainWindow(QMainWindow):
         self.field_map.tracks = self.tracks; self.field_map.current_time = 0; self.field_map.update()
         self.refresh_result_tables()
         if not results_available:
-            self.progress_label.setText((
+            unprocessed = video["analysis_status"] == "unprocessed"
+            # A run that did not finish is an error, like the Process step's failed state.
+            tone = "danger" if not unprocessed else ("pending" if warning_note else "info")
+            self._show_status((
                 "This video has not been processed. Set up the field and run analysis to create results."
-                if video["analysis_status"] == "unprocessed"
+                if unprocessed
                 else "The last analysis did not finish. Saved results are hidden until this video is processed successfully."
-            ) + warning_note)
+            ) + warning_note, tone)
 
     def select_corner(self):
         if self.video_path is None: return
@@ -1146,10 +1582,10 @@ class MainWindow(QMainWindow):
                     matrix_from_corners(self.corners)
                     self.db.save_calibration(self.video_id, self.corners, self.zones)
                     self.field_map.update()
-                    self.progress_label.setText(f"Calibration saved. Four-corner interpolation residual: {reprojection_error_px(self.corners):.2f} px (this is not an independent accuracy check).")
+                    self._show_status(f"Calibration saved. Four-corner interpolation residual: {reprojection_error_px(self.corners):.2f} px (this is not an independent accuracy check).")
                 except Exception as exc:
                     self.corners.clear()
-                    self.progress_label.setText(f"Calibration not saved: {exc} Use Calibrate to select the 4 corners again.")
+                    self._show_status(f"Calibration not saved: {exc} Use Calibrate to select the 4 corners again.", "danger")
                     if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
                     QMessageBox.warning(self, "Invalid calibration", str(exc))
         elif self._mode == "robot":
@@ -1158,7 +1594,7 @@ class MainWindow(QMainWindow):
                 robot_id = self.db.add_robot(self.video_id, dialog.team.value(), dialog.alliance.currentText(), x, y)
                 self.seed_points.append((robot_id, x, y))
                 self.robot_labels.append(f"{dialog.team.value()} ({dialog.alliance.currentText()})")
-                self.progress_label.setText("Robot identities: " + ", ".join(self.robot_labels))
+                self._show_status("Robot identities: " + ", ".join(self.robot_labels))
                 if self.capture:
                     self.capture.set(cv2.CAP_PROP_POS_MSEC, 0); ok, frame = self.capture.read()
                     if ok: self.canvas.show_frame(frame, [(sx, sy, label) for (_, sx, sy), label in zip(self.seed_points, self.robot_labels)])
@@ -1166,6 +1602,7 @@ class MainWindow(QMainWindow):
         elif self._mode == "roi" or self._mode in {"scoreboard_red_roi", "scoreboard_blue_roi"}:
             self.canvas.roi_points.append([x, y])
             if hasattr(self.canvas, "_last_frame"): self.canvas.show_frame(self.canvas._last_frame)
+        self._refresh_workflow()
 
     def process(self):
         if not self.db or not self.video_path or len(self.corners) != 4 or not self.seed_points:
@@ -1209,13 +1646,18 @@ class MainWindow(QMainWindow):
         self._worker.failed.connect(self.processing_failed)
         self._worker.done.connect(self._thread.quit); self._worker.failed.connect(self._thread.quit)
         self._processing_active = True
+        self._show_status("Starting analysis…")
+        self.status_progress.setValue(0); self.status_progress.show()
+        self._refresh_workflow()
         try:
             self._thread.start()
         except Exception as exc:
             self.processing_failed(f"Could not start analysis: {exc}")
 
     def show_progress(self, stage, percent, detail):
-        self.progress_label.setText(f"{stage} — {percent:.0f}% — {detail}")
+        self._show_status(f"{stage} — {percent:.0f}% — {detail}")
+        self.status_progress.setValue(max(0, min(100, round(percent))))
+        self._step_widgets["process"][1].setText(f"{stage} — {percent:.0f}%")
 
     def processing_done(self, rows):
         (track_rows, _, _), tracking_mode = rows
@@ -1238,6 +1680,8 @@ class MainWindow(QMainWindow):
         self.process_btn.setEnabled(True)
         if self.capture: self.timer.start()
         self._processing_active = False
+        self.status_progress.hide()
+        self._refresh_workflow()
 
     def _store_processing_results(self, rows):
         (track_rows, photos, roi_events), tracking_mode = rows
@@ -1270,7 +1714,7 @@ class MainWindow(QMainWindow):
                     "; their trails and statistics are empty.")
             self.log_view.addItem(note)
             message += " " + note
-        self.progress_label.setText(message)
+        self._show_status(message, "pending" if missing else "info")
         self.refresh_result_tables()
 
     def refresh_result_tables(self):
@@ -1319,17 +1763,20 @@ class MainWindow(QMainWindow):
             clip = clips_by_event.get(event["id"])
             event_label = self.event_types.get(event["event_type"], {}).get("label", "Unclassified / other")
             phase, remaining = classify_match_time(float(event["t_s"]), self.scoring_config["match_periods_s"])
-            values = [f"{event['t_s']:.2f}s {phase} ({remaining:.0f}s left)", event["team_number"], event["alliance"], event["event_alliance"], event_label, event["points"], event["confidence"], event["status"], Path(clip["path"]).name if clip else "Not generated"]
+            values = [f"{event['t_s']:.2f}s {phase} ({remaining:.0f}s left)", event["team_number"], event["alliance"], event["event_alliance"], event_label, event["points"], theme.confidence_label(event["confidence"]), theme.status_label(event["status"]), Path(clip["path"]).name if clip else "Not generated"]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value)); self.review_table.setItem(row_index, col, item)
             self.review_table.item(row_index, 0).setData(Qt.ItemDataRole.UserRole, event["id"])
+            self._paint_event_row(self.review_table, row_index, event["status"], event["confidence"])
+        self._set_review_badge(len(flagged))
         self.scoring_table.setRowCount(len(self.events))
         for row_index, event in enumerate(self.events):
             event_label = self.event_types.get(event["event_type"], {}).get("label", "Unclassified / other")
             phase, remaining = classify_match_time(float(event["t_s"]), self.scoring_config["match_periods_s"])
-            values = [f"{event['t_s']:.2f}s {phase} ({remaining:.0f}s left)", event["team_number"], event["alliance"], event["event_alliance"], event_label, event["points"], event["confidence"], event["status"]]
+            values = [f"{event['t_s']:.2f}s {phase} ({remaining:.0f}s left)", event["team_number"], event["alliance"], event["event_alliance"], event_label, event["points"], theme.confidence_label(event["confidence"]), theme.status_label(event["status"])]
             for col, value in enumerate(values): self.scoring_table.setItem(row_index, col, QTableWidgetItem(str(value)))
             self.scoring_table.item(row_index, 0).setData(Qt.ItemDataRole.UserRole, event["t_s"])
+            self._paint_event_row(self.scoring_table, row_index, event["status"], event["confidence"])
         self.refresh_clips()
         self.update_score_comparison()
 
@@ -1403,20 +1850,24 @@ class MainWindow(QMainWindow):
     def update_score_comparison(self, *_):
         if not self.db or self.video_id is None:
             self.score_compare.setText("Video totals include confirmed events only.")
-            self.ruling_status.setText(""); self.ruling_status.setStyleSheet(""); return
+            theme.set_tone(self.score_compare, "info")
+            self.ruling_status.setText(""); theme.set_tone(self.ruling_status, None); return
         events = self.db.events_for_video(self.video_id)
         robots = [dict(row) for row in self.db.robots_for_video(self.video_id)]
         try:
             board = self.current_scoreboard(events, robots)
         except ValueError as exc:
             self.score_compare.setText(f"Score unavailable: {exc}")
-            self.ruling_status.setText(str(exc)); return
+            theme.set_tone(self.score_compare, "danger")
+            self.ruling_status.setText(str(exc)); theme.set_tone(self.ruling_status, "danger"); return
         flagged_count = sum(event["status"] == "flagged" for event in events)
         self.ruling_status.setText(self._ruling_status_text(board, flagged_count, robots))
-        self.ruling_status.setStyleSheet("font-weight:600;color:#b45309" if board["pending_referee_ruling"] else "")
+        theme.set_tone(self.ruling_status, "pending" if board["pending_referee_ruling"] else None)
         has_tracks = self.db.connection.execute("SELECT 1 FROM tracks WHERE robot_id IN (SELECT id FROM robots WHERE video_id=?) LIMIT 1", (self.video_id,)).fetchone()
         if not events and not has_tracks:
-            self.score_compare.setText("No analysis has run for this video yet."); return
+            self.score_compare.setText("No analysis has run for this video yet.")
+            theme.set_tone(self.score_compare, "info"); return
+        theme.set_tone(self.score_compare, "pending" if flagged_count else "info")
         totals = board["alliance_points"]
         playoff = board["match_type"] == "playoff"
         dq_ids = board["ruling"]["qualification_disqualified_robot_ids"]
@@ -1485,13 +1936,17 @@ class MainWindow(QMainWindow):
         self._ocr_thread.start()
 
     def show_ocr_progress(self, percent: float, detail: str):
+        theme.set_tone(self.scoreboard_ocr_status, "info")
         self.scoreboard_ocr_status.setText(f"Reading scoreboard frames — {percent:.0f}% — {detail}")
 
     def show_scoreboard_ocr(self, result: dict | None):
         if not result:
+            theme.set_tone(self.scoreboard_ocr_status, "info")
             self.scoreboard_ocr_status.setText("Seek to the final results screen, then draw tight red and blue score ROIs in Analysis. OCR proposes a multi-frame reading for your review.")
             self.use_ocr_btn.setEnabled(False)
             return
+        # An OCR reading is a proposal: it keeps the pending tone for the reviewer to check.
+        theme.set_tone(self.scoreboard_ocr_status, "pending")
         red, blue = result.get("red", {}), result.get("blue", {})
         total_frames = result.get("frames_sampled", 0)
         def describe(alliance, value):
@@ -1518,6 +1973,7 @@ class MainWindow(QMainWindow):
 
     def scoreboard_ocr_failed(self, message: str):
         self.read_scoreboard_btn.setEnabled(True)
+        theme.set_tone(self.scoreboard_ocr_status, "danger")
         self.scoreboard_ocr_status.setText(f"Scoreboard OCR did not finish: {message}")
         self._ocr_active = False
 
@@ -1637,10 +2093,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             message += f" The failed status could not be saved either: {exc}"
         self._set_results_enabled(False)
-        self.progress_label.setText(message)
+        self._show_status(message, "danger")
         self.log_view.addItem(message)
         self.process_btn.setEnabled(True)
         self._processing_active = False
+        self.status_progress.hide()
+        self._refresh_workflow()
 
     def cancel_process(self):
         if self._worker: self._worker.cancel(); self.statusBar().showMessage("Cancelling after the current frame…")

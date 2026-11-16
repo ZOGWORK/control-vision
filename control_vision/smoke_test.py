@@ -124,8 +124,11 @@ def check_qt_window() -> dict[str, Any]:
     try:
         if "BIOBUZZ" not in window.build_rules_reference():
             raise SmokeFailure("Bundled BIOBUZZ rule reference is unavailable")
+        if not app.styleSheet() or app.property("control_vision_theme") not in {"light", "dark"}:
+            raise SmokeFailure("The application theme was not applied")
         app.processEvents()
-        return {"platform": app.platformName(), "title": window.windowTitle()}
+        return {"platform": app.platformName(), "title": window.windowTitle(),
+                "theme": app.property("control_vision_theme")}
     finally:
         window.close()
         window.deleteLater()
