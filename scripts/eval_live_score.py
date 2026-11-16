@@ -15,7 +15,10 @@ user. Only qualification matches are compared.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import math
+import os
 import re
 import sys
 import time
@@ -29,37 +32,143 @@ FIELDS = ("auto_tips", "teleop_tips", "foul_credit")
 
 
 def _official(official_dir: Path, event_code: str, number: int) -> dict | None:
+    """The official result of one qualification match, or None when it is missing or the file is malformed (a bad
+    official file must not stop the read of every other clip)."""
     path = official_dir / f"{event_code}.json"
     if not path.is_file():
         return None
-    matches = json.loads(path.read_text(encoding="utf-8"))
-    match = next((m for m in matches if m.get("tournamentLevel") == "Quals" and m.get("id") == number), None)
-    if not match or not match.get("scores"):
+    try:
+        matches = json.loads(path.read_text(encoding="utf-8"))
+        match = next((m for m in matches if m.get("tournamentLevel") == "Quals" and m.get("id") == number), None)
+        if not match or not match.get("scores"):
+            return None
+        result = {}
+        for alliance in ("red", "blue"):
+            s = match["scores"][alliance]
+            result[alliance] = {"auto_tips": s["autoHiveTips"], "teleop_tips": s["dcHiveTips"],
+                                "foul_credit": s["penaltyPointsByOpp"], "total": s["totalPoints"]}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:  # JSONDecodeError is a ValueError
+        print(f"Official results {path.name} are unreadable for Q{number}: {exc!r}", file=sys.stderr, flush=True)
         return None
-    result = {}
-    for alliance in ("red", "blue"):
-        s = match["scores"][alliance]
-        result[alliance] = {"auto_tips": s["autoHiveTips"], "teleop_tips": s["dcHiveTips"],
-                            "foul_credit": s["penaltyPointsByOpp"], "total": s["totalPoints"]}
     return result
+
+
+def _write_json(path: Path, data: dict) -> None:
+    # Write a temporary file and rename it, so an interrupted run never leaves a truncated result behind.
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(json.dumps(data), encoding="utf-8")
+    os.replace(temp, path)
+
+
+def _load_json(path: Path) -> dict | None:
+    """A cached result, or None when the file is unreadable: not valid JSON (for example truncated by an older
+    version), or missing the fields every written result has."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # unreadable path (e.g. a directory), JSONDecodeError, UnicodeDecodeError
+        return None
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("error"), str):
+        return data  # a failed read; older versions wrote only file and error
+    if isinstance(data.get("event_code"), str) and isinstance(data.get("match"), int) \
+            and isinstance(data.get("samples"), list) and all(map(_valid_sample, data["samples"])):
+        return data
+    return None
+
+
+def _number(value, kind=(int, float)) -> bool:
+    # json.loads accepts NaN and Infinity; a reading never has them.
+    return isinstance(value, kind) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _valid_sample(sample) -> bool:
+    """One overlay reading as read_live_overlay writes it: a time, and each counter a number or None."""
+    return isinstance(sample, dict) and _number(sample.get("t_s")) \
+        and all(sample.get(key) is None or _number(sample[key], int) for key in _SAMPLE_COUNTERS) \
+        and (sample.get("clock_s") is None or _number(sample["clock_s"]))
+
+
+_SAMPLE_COUNTERS = ("red_score", "blue_score", "red_tips", "blue_tips")
+
+
+def _result_names(rows: list[dict]) -> dict[str, str]:
+    """A distinct result file name per manifest file. The name stem alone, as before, when no other file gets the
+    same name; files that would share one get the stem plus a short hash of their path, repeated until every name
+    is unique (case-insensitively, as on Windows)."""
+    files = list(dict.fromkeys(row["file"] for row in rows))
+    names = {file: Path(file).stem + ".json" for file in files}
+    salt = 0
+    while True:
+        taken: dict[str, list[str]] = {}
+        for file, name in names.items():
+            taken.setdefault(name.lower(), []).append(file)
+        clashes = [group for group in taken.values() if len(group) > 1]
+        if not clashes:
+            return names
+        for group in clashes:
+            for file in group:
+                digest = hashlib.sha1(f"{file}#{salt}".encode("utf-8")).hexdigest()[:8]
+                names[file] = f"{Path(file).stem}-{digest}.json"
+        salt += 1
+
+
+def _move_renamed_results(out_dir: Path, names: dict[str, str]) -> None:
+    """A clip's result written under an older name (before another clip came to share its stem) is moved to the
+    clip's current name, or removed if that already exists, so report never counts the clip twice."""
+    for path in sorted(out_dir.glob("*.json")):
+        result = _load_json(path)
+        file = result.get("file") if result else None
+        if file not in names or names[file] == path.name:
+            continue
+        current = out_dir / names[file]
+        if current.exists():
+            path.unlink()
+        else:
+            os.replace(path, current)
+
+
+def _clip_identity(path: Path) -> dict | None:
+    """Size and modification time of the clip, so a file replaced under the same name is read again."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
 def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    with open(footage / "FOOTAGE_MANIFEST.csv", encoding="utf-8") as handle:
+    # utf-8-sig also accepts a manifest saved with a BOM (Excel's default).
+    with open(footage / "FOOTAGE_MANIFEST.csv", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
+    names = _result_names(rows)
+    _move_renamed_results(out_dir, names)
     for row in rows:
         if only and not any(part in row["file"] for part in only):
             continue
-        target = out_dir / (Path(row["file"]).stem + ".json")
-        if target.exists():
-            cached = json.loads(target.read_text(encoding="utf-8"))
-            if "error" not in cached and cached.get("complete") is not False:
-                continue  # a failed or stopped-early read is retried
         match = re.search(r"Qualification (\d+)", row["match_label_on_screen"])
         if not match:
             continue
         result: dict = {"file": row["file"], "event_code": row["event_code"], "match": int(match.group(1))}
+        target = out_dir / names[row["file"]]
+        cached = _load_json(target) if target.exists() else None
+        clip = _clip_identity(footage / row["file"])
+        result["clip"] = clip
+        same_clip = cached is not None and all(cached.get(key) == result[key] for key in ("file", "event_code", "match"))
+        # A result written before clip identities were recorded has none; it is kept and given this one.
+        same_footage = cached is not None and (cached.get("clip") is None or clip is None or cached["clip"] == clip)
+        if same_clip and same_footage and "error" not in cached and cached.get("complete") is not False:
+            # Keep the read, but pick up an official result added since.
+            official = _official(official_dir, result["event_code"], result["match"])
+            if official != cached.get("official") or (clip is not None and cached.get("clip") is None):
+                cached["official"] = official
+                if clip is not None:
+                    cached["clip"] = clip
+                _write_json(target, cached)
+            continue
+        # A failed, stopped-early or unreadable result is read again, and so is one written for a different
+        # manifest row (a corrected event or match label) or for a clip file that has since been replaced.
         started = time.time()
         try:
             reading = read_live_overlay(footage / row["file"])
@@ -70,7 +179,7 @@ def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> N
                           samples=reading["samples"], complete=reading["complete"],
                           stopped_early=reading["stopped_early"])
         result["official"] = _official(official_dir, row["event_code"], result["match"])
-        target.write_text(json.dumps(result), encoding="utf-8")
+        _write_json(target, result)
         print(row["file"], result.get("error", "ok"), flush=True)
 
 
@@ -81,7 +190,10 @@ def report(results_dir: Path) -> None:
     exact = {field: 0 for field in FIELDS}
     compared = 0
     for path in sorted(results_dir.glob("*.json")):
-        result = json.loads(path.read_text(encoding="utf-8"))
+        result = _load_json(path)
+        if result is None:
+            failed.append(f"{path.stem}: result file is unreadable; run `read` again to redo it")
+            continue
         if "error" in result:
             failed.append(f"{path.stem}: {result['error']}")
             continue
@@ -93,16 +205,24 @@ def report(results_dir: Path) -> None:
         if not official:
             failed.append(f"{path.stem}: no official result")
             continue
-        summary = summarize(propose_events(result["samples"]))
-        for alliance in ("red", "blue"):
-            got = tuple(summary[alliance][field] for field in FIELDS)
-            want = tuple(official[alliance][field] for field in FIELDS)
+        try:
+            # Compute both alliances before counting either, so a malformed file adds nothing.
+            summary = summarize(propose_events(result["samples"]))
+            rows = []
+            for alliance in ("red", "blue"):
+                got = tuple(summary[alliance][field] for field in FIELDS)
+                want = tuple(official[alliance][field] for field in FIELDS)
+                rows.append((alliance, got, want, summary[alliance]["last_stable_score"], official[alliance]["total"]))
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            failed.append(f"{path.stem}: result file is malformed ({exc!r}); run `read` again to redo it")
+            continue
+        for alliance, got, want, last_score, total in rows:
             compared += 1
             for field, a, b in zip(FIELDS, got, want):
                 exact[field] += a == b
             mark = "" if got == want else " ✗"
             lines.append(f"| {result['event_code']} Q{result['match']} | {alliance} | {' / '.join(map(str, got))}{mark} | "
-                         f"{' / '.join(map(str, want))} | {summary[alliance]['last_stable_score']} | {official[alliance]['total']} |")
+                         f"{' / '.join(map(str, want))} | {last_score} | {total} |")
     print(f"Alliance results compared: {compared}\n")
     for field in FIELDS:
         print(f"- {field.replace('_', ' ')}: {exact[field]} / {compared} exact")
@@ -115,6 +235,8 @@ def report(results_dir: Path) -> None:
 
 
 if __name__ == "__main__":
+    # The report marks mismatches with ✗; a Windows console's default code page cannot print it.
+    sys.stdout.reconfigure(encoding="utf-8")
     if len(sys.argv) >= 5 and sys.argv[1] == "read":
         read(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5:])
     elif len(sys.argv) == 3 and sys.argv[1] == "report":

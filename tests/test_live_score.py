@@ -109,7 +109,9 @@ class CounterBoxTests(unittest.TestCase):
 
     def test_prefers_the_box_nearest_the_team_numbers(self):
         self.assertEqual(counter_box(band_with_counter(checkmark_panel=True), "right"), (250, 25, 290, 75))
-        self.assertEqual(counter_box(band_with_counter(checkmark_panel=True), "left"), (20, 10, 110, 90))
+        # Blue mirrors red: the digit box is nearest the team numbers (left), the panel further out (right).
+        blue = np.ascontiguousarray(band_with_counter(checkmark_panel=True)[:, ::-1])
+        self.assertEqual(counter_box(blue, "left"), (90, 25, 130, 75))
 
     def test_no_counter_box(self):
         self.assertIsNone(counter_box(band_with_counter(digit_box=False), "right"))
@@ -284,6 +286,75 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual([phase for _, phase in proposal["phases"]], [TELEOP, ENDED, AUTO])
         self.assertEqual(proposal["events"][-1]["event_type"], "hive_tip_auto")
 
+    def test_tip_before_the_clock_is_readable_takes_the_first_established_phase(self):
+        # The clip opens in TELEOP with the clock unreadable; the TIP at 2 s is a TELEOP TIP.
+        rows = timeline([(0.0, {"clock": None}), (2.0, {"red": 20, "red_tips": 1}), (8.0, {"clock": 100}),
+                         (20.0, {"clock": 88})])
+        proposal = propose_events(rows)
+        self.assertEqual(proposal["phases"][0][1], TELEOP)
+        self.assertEqual([(e["t_s"], e["event_type"], e["confidence"]) for e in proposal["events"]],
+                         [(2.0, "hive_tip_teleop", "medium")])
+
+    def test_auto_tip_before_the_first_clock_reading_is_kept(self):
+        # The clock is unreadable for AUTO's first seconds; the TIP at 2 s is stable before the clock (8 s).
+        rows = timeline([(0.0, {"clock": None}), (2.0, {"red": 20, "red_tips": 1}), (8.0, {"clock": 140}),
+                         (20.0, {"clock": 128})])
+        proposal = propose_events(rows)
+        self.assertEqual(proposal["phases"][0][1], AUTO)
+        self.assertEqual(proposal["match_start_s"], 0.0)
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(2.0, "hive_tip_auto")])
+
+    def test_countdown_after_an_unread_end_of_auto_keeps_the_auto_events(self):
+        # Last readable AUTO clock 2:15, then unreadable, then the countdown and 2:00: still one match.
+        rows = timeline([(0.0, {"clock": 145}), (3.0, {"red": 20, "red_tips": 1, "clock": 135}), (6.0, {"clock": None}),
+                         (12.0, {"clock": 7}), (16.0, {"clock": 120}), (18.0, {"clock": 118}),
+                         (25.0, {"red": 40, "red_tips": 2, "clock": 110}), (30.0, {"clock": 100})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, TELEOP])
+        self.assertEqual(proposal["match_start_s"], 0.0)
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]],
+                         [(3.0, "hive_tip_auto"), (25.0, "hive_tip_teleop")])
+
+    def test_clip_opening_on_two_minutes_at_the_end_of_auto_keeps_teleop(self):
+        # 2:00 at the end of AUTO, the countdown, then TELEOP from 2:00 with a TIP in it.
+        rows = timeline([(0.0, {"clock": 120}), (4.0, {"clock": 6}), (10.0, {"clock": 120}),
+                         (12.0, {"clock": 118}), (20.0, {"red": 20, "red_tips": 1, "clock": 110}),
+                         (30.0, {"clock": 100})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, TRANSITION, TELEOP])
+        self.assertIsNone(proposal["match_end_s"])
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(20.0, "hive_tip_teleop")])
+
+    def test_clip_opening_on_two_minutes_that_runs_down_is_teleop(self):
+        rows = timeline([(0.0, {"clock": 120}), (2.0, {"red": 20, "red_tips": 1}), (4.0, {"clock": 116}),
+                         (10.0, {"clock": 110})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [TELEOP])
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(2.0, "hive_tip_teleop")])
+
+    def test_auto_foul_before_the_first_clock_reading_is_a_major_foul(self):
+        rows = timeline([(0.0, {"clock": None}), (2.0, {"red": 20}), (8.0, {"clock": 140}), (20.0, {"clock": 128})])
+        proposal = propose_events(rows)
+        self.assertEqual([(e["t_s"], e["event_type"], e["points"]) for e in proposal["events"]],
+                         [(2.0, "major_foul", 20)])
+
+    def test_previous_matchs_score_before_an_unreadable_clock_stays_out_of_the_match(self):
+        # The clip opens on the previous match's 88 with no readable clock; the overlay resets at 4 s.
+        rows = timeline([(0.0, {"clock": None, "red": 88, "red_tips": 3}), (4.0, {"red": 0, "red_tips": 0}),
+                         (8.0, {"clock": 140}), (12.0, {"red": 20, "red_tips": 1}), (20.0, {"clock": 128})])
+        proposal = propose_events(rows)
+        self.assertEqual(proposal["match_start_s"], 4.0)
+        self.assertEqual(proposal["corrections"], [])
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(12.0, "hive_tip_auto")])
+
+    def test_tip_with_no_readable_clock_is_low_confidence_not_auto(self):
+        rows = timeline([(0.0, {"clock": None}), (2.0, {"red": 20, "red_tips": 1})])
+        proposal = propose_events(rows)
+        self.assertEqual(proposal["phases"], [])
+        [event] = proposal["events"]
+        self.assertEqual((event["event_type"], event["confidence"]), ("hive_tip_teleop", "low"))
+        self.assertIn("AUTO or TELEOP is unknown", event["note"])
+
     def test_clip_opening_on_the_last_teleop_seconds_then_the_next_match(self):
         rows = timeline([(0.0, {"clock": 3}), (5.0, {"clock": 150}), (10.0, {"clock": 145})])
         self.assertEqual([phase for _, phase in match_phases(rows)], [TELEOP, AUTO])
@@ -324,6 +395,23 @@ class ProposalTests(unittest.TestCase):
         proposal = propose_events(rows)
         self.assertEqual([(e["t_s"], e["event_type"], e["points"]) for e in proposal["events"]],
                          [(2.0, "major_foul", 20)])
+
+    def test_stream_cutting_from_auto_into_the_next_matchs_auto_starts_a_new_match(self):
+        rows = timeline([(0.0, {"clock": 140}), (2.0, {"red": 20, "red_tips": 1}),
+                         (5.0, {"clock": 150, "red": 0, "red_tips": 0}), (8.0, {"blue": 20, "blue_tips": 1}),
+                         (12.0, {"clock": 121}), (13.0, {"clock": 7}), (17.0, {"clock": 120}), (19.0, {"clock": 118})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, AUTO, TRANSITION, TELEOP])
+        self.assertEqual(proposal["match_start_s"], 5.0)
+        self.assertEqual([(e["t_s"], e["scoring_alliance"]) for e in proposal["events"]], [(8.0, "blue")])
+
+    def test_teleop_clock_jumping_up_is_a_cut_into_another_match(self):
+        rows = timeline([(0.0, {"clock": 100}), (2.0, {"red": 20, "red_tips": 1}),
+                         (5.0, {"clock": 115, "red": 0, "red_tips": 0}), (8.0, {"red": 20, "red_tips": 1})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [TELEOP, TELEOP])
+        self.assertEqual(proposal["match_end_s"], 5.0)
+        self.assertEqual([e["t_s"] for e in proposal["events"]], [2.0])
 
     def test_no_readings(self):
         proposal = propose_events([sample(0), sample(0.5)])
@@ -466,6 +554,45 @@ class ReadOverlayTests(unittest.TestCase):
         self.assertEqual(len(result["samples"]), 20)
         self.assertTrue(result["complete"])
 
+    def test_cancel_stops_decoding_forward_after_a_refused_probe_seek(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from control_vision.pipeline import live_score
+        captures: list = []
+
+        def open_capture(*_):
+            captures.append(FakeCapture(100, refuse_seek=True))
+            return captures[-1]
+
+        checks = 0
+
+        def cancel():
+            nonlocal checks
+            checks += 1
+            return checks > 3
+
+        with patch.object(live_score, "_engine", return_value=FakeEngine()), \
+                patch.object(live_score.cv2, "VideoCapture", side_effect=open_capture), \
+                self.assertLogs("control_vision.pipeline.live_score", level="WARNING"), \
+                self.assertRaises(InterruptedError):
+            live_score.read_live_overlay(Path("match.mp4"), sample_fps=2.0, cancel=cancel)
+        # Decoding forward to the first probe (frame 50) stopped a few frames in; across every capture opened,
+        # only those few frames were decoded (without the check it would probe on through the video first).
+        self.assertLess(sum(capture.position for capture in captures), 5)
+
+    def test_cancel_before_locating_the_overlay_decodes_nothing(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from control_vision.pipeline import live_score
+        capture = FakeCapture(100)
+        with patch.object(live_score, "_engine", return_value=FakeEngine()), \
+                patch.object(live_score.cv2, "VideoCapture", return_value=capture), \
+                self.assertRaises(InterruptedError):
+            live_score.read_live_overlay(Path("match.mp4"), sample_fps=2.0, cancel=lambda: True)
+        # Nothing was read or grabbed (grab() advances the position without recording a decode).
+        self.assertEqual(capture.decoded, [])
+        self.assertEqual(capture.position, 0)
+
     def test_a_seek_that_raises_reopens_instead_of_escaping(self):
         from pathlib import Path
         from unittest.mock import patch
@@ -512,6 +639,279 @@ class ReadOverlayTests(unittest.TestCase):
         self.assertIn("4.2", result["stopped_early"])
         self.assertLess(result["read_until_s"], 4.2)
         self.assertEqual(result["duration_s"], 10.0)
+
+
+class EvalCacheTests(unittest.TestCase):
+    """scripts/eval_live_score.py: a truncated result file is redone, not fatal."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[1] / "scripts" / "eval_live_score.py"
+        spec = importlib.util.spec_from_file_location("eval_live_score", path)
+        cls.script = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.script)
+
+    def _footage(self, folder):
+        footage = folder / "footage"
+        footage.mkdir()
+        (footage / "FOOTAGE_MANIFEST.csv").write_text(
+            "file,event_code,match_label_on_screen\nclip.mp4,TEST,Qualification 3\n", encoding="utf-8")
+        return footage
+
+    def test_read_redoes_a_truncated_result(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out = self._footage(folder), folder / "results"
+            out.mkdir()
+            (out / "clip.json").write_text('{"file": "clip.mp4", "samp', encoding="utf-8")
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", out, [])
+            reader.assert_called_once()
+            import json
+            result = json.loads((out / "clip.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["match"], 3)
+            self.assertTrue(result["complete"])
+            self.assertEqual(list(out.glob("*.tmp")), [])
+
+    def test_read_redoes_a_result_missing_its_fields(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        for stale in ("{}", '{"event_code": "TEST", "match": 3}', "[]"):
+            with tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp)
+                footage, out = self._footage(folder), folder / "results"
+                out.mkdir()
+                (out / "clip.json").write_text(stale, encoding="utf-8")
+                reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+                with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                    self.script.read(footage, folder / "official", out, [])
+                reader.assert_called_once()
+                self.assertEqual(json.loads((out / "clip.json").read_text(encoding="utf-8"))["samples"], [])
+
+    def test_a_bad_official_file_does_not_stop_the_read(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out, official = self._footage(folder), folder / "results", folder / "official"
+            with open(footage / "FOOTAGE_MANIFEST.csv", "a", encoding="utf-8") as handle:
+                handle.write("other.mp4,GOOD,Qualification 4\n")
+            official.mkdir()
+            (official / "TEST.json").write_text('[{"tournamentLevel": "Quals", "id": 3, "sco', encoding="utf-8")
+            (official / "GOOD.json").write_text(json.dumps([{"tournamentLevel": "Quals", "id": 4, "scores": {
+                "red": {}, "blue": {}}}]), encoding="utf-8")  # scores without the fields
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader, \
+                    patch("sys.stderr"):
+                self.script.read(footage, official, out, [])
+            self.assertEqual(reader.call_count, 2)
+            for stem in ("clip", "other"):
+                result = json.loads((out / f"{stem}.json").read_text(encoding="utf-8"))
+                self.assertIsNone(result["official"])
+                self.assertEqual(result["samples"], [])
+
+    def test_a_result_written_for_another_manifest_row_is_read_again(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out = self._footage(folder), folder / "results"
+            out.mkdir()
+            # The manifest now says Qualification 3; the cached read was made when it said 2.
+            (out / "clip.json").write_text(json.dumps({"file": "clip.mp4", "event_code": "TEST", "match": 2,
+                                                       "samples": [], "complete": True}), encoding="utf-8")
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", out, [])
+            reader.assert_called_once()
+            self.assertEqual(json.loads((out / "clip.json").read_text(encoding="utf-8"))["match"], 3)
+
+    def test_cached_samples_of_the_wrong_shape_are_read_again(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        for samples in ([{"t_s": 0.0, "red_score": "x"}], [{"red_score": 5}], [{"t_s": 0.0, "red_tips": True}], [3]):
+            with tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp)
+                footage, out = self._footage(folder), folder / "results"
+                out.mkdir()
+                (out / "clip.json").write_text(json.dumps({"file": "clip.mp4", "event_code": "TEST", "match": 3,
+                                                           "samples": samples, "complete": True}), encoding="utf-8")
+                reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+                with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                    self.script.read(footage, folder / "official", out, [])
+                reader.assert_called_once()
+
+    def test_clips_sharing_a_name_stem_keep_separate_results(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out = folder / "footage", folder / "results"
+            footage.mkdir()
+            (footage / "FOOTAGE_MANIFEST.csv").write_text(
+                "file,event_code,match_label_on_screen\nq3.mp4,TEST,Qualification 3\na/q3.mkv,TEST,Qualification 4\n"
+                "solo.mp4,TEST,Qualification 5\n", encoding="utf-8")
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", out, [])
+                self.script.read(footage, folder / "official", out, [])  # the second run reuses all three
+            self.assertEqual(reader.call_count, 3)
+            results = {json.loads(p.read_text(encoding="utf-8"))["file"]: p.name for p in out.glob("*.json")}
+            self.assertEqual(sorted(results), ["a/q3.mkv", "q3.mp4", "solo.mp4"])
+            self.assertEqual(results["solo.mp4"], "solo.json")  # a unique stem keeps its old name
+
+    def test_a_manifest_saved_with_a_bom_is_read(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage = folder / "footage"
+            footage.mkdir()
+            (footage / "FOOTAGE_MANIFEST.csv").write_text(
+                "file,event_code,match_label_on_screen\nclip.mp4,TEST,Qualification 3\n", encoding="utf-8-sig")
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", folder / "results", [])
+            reader.assert_called_once()
+
+    def test_a_result_renamed_by_a_new_clip_leaves_no_duplicate(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out = self._footage(folder), folder / "results"
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", out, [])
+                self.assertTrue((out / "clip.json").exists())
+                with open(footage / "FOOTAGE_MANIFEST.csv", "a", encoding="utf-8") as handle:
+                    handle.write("b/clip.mkv,TEST,Qualification 4\n")
+                self.script.read(footage, folder / "official", out, [])
+            files = sorted(json.loads(p.read_text(encoding="utf-8"))["file"] for p in out.glob("*.json"))
+            self.assertEqual(files, ["b/clip.mkv", "clip.mp4"])
+            self.assertFalse((out / "clip.json").exists())
+            self.assertEqual(reader.call_count, 2)  # clip.mp4's read moved to its new name, not redone
+
+    def test_generated_result_names_never_collide(self):
+        names = self.script._result_names([{"file": f} for f in ("a/q3.mkv", "q3.mp4", "a_q3_mkv.mp4", "Q3.avi")])
+        self.assertEqual(len({name.lower() for name in names.values()}), 4)
+        self.assertEqual(names["a_q3_mkv.mp4"], "a_q3_mkv.json")
+
+    def test_non_finite_cached_times_are_read_again(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        for stale in ('{"t_s": NaN}', '{"t_s": 0.0, "clock_s": Infinity}'):
+            with tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp)
+                footage, out = self._footage(folder), folder / "results"
+                out.mkdir()
+                (out / "clip.json").write_text('{"file": "clip.mp4", "event_code": "TEST", "match": 3, '
+                                               f'"complete": true, "samples": [{stale}]}}', encoding="utf-8")
+                reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+                with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                    self.script.read(footage, folder / "official", out, [])
+                reader.assert_called_once()
+
+    def test_a_replaced_clip_is_read_again_and_an_older_result_gets_its_identity(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out = self._footage(folder), folder / "results"
+            out.mkdir()
+            (footage / "clip.mp4").write_bytes(b"first")
+            # Written before identities were recorded: kept, and given the clip's identity.
+            (out / "clip.json").write_text(json.dumps({"file": "clip.mp4", "event_code": "TEST", "match": 3,
+                                                       "samples": [], "complete": True}), encoding="utf-8")
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", out, [])
+                self.assertEqual(reader.call_count, 0)
+                self.assertEqual(json.loads((out / "clip.json").read_text(encoding="utf-8"))["clip"]["size"], 5)
+                (footage / "clip.mp4").write_bytes(b"re-cropped")
+                self.script.read(footage, folder / "official", out, [])
+                self.assertEqual(reader.call_count, 1)
+                self.script.read(footage, folder / "official", out, [])
+                self.assertEqual(reader.call_count, 1)
+            self.assertEqual(json.loads((out / "clip.json").read_text(encoding="utf-8"))["clip"]["size"], 10)
+
+    def test_a_result_path_that_cannot_be_read_is_listed_not_fatal(self):
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            (out / "bad.json").mkdir()
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                self.script.report(out)
+            self.assertIn("bad: result file is unreadable", printed.getvalue())
+
+    def test_report_lists_a_malformed_result_and_still_compares_the_others(self):
+        import contextlib
+        import io
+        import json
+        import tempfile
+        from pathlib import Path
+        official = {alliance: {"auto_tips": 0, "teleop_tips": 0, "foul_credit": 0, "total": 0}
+                    for alliance in ("red", "blue")}
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            (out / "bad.json").write_text(json.dumps({"event_code": "T", "match": 1, "samples": [{"red_score": 5}],
+                                                      "complete": True, "official": official}), encoding="utf-8")
+            (out / "bad-official.json").write_text(json.dumps({"event_code": "T", "match": 2, "samples": [],
+                                                               "complete": True, "official": {"red": {}}}),
+                                                   encoding="utf-8")
+            (out / "good.json").write_text(json.dumps({"event_code": "T", "match": 3, "samples": [],
+                                                       "complete": True, "official": official}), encoding="utf-8")
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                self.script.report(out)
+            text = printed.getvalue()
+            self.assertIn("Alliance results compared: 2", text)
+            # Samples without t_s are rejected on loading (unreadable), so `read` redoes them.
+            self.assertIn("bad: result file is unreadable", text)
+            self.assertIn("bad-official: result file is malformed", text)
+
+    def test_report_lists_a_truncated_result_instead_of_failing(self):
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            (out / "clip.json").write_text('{"file": "clip.mp4", "samp', encoding="utf-8")
+            # A failed read written by an older version (file and error only) keeps its message.
+            (out / "old.json").write_text('{"file": "old.mp4", "error": "no overlay"}', encoding="utf-8")
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                self.script.report(out)
+            self.assertIn("Alliance results compared: 0", printed.getvalue())
+            self.assertIn("clip: result file is unreadable", printed.getvalue())
+            self.assertIn("old: no overlay", printed.getvalue())
 
 
 if __name__ == "__main__":

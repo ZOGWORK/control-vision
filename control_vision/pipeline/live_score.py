@@ -248,11 +248,17 @@ def _decode(cap, logger, video_path: Path, index: int, grab: bool = False):
         return False, None
 
 
-def _seek(cap, logger, video_path: Path, target: int):
+def _check_cancel(cancel: Callable[[], bool] | None) -> None:
+    if cancel and cancel():
+        raise InterruptedError("Reading the live score overlay was cancelled.")
+
+
+def _seek(cap, logger, video_path: Path, target: int, cancel: Callable[[], bool] | None = None):
     """A capture whose next frame is ``target``.
 
     Some backends ignore or misplace a seek, so the position is checked; if it
-    is wrong the video is reopened and decoded forward to ``target``.
+    is wrong the video is reopened and decoded forward to ``target``, checking
+    ``cancel`` while it does (raises InterruptedError when cancelled).
     Returns (capture, ok); the old capture is released when replaced.
     """
     try:
@@ -270,6 +276,7 @@ def _seek(cap, logger, video_path: Path, target: int):
     if not cap.isOpened():
         raise RuntimeError(f"Could not read video file {video_path.name}.")
     for index in range(target):
+        _check_cancel(cancel)
         if not _decode(cap, logger, video_path, index, grab=True)[0]:
             return cap, False
     return cap, True
@@ -299,8 +306,9 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
         if layout is None:
             searched = 0
             for fraction in _LOCATE_FRACTIONS:
+                _check_cancel(cancel)
                 target = int(fraction * frame_count)
-                cap, ok = _seek(cap, logger, video_path, target)
+                cap, ok = _seek(cap, logger, video_path, target, cancel)
                 frame = None
                 if ok:
                     ok, frame = _decode(cap, logger, video_path, target)
@@ -327,7 +335,8 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
                                    "the FTC Live overlay with the \"Red\" and \"Blue\" alliance labels.")
             # Timestamps count frames from the start, so a backend that
             # refuses to rewind must not continue from the probe position.
-            cap, ok = _seek(cap, logger, video_path, 0)
+            _check_cancel(cancel)
+            cap, ok = _seek(cap, logger, video_path, 0, cancel)
         stride = max(1, round(fps / sample_fps))
         samples: list[dict] = []
         failures = 0
@@ -335,8 +344,7 @@ def read_live_overlay(video_path: Path, layout: OverlayLayout | None = None, sam
         stopped: str | None = None
         failed_from = 0.0
         while index < frame_count:
-            if cancel and cancel():
-                raise InterruptedError("Reading the live score overlay was cancelled.")
+            _check_cancel(cancel)
             if index % stride:
                 if not _decode(cap, logger, video_path, index, grab=True)[0]:
                     stopped = f"the video could not be decoded past {index / fps:.1f} s"
@@ -432,6 +440,11 @@ _TRANSITION_MAX_CLOCK_S = 8
 # clock above 2:00 after them or the end of a match is the next match's AUTO
 # (a stream may cut into it anywhere from 2:30 down).
 _NEW_MATCH_MIN_CLOCK_S = _AUTO_END_CLOCK_S + 1
+# Within AUTO or TELEOP the clock only counts down, so a stable rise of this
+# much is a cut into another match. (The only rise in a match, 0:01 to 2:00
+# at the end of the countdown, happens in TRANSITION.) A repeated phase in
+# match_phases marks such a new match.
+_NEW_MATCH_MIN_RISE_S = 5
 
 
 def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> list[tuple[float, str]]:
@@ -444,13 +457,24 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
     phases: list[tuple[float, str]] = []
     phase: str | None = None
     previous: int | None = None
+    opened_at_auto_end = False
     for t_s, clock in stable_steps(samples, "clock_s", min_samples):
         if phase is None:
             # A clip opening on 0:01-0:08 may be in the TRANSITION countdown
             # or the last seconds of TELEOP; it is taken as TRANSITION until
-            # the clock shows which (2:00 next, or 0:00).
-            new = (AUTO if clock > _AUTO_END_CLOCK_S else ENDED if clock == 0
+            # the clock shows which (2:00 next, or 0:00). Likewise an opening
+            # 2:00 is the end of AUTO or the start of TELEOP: it is taken as
+            # AUTO until the countdown follows or the clock runs down from it.
+            new = (AUTO if clock >= _AUTO_END_CLOCK_S else ENDED if clock == 0
                    else TRANSITION if clock <= _TRANSITION_MAX_CLOCK_S else TELEOP)
+            opened_at_auto_end = clock == _AUTO_END_CLOCK_S
+        elif (phase in (AUTO, TELEOP) and previous is not None and clock >= previous + _NEW_MATCH_MIN_RISE_S
+              and not (phase == TELEOP and clock >= _NEW_MATCH_MIN_CLOCK_S)):
+            # Same phase, later match: record it again so the match boundary shows.
+            phases.append((t_s, AUTO if clock > _AUTO_END_CLOCK_S else TELEOP))
+            phase = phases[-1][1]
+            previous = clock
+            continue
         elif phase == ENDED and 0 < clock <= _AUTO_END_CLOCK_S:
             # After 0:00 the clock only moves again in the next match: a cut
             # into its countdown or TELEOP (its AUTO was not shown).
@@ -469,6 +493,12 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
             # TRANSITION countdown only follows a clock at 2:00).
             new = ENDED
         elif phase == AUTO and _TRANSITION_MAX_CLOCK_S < clock < _AUTO_END_CLOCK_S:
+            if opened_at_auto_end and len(phases) == 1:
+                # The clip opened on 2:00 and the clock ran down from it: that
+                # 2:00 was the start of TELEOP, not the end of AUTO.
+                phases[0] = (phases[0][0], TELEOP)
+                phase, previous = TELEOP, clock
+                continue
             # The TRANSITION countdown was not read (or the stream cut it):
             # a clock below 2:00 that is not a countdown is TELEOP.
             new = TELEOP
@@ -501,6 +531,12 @@ def phase_at(phases: list[tuple[float, str]], t_s: float) -> str | None:
         else:
             break
     return current
+
+
+def _phase_for(phases: list[tuple[float, str]], t_s: float) -> str | None:
+    """The phase an event at ``t_s`` belongs to. Before the first stable clock
+    reading it is the first phase that is established; None with no phases."""
+    return phase_at(phases, t_s) or (phases[0][1] if phases else None)
 
 
 # A score step within this many seconds of a TIP count step of the same
@@ -558,6 +594,35 @@ def _apply_correction(drop: int, open_rises: list[dict], events: list[dict], log
     return remaining
 
 
+_COUNTERS = ("red_score", "blue_score", "red_tips", "blue_tips")
+
+
+def _match_opening(samples: list[dict], auto_start: float) -> float:
+    """The earliest time before ``auto_start`` from which no counter goes down.
+
+    Scores and TIP counts only rise during a match (until a correction), so
+    walking back from the AUTO start, the first reading above a value seen
+    later belongs to the previous match and the window starts after it.
+    """
+    ordered = sorted(samples, key=lambda s: float(s["t_s"]))
+    ceiling = {key: math.inf for key in _COUNTERS}
+    for sample in ordered:
+        if float(sample["t_s"]) < auto_start:
+            continue
+        for key in _COUNTERS:
+            if ceiling[key] == math.inf and sample.get(key) is not None:
+                ceiling[key] = sample[key]
+    opening = auto_start
+    for sample in reversed([s for s in ordered if float(s["t_s"]) < auto_start]):
+        if any(sample.get(key) is not None and sample[key] > ceiling[key] for key in _COUNTERS):
+            break
+        for key in _COUNTERS:
+            if sample.get(key) is not None:
+                ceiling[key] = sample[key]
+        opening = float(sample["t_s"])
+    return opening
+
+
 def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> dict:
     """Turn overlay readings into flagged candidate scoring events.
 
@@ -583,7 +648,9 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
     autos = [index for index, (_, phase) in enumerate(phases) if phase == AUTO]
     # A clock moving again after the end (a cut into the next match's
     # countdown or TELEOP) also starts another match.
-    cuts = [index for index in range(1, len(phases)) if phases[index - 1][1] == ENDED and phases[index][1] != AUTO]
+    # So does a repeated TELEOP (the clock jumped up within TELEOP).
+    cuts = [index for index in range(1, len(phases)) if phases[index][1] != AUTO
+            and (phases[index - 1][1] == ENDED or phases[index - 1][1] == phases[index][1] == TELEOP)]
     starts = sorted(autos + cuts)
     played = [index for index in autos
               if any(phase == TELEOP for _, phase in phases[index + 1:next((a for a in starts if a > index), len(phases))])]
@@ -603,6 +670,12 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
         detail["match_start_s"], detail["match_end_s"] = start, end
     if chosen is not None:
         start = phases[chosen][0]
+        if chosen == 0:
+            # No clock was readable before this AUTO, so readings before it may
+            # be its first seconds (a TIP entered while the clock was still
+            # unreadable). They are included back to where a counter was
+            # higher than later on, which is the previous match's score.
+            start = _match_opening(samples, start)
         end = next((phases[a][0] for a in starts if a > chosen), None)
         detail["match_start_s"], detail["match_end_s"] = start, end
         in_match = [s for s in samples if float(s["t_s"]) >= start and (end is None or float(s["t_s"]) < end)]
@@ -622,11 +695,19 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
                     detail["corrections"].append({"alliance": alliance, "t_s": t_s, "removed_tip_t_s": removed})
         unpaired = list(tip_times)
         for t_s in tip_times:
-            phase = phase_at(phases, t_s)
-            events.append({"t_s": t_s, "points": TIP_POINTS, "scoring_alliance": alliance,
-                           "event_type": "hive_tip_auto" if phase in (None, AUTO, TRANSITION) else "hive_tip_teleop",
-                           "source": "live_overlay", "status": "flagged", "confidence": "medium",
-                           "note": "HIVE TIP count rose on the live overlay"})
+            # Before the first stable clock reading, the TIP belongs to the
+            # first phase that is established. With no readable clock at all
+            # the phase is unknown: propose TELEOP (most of the match) with low
+            # confidence and say so, rather than silently counting it as AUTO.
+            phase = _phase_for(phases, t_s)
+            event = {"t_s": t_s, "points": TIP_POINTS, "scoring_alliance": alliance,
+                     "event_type": "hive_tip_auto" if phase in (AUTO, TRANSITION) else "hive_tip_teleop",
+                     "source": "live_overlay", "status": "flagged", "confidence": "medium",
+                     "note": "HIVE TIP count rose on the live overlay"}
+            if phase is None:
+                event["confidence"] = "low"
+                event["note"] += "; the match clock was never readable, so AUTO or TELEOP is unknown"
+            events.append(event)
         open_rises: list[dict] = []
         for step, ((previous_t, before), (t_s, after)) in enumerate(zip(scores, scores[1:]), start=1):
             delta = after - before
@@ -648,7 +729,7 @@ def propose_events(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -
                 rest = delta - explained
                 if rest <= 0:
                     continue
-                phase = phase_at(phases, t_s)
+                phase = _phase_for(phases, t_s)
                 if phase == TELEOP and rest == MINOR_FOUL_POINTS:
                     event_type, note = "minor_foul", "Score rose 5 during TELEOP without a TIP: likely a MINOR FOUL credit"
                 elif phase == TELEOP and rest == MAJOR_FOUL_POINTS:
