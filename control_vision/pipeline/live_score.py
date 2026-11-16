@@ -457,13 +457,17 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
     phases: list[tuple[float, str]] = []
     phase: str | None = None
     previous: int | None = None
+    opened_at_auto_end = False
     for t_s, clock in stable_steps(samples, "clock_s", min_samples):
         if phase is None:
             # A clip opening on 0:01-0:08 may be in the TRANSITION countdown
             # or the last seconds of TELEOP; it is taken as TRANSITION until
-            # the clock shows which (2:00 next, or 0:00).
-            new = (AUTO if clock > _AUTO_END_CLOCK_S else ENDED if clock == 0
+            # the clock shows which (2:00 next, or 0:00). Likewise an opening
+            # 2:00 is the end of AUTO or the start of TELEOP: it is taken as
+            # AUTO until the countdown follows or the clock runs down from it.
+            new = (AUTO if clock >= _AUTO_END_CLOCK_S else ENDED if clock == 0
                    else TRANSITION if clock <= _TRANSITION_MAX_CLOCK_S else TELEOP)
+            opened_at_auto_end = clock == _AUTO_END_CLOCK_S
         elif (phase in (AUTO, TELEOP) and previous is not None and clock >= previous + _NEW_MATCH_MIN_RISE_S
               and not (phase == TELEOP and clock >= _NEW_MATCH_MIN_CLOCK_S)):
             # Same phase, later match: record it again so the match boundary shows.
@@ -489,6 +493,12 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
             # TRANSITION countdown only follows a clock at 2:00).
             new = ENDED
         elif phase == AUTO and _TRANSITION_MAX_CLOCK_S < clock < _AUTO_END_CLOCK_S:
+            if opened_at_auto_end and len(phases) == 1:
+                # The clip opened on 2:00 and the clock ran down from it: that
+                # 2:00 was the start of TELEOP, not the end of AUTO.
+                phases[0] = (phases[0][0], TELEOP)
+                phase, previous = TELEOP, clock
+                continue
             # The TRANSITION countdown was not read (or the stream cut it):
             # a clock below 2:00 that is not a countdown is TELEOP.
             new = TELEOP

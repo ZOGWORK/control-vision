@@ -304,6 +304,23 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual(proposal["match_start_s"], 0.0)
         self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(2.0, "hive_tip_auto")])
 
+    def test_clip_opening_on_two_minutes_at_the_end_of_auto_keeps_teleop(self):
+        # 2:00 at the end of AUTO, the countdown, then TELEOP from 2:00 with a TIP in it.
+        rows = timeline([(0.0, {"clock": 120}), (4.0, {"clock": 6}), (10.0, {"clock": 120}),
+                         (12.0, {"clock": 118}), (20.0, {"red": 20, "red_tips": 1, "clock": 110}),
+                         (30.0, {"clock": 100})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [AUTO, TRANSITION, TELEOP])
+        self.assertIsNone(proposal["match_end_s"])
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(20.0, "hive_tip_teleop")])
+
+    def test_clip_opening_on_two_minutes_that_runs_down_is_teleop(self):
+        rows = timeline([(0.0, {"clock": 120}), (2.0, {"red": 20, "red_tips": 1}), (4.0, {"clock": 116}),
+                         (10.0, {"clock": 110})])
+        proposal = propose_events(rows)
+        self.assertEqual([phase for _, phase in proposal["phases"]], [TELEOP])
+        self.assertEqual([(e["t_s"], e["event_type"]) for e in proposal["events"]], [(2.0, "hive_tip_teleop")])
+
     def test_auto_foul_before_the_first_clock_reading_is_a_major_foul(self):
         rows = timeline([(0.0, {"clock": None}), (2.0, {"red": 20}), (8.0, {"clock": 140}), (20.0, {"clock": 128})])
         proposal = propose_events(rows)
