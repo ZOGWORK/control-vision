@@ -2054,7 +2054,9 @@ class MainWindow(QMainWindow):
         if not self.db or self.video_id is None or self.video_id != self._live_video_id:
             return
         try:
-            counts = self.db.replace_live_overlay_events(self.video_id, result["events"])
+            # A read that stopped early replaces proposals only up to where it read.
+            until = None if result.get("complete", True) else result.get("read_until_s")
+            counts = self.db.replace_live_overlay_events(self.video_id, result["events"], until)
         except ValueError as exc:
             self.live_score_failed(str(exc)); return
         self.refresh_result_tables()
@@ -2243,6 +2245,11 @@ class MainWindow(QMainWindow):
             if running:
                 thread.quit()
                 if not thread.wait(30000):
+                    # The window stays open, so the worker's completion must
+                    # still clear its busy state when it finally finishes.
+                    if worker:
+                        worker.done.connect(done_slot)
+                        worker.failed.connect(failed_slot)
                     self.statusBar().showMessage("Still cancelling processing; close again after it finishes.")
                     event.ignore()
                     return

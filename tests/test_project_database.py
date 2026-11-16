@@ -136,6 +136,15 @@ class ProjectDatabaseTests(unittest.TestCase):
         self.assertEqual(counts["added"], 1)
         self.assertEqual(len(self._live_rows()), 2)
 
+    def test_read_that_stopped_early_keeps_earlier_proposals_after_it(self):
+        self.db.replace_live_overlay_events(self.red_video, [self._live(10.0), self._live(150.0)])
+        counts = self.db.replace_live_overlay_events(self.red_video, [self._live(30.0)], read_until_s=64.0)
+        self.assertEqual(counts, {"added": 1, "kept": 1, "removed": 1})
+        self.assertEqual(sorted(row["t_s"] for row in self._live_rows()), [30.0, 150.0])
+        # A later complete read replaces everything unreviewed again.
+        self.db.replace_live_overlay_events(self.red_video, [self._live(30.0)])
+        self.assertEqual([row["t_s"] for row in self._live_rows()], [30.0])
+
     def test_live_overlay_rerun_leaves_other_sources_alone(self):
         manual = self.db.add_scoring_event(self.red_robot, 30.0)
         self.db.replace_live_overlay_events(self.red_video, [self._live(30.0)])

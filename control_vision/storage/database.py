@@ -519,10 +519,13 @@ class ProjectDatabase:
         self.connection.executemany("UPDATE robots SET qualification_disqualified=1 WHERE video_id=? AND id=?",
                                     [(video_id, robot_id) for robot_id in sorted(team_ids)])
 
-    def replace_live_overlay_events(self, video_id: int, events: list[dict]) -> dict[str, int]:
+    def replace_live_overlay_events(self, video_id: int, events: list[dict],
+                                    read_until_s: float | None = None) -> dict[str, int]:
         """Store live-overlay proposals for a video, replacing earlier unreviewed ones.
 
-        Flagged live-overlay events without a clip are removed. Events a
+        Flagged live-overlay events without a clip are removed; for a read
+        that stopped early (``read_until_s`` given) only those up to that time,
+        so proposals from an earlier, longer read survive. Events a
         reviewer confirmed or rejected, or that have a clip, are kept, and a
         new proposal for the same alliance within LIVE_OVERLAY_MATCH_S of a
         kept one (each kept event matching once) is not added again, so reading the
@@ -539,8 +542,9 @@ class ProjectDatabase:
                 raise ValueError(f"Unknown video {video_id}")
             removed = self.connection.execute(
                 "DELETE FROM scoring_events WHERE video_id=? AND source=? AND status='flagged' "
+                "AND (? IS NULL OR t_s<=?) "
                 "AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.scoring_event_id=scoring_events.id)",
-                (video_id, LIVE_OVERLAY_SOURCE)).rowcount
+                (video_id, LIVE_OVERLAY_SOURCE, read_until_s, read_until_s)).rowcount
             kept = [dict(row) for row in self.connection.execute(
                 "SELECT id,t_s,event_type,scoring_alliance FROM scoring_events WHERE video_id=? AND source=?",
                 (video_id, LIVE_OVERLAY_SOURCE))]

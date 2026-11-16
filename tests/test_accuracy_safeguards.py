@@ -721,6 +721,13 @@ class LiveScoreUiTests(unittest.TestCase):
         self.assertIn("after 64 s are missing", text)
         self.assertEqual(self.window.live_score_status.property("tone"), "danger")
 
+    def test_incomplete_reread_keeps_proposals_beyond_where_it_stopped(self):
+        self.window._live_video_id = self.video_id
+        self.window.live_score_done({"complete": True, "events": self.events})
+        self.window.live_score_done({"complete": False, "stopped_early": "decode failures", "read_until_s": 64.0,
+                                     "events": self.events[:1]})
+        self.assertEqual(sorted(row["t_s"] for row in self._live_rows(self.video_id)), [20.0, 70.0, 150.0])
+
     def test_result_for_another_video_is_not_written(self):
         self.window._live_video_id = self.other_video
         self.window.live_score_done({"complete": True, "events": self.events})
@@ -818,6 +825,39 @@ class ShutdownTests(unittest.TestCase):
         MainWindow.closeEvent(fake, event)
         self.assertLess(calls.index("wait"), calls.index("db_close"))
         self.assertEqual(calls[-1], "accept")
+
+    def test_close_that_times_out_reconnects_the_worker_so_its_state_clears(self):
+        from types import SimpleNamespace
+        from control_vision.app.main_window import MainWindow
+
+        calls = []
+        class Signal:
+            def __init__(self, name): self.name = name
+            def disconnect(self, slot): calls.append(("disconnect", self.name))
+            def connect(self, slot): calls.append(("connect", self.name, slot))
+        class Worker:
+            def __init__(self):
+                self.done, self.failed = Signal("done"), Signal("failed")
+            def cancel(self): calls.append("cancel")
+        class Thread:
+            def isRunning(self): return True
+            def quit(self): pass
+            def wait(self, timeout): return False
+        done_slot, failed_slot = (lambda *_: None), (lambda *_: None)
+        fake = SimpleNamespace(
+            _worker=None, _thread=None, _ocr_worker=None, _ocr_thread=None,
+            _live_worker=Worker(), _live_thread=Thread(),
+            processing_done=None, processing_failed=None, scoreboard_ocr_done=None, scoreboard_ocr_failed=None,
+            live_score_done=done_slot, live_score_failed=failed_slot,
+            statusBar=lambda: SimpleNamespace(showMessage=lambda text: calls.append("message")),
+            capture=None, db=SimpleNamespace(close=lambda: calls.append("db_close")),
+        )
+        event = SimpleNamespace(accept=lambda: calls.append("accept"), ignore=lambda: calls.append("ignore"))
+        MainWindow.closeEvent(fake, event)
+        self.assertIn(("connect", "done", done_slot), calls)
+        self.assertIn(("connect", "failed", failed_slot), calls)
+        self.assertEqual(calls[-1], "ignore")
+        self.assertNotIn("db_close", calls)
 
 
 class VideoIngestTests(unittest.TestCase):
