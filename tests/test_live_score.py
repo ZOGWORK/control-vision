@@ -761,9 +761,55 @@ class EvalCacheTests(unittest.TestCase):
                 self.script.read(footage, folder / "official", out, [])
                 self.script.read(footage, folder / "official", out, [])  # the second run reuses all three
             self.assertEqual(reader.call_count, 3)
-            names = sorted(p.name for p in out.glob("*.json"))
-            self.assertEqual(names, ["a_q3_mkv.json", "q3_mp4.json", "solo.json"])
-            self.assertEqual(json.loads((out / "a_q3_mkv.json").read_text(encoding="utf-8"))["match"], 4)
+            results = {json.loads(p.read_text(encoding="utf-8"))["file"]: p.name for p in out.glob("*.json")}
+            self.assertEqual(sorted(results), ["a/q3.mkv", "q3.mp4", "solo.mp4"])
+            self.assertEqual(results["solo.mp4"], "solo.json")  # a unique stem keeps its old name
+
+    def test_generated_result_names_never_collide(self):
+        names = self.script._result_names([{"file": f} for f in ("a/q3.mkv", "q3.mp4", "a_q3_mkv.mp4", "Q3.avi")])
+        self.assertEqual(len({name.lower() for name in names.values()}), 4)
+        self.assertEqual(names["a_q3_mkv.mp4"], "a_q3_mkv.json")
+
+    def test_non_finite_cached_times_are_read_again(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        for stale in ('{"t_s": NaN}', '{"t_s": 0.0, "clock_s": Infinity}'):
+            with tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp)
+                footage, out = self._footage(folder), folder / "results"
+                out.mkdir()
+                (out / "clip.json").write_text('{"file": "clip.mp4", "event_code": "TEST", "match": 3, '
+                                               f'"complete": true, "samples": [{stale}]}}', encoding="utf-8")
+                reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+                with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                    self.script.read(footage, folder / "official", out, [])
+                reader.assert_called_once()
+
+    def test_a_replaced_clip_is_read_again_and_an_older_result_gets_its_identity(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            footage, out = self._footage(folder), folder / "results"
+            out.mkdir()
+            (footage / "clip.mp4").write_bytes(b"first")
+            # Written before identities were recorded: kept, and given the clip's identity.
+            (out / "clip.json").write_text(json.dumps({"file": "clip.mp4", "event_code": "TEST", "match": 3,
+                                                       "samples": [], "complete": True}), encoding="utf-8")
+            reading = {"layout": {}, "samples": [], "complete": True, "stopped_early": None}
+            with patch.object(self.script, "read_live_overlay", return_value=reading) as reader:
+                self.script.read(footage, folder / "official", out, [])
+                self.assertEqual(reader.call_count, 0)
+                self.assertEqual(json.loads((out / "clip.json").read_text(encoding="utf-8"))["clip"]["size"], 5)
+                (footage / "clip.mp4").write_bytes(b"re-cropped")
+                self.script.read(footage, folder / "official", out, [])
+                self.assertEqual(reader.call_count, 1)
+                self.script.read(footage, folder / "official", out, [])
+                self.assertEqual(reader.call_count, 1)
+            self.assertEqual(json.loads((out / "clip.json").read_text(encoding="utf-8"))["clip"]["size"], 10)
 
     def test_a_result_path_that_cannot_be_read_is_listed_not_fatal(self):
         import contextlib

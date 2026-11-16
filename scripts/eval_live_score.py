@@ -15,7 +15,9 @@ user. Only qualification matches are compared.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -76,7 +78,8 @@ def _load_json(path: Path) -> dict | None:
 
 
 def _number(value, kind=(int, float)) -> bool:
-    return isinstance(value, kind) and not isinstance(value, bool)
+    # json.loads accepts NaN and Infinity; a reading never has them.
+    return isinstance(value, kind) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _valid_sample(sample) -> bool:
@@ -90,20 +93,33 @@ _SAMPLE_COUNTERS = ("red_score", "blue_score", "red_tips", "blue_tips")
 
 
 def _result_names(rows: list[dict]) -> dict[str, str]:
-    """Result file name per manifest file. The name stem alone, as before, unless two files share it; then the
-    path, with separators and the extension spelled out, keeps each clip's result apart."""
-    stems: dict[str, int] = {}
-    for row in rows:
-        stem = Path(row["file"]).stem
-        stems[stem] = stems.get(stem, 0) + 1
-    names = {}
-    for row in rows:
-        path = Path(row["file"])
-        if stems[path.stem] == 1:
-            names[row["file"]] = path.stem + ".json"
-        else:
-            names[row["file"]] = re.sub(r"[^A-Za-z0-9_-]+", "_", path.as_posix()) + ".json"
-    return names
+    """A distinct result file name per manifest file. The name stem alone, as before, when no other file gets the
+    same name; files that would share one get the stem plus a short hash of their path, repeated until every name
+    is unique (case-insensitively, as on Windows)."""
+    files = list(dict.fromkeys(row["file"] for row in rows))
+    names = {file: Path(file).stem + ".json" for file in files}
+    salt = 0
+    while True:
+        taken: dict[str, list[str]] = {}
+        for file, name in names.items():
+            taken.setdefault(name.lower(), []).append(file)
+        clashes = [group for group in taken.values() if len(group) > 1]
+        if not clashes:
+            return names
+        for group in clashes:
+            for file in group:
+                digest = hashlib.sha1(f"{file}#{salt}".encode("utf-8")).hexdigest()[:8]
+                names[file] = f"{Path(file).stem}-{digest}.json"
+        salt += 1
+
+
+def _clip_identity(path: Path) -> dict | None:
+    """Size and modification time of the clip, so a file replaced under the same name is read again."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
 def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> None:
@@ -120,16 +136,22 @@ def read(footage: Path, official_dir: Path, out_dir: Path, only: list[str]) -> N
         result: dict = {"file": row["file"], "event_code": row["event_code"], "match": int(match.group(1))}
         target = out_dir / names[row["file"]]
         cached = _load_json(target) if target.exists() else None
+        clip = _clip_identity(footage / row["file"])
+        result["clip"] = clip
         same_clip = cached is not None and all(cached.get(key) == result[key] for key in ("file", "event_code", "match"))
-        if same_clip and "error" not in cached and cached.get("complete") is not False:
+        # A result written before clip identities were recorded has none; it is kept and given this one.
+        same_footage = cached is not None and (cached.get("clip") is None or clip is None or cached["clip"] == clip)
+        if same_clip and same_footage and "error" not in cached and cached.get("complete") is not False:
             # Keep the read, but pick up an official result added since.
             official = _official(official_dir, result["event_code"], result["match"])
-            if official != cached.get("official"):
+            if official != cached.get("official") or (clip is not None and cached.get("clip") is None):
                 cached["official"] = official
+                if clip is not None:
+                    cached["clip"] = clip
                 _write_json(target, cached)
             continue
         # A failed, stopped-early or unreadable result is read again, and so is one written for a different
-        # manifest row (a corrected event or match label, or another file with the same name stem).
+        # manifest row (a corrected event or match label) or for a clip file that has since been replaced.
         started = time.time()
         try:
             reading = read_live_overlay(footage / row["file"])
