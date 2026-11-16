@@ -1317,6 +1317,7 @@ class MainWindow(QMainWindow):
             # The previous database is already closed; never keep using it.
             if self.db: self.db.close()
             self.db, self.project_id = None, None
+            self._clear_closed_project(f"Could not create project: {exc}")
             QMessageBox.critical(self, "Could not create project", str(exc))
 
     def open_project(self):
@@ -1338,7 +1339,14 @@ class MainWindow(QMainWindow):
             self.refresh_home()
         except Exception as exc:
             self.db = None
+            self.project_id = None
+            self._clear_closed_project(f"Could not open project: {exc}")
             QMessageBox.critical(self, "Could not open project", str(exc))
+
+    def _clear_closed_project(self, message: str):
+        """After a failed project switch the previous project is closed: show no project or video."""
+        self.reset_video_state()
+        self._show_status(message, "danger")
 
     def reset_video_state(self):
         """Clear match-specific UI state when switching projects."""
