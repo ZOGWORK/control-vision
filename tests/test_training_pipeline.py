@@ -219,7 +219,8 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(seen["data"]["val"], "images/val")
         record = self.record()
         self.assertEqual(record["train_list"], {"file": str(listed.resolve()), "sha256": train_yolo._sha256(listed),
-                                                "lines": 3, "unique_images": 1, "train_images": 1,
+                                                "lines": 3, "unique_images": 1, "robot_images": 1,
+                                                "train_images": 1,
                                                 "train_images_not_listed": 0})
         # The audit and the dataset hash still cover images/train.
         self.assertEqual(record["split_provenance"]["mode"], "match_audited")
@@ -245,6 +246,19 @@ class TrainingPipelineTests(unittest.TestCase):
         code, stderr = self.run_main("--train-list", str(self.work / "absent.txt"))
         self.assertEqual(code, 2)
         self.assertIn("Cannot read the train list", stderr)
+        self.assert_not_trained()
+
+    def test_train_list_without_robots_is_refused_before_training(self):
+        ok, encoded = cv2.imencode(".jpg", np.full((32, 32, 3), 60, dtype=np.uint8))
+        (self.root / "images" / "train" / "b.jpg").write_bytes(encoded.tobytes())
+        (self.root / "labels" / "train" / "b.txt").write_text("2 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+        with self.manifest.open("a", encoding="utf-8") as stream:
+            stream.write("images/train/b.jpg,train,USWASAM1:Q1,team video,team-owned\n")
+        self.config["names"] = {"0": "robot", "1": "pollen", "2": "nectar"}
+        self._write_config()
+        code, stderr = self.run_main("--train-list", str(self._train_list("images/train/b.jpg", "images/train/b.jpg")))
+        self.assertEqual(code, 2)
+        self.assertIn("names no image with a labeled robot", stderr)
         self.assert_not_trained()
 
     def test_fine_tune_names_the_optimizer_so_the_low_learning_rate_applies(self):

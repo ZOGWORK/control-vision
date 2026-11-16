@@ -288,9 +288,17 @@ def train_list(root: Path, config: dict, list_file: Path) -> tuple[list[Path], d
     if not images:
         raise ValueError(f"The train list {list_file.name} names no images")
     unique = set(images)
+    labels_dir = train_dir.parent.parent / "labels" / train_dir.name
+    # The same rule as validate_dataset applies to what is actually trained on: some robots (class 0).
+    with_robots = sum(1 for image in unique
+                      if any(line.split()[:1] == ["0"] for line in
+                             (labels_dir / image.relative_to(train_dir).with_suffix(".txt"))
+                             .read_text(encoding="utf-8").splitlines()))
+    if not with_robots:
+        raise ValueError(f"The train list {list_file.name} names no image with a labeled robot (class 0)")
     in_train = sum(1 for path in train_dir.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
     return images, {"file": str(list_file.resolve()), "sha256": _sha256(list_file), "lines": len(images),
-                    "unique_images": len(unique), "train_images": in_train,
+                    "unique_images": len(unique), "robot_images": with_robots, "train_images": in_train,
                     "train_images_not_listed": in_train - len(unique)}
 
 

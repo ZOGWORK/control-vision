@@ -34,9 +34,10 @@ With the default `optimizer` (`auto`), Ultralytics chooses the optimizer and lea
 
 `--train-list FILE` trains on a list of images instead of every image once. Write one image per line, as a path relative to the dataset root or an absolute path. Repeat a line to use that image more often, for example to give a rare class more weight.
 
-`data.yaml` still says `train: images/train`, so the split manifest audit, label checks and dataset hash run over that folder exactly as without a list. Every line must name an existing image inside it; a line pointing anywhere else stops the run before training. The record's `train_list` gives:
+`data.yaml` still says `train: images/train`, so the split manifest audit, label checks and dataset hash run over that folder exactly as without a list. Every line must name an existing image inside it, and at least one listed image must have a labeled robot; anything else stops the run before training. The record's `train_list` gives:
 - the list's path and SHA-256;
 - its line count and number of distinct images;
+- how many of those images have a robot;
 - how many training images it leaves out.
 
 Choose what to oversample from train and val results only, never from holdout results.
