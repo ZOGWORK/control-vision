@@ -451,7 +451,7 @@ def match_phases(samples: list[dict], min_samples: int = MIN_STABLE_SAMPLES) -> 
             if phase == TRANSITION and len(phases) == 1:
                 phases[0] = (phases[0][0], TELEOP)
             new = AUTO
-        elif (phase == AUTO and clock <= _TRANSITION_MAX_CLOCK_S and previous is not None
+        elif (phase == AUTO and 0 < clock <= _TRANSITION_MAX_CLOCK_S and previous is not None
               and abs(previous - _AUTO_END_CLOCK_S) <= 2):
             new = TRANSITION
         elif phase == AUTO and clock == 0:
