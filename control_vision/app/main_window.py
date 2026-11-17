@@ -195,7 +195,7 @@ class ProcessingWorker(QObject):
             else:
                 result = track_video(*self.args[:5], cancel=lambda: self.cancelled,
                                      progress=report, logger=self.args[5], photos_dir=self.args[6], confidence_threshold=self.args[7], goal_roi=self.args[8], reid_model_path=self.args[9],
-                                     alliances=self.args[11])
+                                     alliances=self.args[11], reseeds=(self.args[12] if len(self.args) > 12 else None) or None)
             self.done.emit((result, self.args[10]))
         except InterruptedError:
             self.failed.emit("Processing was cancelled.")
@@ -2036,9 +2036,16 @@ class MainWindow(QMainWindow):
         self.process_btn.setEnabled(False)
         photos_dir = self.project_dir() / "photos"
         alliances = {row["id"]: row["alliance"] for row in self.db.robots_for_video(self.video_id)}
+        seeded = {seed[0] for seed in self.seed_points}
+        # Mid-match clicks for robots that are not seeded this run are left out (track_video rejects them).
+        reseeds = [(row["robot_id"], row["t_s"], row["x_px"], row["y_px"])
+                   for row in self.db.reseeds_for_video(self.video_id) if row["robot_id"] in seeded]
+        if reseeds:
+            self.logger.info("Applying %d reviewer re-seed(s): %s", len(reseeds), reseeds)
         self._worker = ProcessingWorker((self.video_path, Path(model_path), self.corners.copy(), self.seed_points.copy(),
                                          float(self.sample_rate.currentText()), self.logger, photos_dir, self.confidence_spin.value(),
-                                         self.zones.get("goal_roi", {}).get("points"), self.reid_path_edit.text().strip(), mode, alliances))
+                                         self.zones.get("goal_roi", {}).get("points"), self.reid_path_edit.text().strip(), mode, alliances,
+                                         reseeds))
         self._thread = QThread(self); self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self.show_progress)

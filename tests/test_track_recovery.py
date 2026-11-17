@@ -433,6 +433,19 @@ class AllianceColourRunTests(unittest.TestCase):
         self.assertEqual(tracker.call_args.kwargs["alliances"], {1: "blue"})
         self.assertEqual(tracker.call_args.kwargs["confidence_threshold"], 0.2)
 
+    def test_worker_passes_reviewer_reseeds_to_yolo_tracking(self):
+        from control_vision.app.main_window import ProcessingWorker
+        logger = logging.getLogger("worker-reseed-test")
+        clicks = [(1, 60.0, 876.0, 818.0)]
+        for reseeds, expected in ((clicks, clicks), ([], None)):
+            with self.subTest(reseeds=reseeds):
+                worker = ProcessingWorker((Path("match.mp4"), Path("robot.onnx"), [], [(1, 20, 30)], 8.0, logger,
+                                           None, 0.2, None, "", "yolo", {1: "blue"}, reseeds))
+                with patch("control_vision.app.main_window.track_video", autospec=True,
+                           return_value=([], [], [])) as tracker:
+                    worker.run()
+                self.assertEqual(tracker.call_args.kwargs["reseeds"], expected)
+
 
 class AllianceColourRuleTests(unittest.TestCase):
     def state(self, reference=0.1, alliance="red"):
