@@ -1,6 +1,7 @@
 """Page 7 — Identity: which robot is which team and alliance, before anything is counted."""
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -516,10 +517,8 @@ class IdentityPage(QWidget):
                     "seed_x": entry.seed[0] if entry.seed else None, "seed_y": entry.seed[1] if entry.seed else None}
                    for entry in entries]
         try:
-            ids = self.db.save_identity(int(self.video["id"]), payload)
-            if reprocess:
-                self.db.set_analysis_status(int(self.video["id"]), "unprocessed")
-        except ValueError as exc:
+            ids = self.db.save_identity(int(self.video["id"]), payload, mark_unprocessed=reprocess)
+        except (ValueError, sqlite3.Error) as exc:
             theme.set_tone(self.status, "danger")
             self.status.setText(f"✕ {exc}")
             return False
