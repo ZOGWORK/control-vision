@@ -341,6 +341,40 @@ class UserReseedTests(unittest.TestCase):
         self.assertIn("Re-seed of robot 1 at 1.00s confirms its current track 1", messages)
         self.assertEqual(len(robot_times(rows, 1)), 20)
 
+    def test_a_click_that_finds_no_box_does_not_hold_up_another(self):
+        # After the seed window, robot 2 is lost at 4.0 s with two candidates (no automatic recovery). At
+        # 4.0 s the user clicks empty field for robot 1 and track 5 for robot 2; robot 2's must apply at once.
+        script = ([[(1, 3, 3), (2, 8, 8)] for _ in range(32)]
+                  + [[(1, 3, 3), (5, 8, 8), (6, 6.5, 8)] for _ in range(16)])
+        rows, messages, _ = run_script(script, [(1, 3, 3), (2, 8, 8)],
+                                       reseeds=[(1, 4.0, 10, 1), (2, 4.0, 8, 8)])
+        self.assertTrue(any(m.startswith("Re-seeded robot 2 at 4.00s by the user") for m in messages), messages)
+        self.assertTrue(any(m.startswith("Re-seed of robot 1 at 4.00s was not applied") for m in messages), messages)
+
+    def test_a_click_is_not_applied_after_its_window(self):
+        # Nothing is at the click until 2.125 s, 1.125 s after it: too late, even though a box is there then.
+        script = [[(1, 3, 3)] for _ in range(17)] + [[(1, 3, 3), (7, 9, 9)] for _ in range(6)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 1.0, 9, 9)])
+        self.assertEqual([m for m in messages if m.startswith("Re-seeded")], [])
+        self.assertIn("Re-seed of robot 1 at 1.00s was not applied: no tracked robot box at the click within 1.0s",
+                      messages)
+
+    def test_reseed_onto_a_track_another_robot_was_moved_off_keeps_its_positions(self):
+        # 1.0 s: robot 1 is re-seeded onto robot 2's track 2, so track 1 is unowned.
+        # 2.0 s: robot 2 is re-seeded onto track 1 and keeps its positions from 1.125 s to 1.875 s.
+        script = [[(1, 3, 3), (2, 8, 8)] for _ in range(24)]
+        rows, messages, _ = run_script(script, [(1, 3, 3), (2, 8, 8)],
+                                       reseeds=[(1, 1.0, 8, 8), (2, 2.0, 3, 3)])
+        self.assertIn("Re-seeded robot 2 at 2.00s by the user: track none -> 1; 7 earlier positions kept", messages)
+        times = robot_times(rows, 2)
+        self.assertEqual([t for t in times if t > 1], [1.125 + 0.125 * i for i in range(15)])
+
+    def test_a_reseed_after_the_last_frame_is_reported(self):
+        script = [[(1, 3, 3)] for _ in range(8)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 50.0, 3, 3)])
+        self.assertIn("Re-seed of robot 1 at 50.00s was not applied: the video ended before a tracked robot box "
+                      "was found at the click", messages)
+
     def test_invalid_reseeds_are_rejected_before_processing(self):
         script = [[(1, 3, 3)] for _ in range(4)]
         for bad in ([(2, 1.0, 3, 3)], [(1, -1.0, 3, 3)], [(1, float("nan"), 3, 3)]):

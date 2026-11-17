@@ -455,26 +455,28 @@ def track_video(
                         seed_boxes[robot_id] = box
             visible: dict[int, tuple[float, float] | None] = {}
             boxes_by_track = {det[0]: det[4] for det in detections if det[0] >= 0}
+            owned_now = set(seed_to_track.values())
             for tid, x, y, conf, _ in detections:
                 if tid < 0:
                     continue
                 x_ft, y_ft = project_point(matrix, x, y)
                 in_field = 0 <= x_ft <= 12 and 0 <= y_ft <= 12
                 visible[tid] = (x_ft, y_ft) if in_field else None
-                if in_field and tid not in recovery.ever_assigned:
+                # Automatic recovery only uses never-assigned tracks; a pending
+                # re-seed can also take a track a robot was moved off.
+                if in_field and tid not in owned_now and (tid not in recovery.ever_assigned or pending_reseeds):
                     unowned_rows.setdefault(tid, []).append((frame_index, t_s, x_ft, y_ft, conf))
             recovery.observe_tracks(t_s, visible)
-            while pending_reseeds and pending_reseeds[0][1] <= t_s:
-                robot_id, click_t, click_x, click_y = pending_reseeds[0]
-                applied = _apply_reseed(robot_id, click_x, click_y, t_s, detections, visible, seed_to_track,
-                                        recovery, unowned_rows, rows, frame_index, logger)
-                if applied or t_s - click_t > RESEED_WINDOW_S:
-                    if not applied:
-                        logger.warning("Re-seed of robot %d at %.2fs was not applied: no tracked robot box at the "
-                                       "click within %.1fs", robot_id, click_t, RESEED_WINDOW_S)
-                    pending_reseeds.pop(0)
-                else:
-                    break
+            # Each due re-seed is tried on its own, until it applies or its window passes.
+            for item in [item for item in pending_reseeds if item[1] <= t_s]:
+                robot_id, click_t, click_x, click_y = item
+                if t_s - click_t > RESEED_WINDOW_S:
+                    logger.warning("Re-seed of robot %d at %.2fs was not applied: no tracked robot box at the "
+                                   "click within %.1fs", robot_id, click_t, RESEED_WINDOW_S)
+                    pending_reseeds.remove(item)
+                elif _apply_reseed(robot_id, click_x, click_y, t_s, detections, visible, seed_to_track,
+                                   recovery, unowned_rows, rows, frame_index, logger):
+                    pending_reseeds.remove(item)
             if seed_to_track:
                 owned = set(seed_to_track.values())
                 colours = {}
@@ -496,8 +498,10 @@ def track_video(
                                 "footpoint %.2f ft from last position (gate %.2f ft); %d earlier positions kept",
                                 item.robot_id, t_s, item.old_track_id, item.new_track_id, item.absence_s,
                                 item.distance_ft, item.gate_ft, len(backfill))
+            owned_now = set(seed_to_track.values())
             for tid in [tid for tid, buffered in unowned_rows.items()
-                        if tid in recovery.ever_assigned or t_s - buffered[-1][1] > recovery.rules.max_absence_s]:
+                        if tid in owned_now or (tid in recovery.ever_assigned and not pending_reseeds)
+                        or t_s - buffered[-1][1] > recovery.rules.max_absence_s]:
                 # Keep only buffers that could still be re-linked.
                 del unowned_rows[tid]
             for tid, x, y, conf, bbox in detections:
@@ -577,6 +581,9 @@ def track_video(
         cap.release()
         if tracker_override:
             Path(tracker_override.name).unlink(missing_ok=True)
+    for robot_id, click_t, _, _ in pending_reseeds:
+        logger.warning("Re-seed of robot %d at %.2fs was not applied: the video ended before a tracked robot box "
+                       "was found at the click", robot_id, click_t)
     if sampled and sampled < 30 and empty == sampled:
         raise RuntimeError("No robots were detected in the first sampled frames. Check the video and robot model.")
     if not rows:
