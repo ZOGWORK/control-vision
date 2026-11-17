@@ -372,6 +372,7 @@ class NewProjectWizard(QWidget):
         self.notes.clear()
         self.date.setDate(QDate.currentDate())
         self.youtube_status.hide()
+        self.use_suggestion.hide()  # The fields were cleared with signals blocked.
         self.error.hide()
         self._refresh_videos()
         self.model_list.clear()  # Otherwise the refresh would restore the last pick.
