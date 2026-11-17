@@ -45,6 +45,8 @@ class ProjectCard(QWidget):
         placeholder = summary.event_name or summary.display_name
         if summary.missing:
             self.thumbnail.show_placeholder(f"{placeholder}\nFile missing")
+        elif summary.unreadable:
+            self.thumbnail.show_placeholder(f"{placeholder}\nCannot read this file")
         elif still is not None:
             self.thumbnail.show_image(still)
         else:
@@ -56,7 +58,14 @@ class ProjectCard(QWidget):
         event = " · ".join(part for part in (summary.event_name, summary.event_code, summary.event_date) if part)
         layout.addWidget(widgets.label(event or "No event details", role="muted"))
         row = QHBoxLayout()
-        row.addWidget(widgets.badge("danger", "✕ Missing file") if summary.missing else widgets.status_badge(summary.status))
+        if summary.missing:
+            status = widgets.badge("danger", "✕ Missing file")
+        elif summary.unreadable:
+            status = widgets.badge("danger", "✕ Cannot read")
+            status.setToolTip(summary.unreadable)
+        else:
+            status = widgets.status_badge(summary.status)
+        row.addWidget(status)
         row.addStretch(1)
         layout.addLayout(row)
         matches = f"{summary.matches} match" + ("" if summary.matches == 1 else "es")
@@ -177,7 +186,7 @@ class HomePage(QWidget):
         return [summary for summary in self._summaries
                 if not summary.archived
                 and (season is None or summary.season == season)
-                and (status is None or (not summary.missing and summary.status == status))]
+                and (status is None or (not summary.missing and not summary.unreadable and summary.status == status))]
 
     def _still(self, summary: ProjectSummary):
         path = summary.thumbnail_video
@@ -196,7 +205,7 @@ class HomePage(QWidget):
         visible = self.visible_summaries()
         cards = []
         for summary in visible:
-            card = ProjectCard(summary, None if summary.missing else self._still(summary))
+            card = ProjectCard(summary, None if summary.missing or summary.unreadable else self._still(summary))
             card.clicked.connect(self.open_project.emit)
             cards.append(card)
         self.grid.set_widgets(cards)
