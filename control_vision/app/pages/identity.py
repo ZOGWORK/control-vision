@@ -265,6 +265,8 @@ class IdentityPage(QWidget):
         self.frame_slider.setAccessibleName("Frame to assign robots on")
         self.frame_slider.setToolTip(f"Robots are matched to your clicks only in the first {SEED_WINDOW_S:.0f} seconds.")
         self.frame_slider.sliderReleased.connect(self._frame_changed)
+        # Keys, the wheel and track clicks change the value without a release.
+        self.frame_slider.valueChanged.connect(self._slider_value)
         top.addWidget(self.frame_slider, 1)
         self.frame_time = widgets.label("0.0 s", role="muted")
         self.frame_slider.valueChanged.connect(lambda value: self.frame_time.setText(f"{value / 10:.1f} s"))
@@ -335,6 +337,10 @@ class IdentityPage(QWidget):
         self.video_combo.blockSignals(False)
         if current is not None and self.video_combo.findData(current) >= 0:
             self.video_combo.setCurrentIndex(self.video_combo.findData(current))
+            if not self.dirty:
+                # Robots may have been saved elsewhere (Set up and process) since they were loaded.
+                self._load_saved(int(current))
+                self._render()
         elif self.video_combo.count():
             self.load_video(self.video_combo.itemData(0))
         else:
@@ -371,16 +377,7 @@ class IdentityPage(QWidget):
         index = self.video_combo.findData(int(video_id))
         if index >= 0:
             self.video_combo.setCurrentIndex(index)
-        robots = self.db.robots_for_video(int(video_id))
-        entries = []
-        for robot in list(robots)[:ROBOTS_PER_MATCH]:
-            keys = robot.keys()
-            seed = (int(robot["seed_x"]), int(robot["seed_y"])) if robot["seed_x"] is not None and robot["seed_y"] is not None else None
-            entries.append(RobotEntry(id=int(robot["id"]), team=str(robot["team_number"]), alliance=robot["alliance"],
-                                      start_position=robot["start_position"] if "start_position" in keys else None,
-                                      absent=bool(robot["absent"]) if "absent" in keys else seed is None, seed=seed))
-        self.entries = entries + [RobotEntry() for _ in range(ROBOTS_PER_MATCH - len(entries))]
-        self.saved_entries = [RobotEntry(**vars(entry)) for entry in self.entries]
+        self._load_saved(int(video_id))
         self.frame_slider.blockSignals(True); self.frame_slider.setValue(0); self.frame_slider.blockSignals(False)
         self.frame_time.setText("0.0 s")
         path = Path(row["path"])
@@ -391,6 +388,22 @@ class IdentityPage(QWidget):
         self.current = next((i for i, entry in enumerate(self.entries) if entry.empty), 0)
         self._render()
         return True
+
+    def _load_saved(self, video_id: int) -> None:
+        robots = self.db.robots_for_video(video_id)
+        entries = []
+        for robot in list(robots)[:ROBOTS_PER_MATCH]:
+            keys = robot.keys()
+            seed = (int(robot["seed_x"]), int(robot["seed_y"])) if robot["seed_x"] is not None and robot["seed_y"] is not None else None
+            entries.append(RobotEntry(id=int(robot["id"]), team=str(robot["team_number"]), alliance=robot["alliance"],
+                                      start_position=robot["start_position"] if "start_position" in keys else None,
+                                      absent=bool(robot["absent"]) if "absent" in keys else seed is None, seed=seed))
+        self.entries = entries + [RobotEntry() for _ in range(ROBOTS_PER_MATCH - len(entries))]
+        self.saved_entries = [RobotEntry(**vars(entry)) for entry in self.entries]
+
+    def _slider_value(self, _value: int) -> None:
+        if not self.frame_slider.isSliderDown():
+            self._frame_changed()
 
     def _frame_changed(self) -> None:
         if self.video is None:
