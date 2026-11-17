@@ -11,6 +11,7 @@ the UI shows "—" or "Not measured".
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -333,13 +334,21 @@ def export_project_file(source: Path, target: Path) -> Path:
     source, target = Path(source), Path(target)
     if source.resolve() == target.resolve():
         raise ValueError("Choose a different file to export to.")
+    # Write next to the target and rename only once the copy is complete, so a failed
+    # export never leaves a file that looks like a finished one.
+    partial = target.with_name(target.name + ".part")
+    remove_partial_database(partial)
     reader = sqlite3.connect(f"{source.resolve().as_uri()}?mode=ro", uri=True)
     try:
-        writer = sqlite3.connect(target)
+        writer = sqlite3.connect(partial)
         try:
             reader.backup(writer)
         finally:
             writer.close()
+        os.replace(partial, target)
+    except BaseException:
+        remove_partial_database(partial)
+        raise
     finally:
         reader.close()
     return target
@@ -382,6 +391,52 @@ class ModelVersion:
             return None
 
 
+def _number(value: Any) -> float | None:
+    """A finite number, or None for anything else (text, booleans, NaN)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _per_class(value: Any) -> dict[str, dict[str, float]]:
+    """Per-class metrics with only numeric values kept; damaged parts read as unmeasured."""
+    if not isinstance(value, dict):
+        return {}
+    cleaned = {}
+    for class_name, metrics in value.items():
+        if isinstance(class_name, str) and isinstance(metrics, dict):
+            numbers = {key: _number(number) for key, number in metrics.items() if isinstance(key, str)}
+            cleaned[class_name] = {key: number for key, number in numbers.items() if number is not None}
+    return cleaned
+
+
+def _epochs(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def clean_model_entry(entry: Any) -> ModelVersion | None:
+    """A model version from a stored entry, or None when its id, name or path is unusable.
+
+    Every other field is checked too, so a hand-edited or damaged models.json
+    shows a model as unmeasured instead of breaking the model list.
+    """
+    if not isinstance(entry, dict):
+        return None
+    model_id, name, path = (_text(entry.get(key)) for key in ("id", "name", "path"))
+    if not (model_id and name and path):
+        return None
+    return ModelVersion(
+        id=model_id, name=name, path=path, created=_text(entry.get("created")), dataset=_text(entry.get("dataset")),
+        base_weights=_text(entry.get("base_weights")), epochs=_epochs(entry.get("epochs")),
+        map50=_number(entry.get("map50")), map50_95=_number(entry.get("map50_95")),
+        per_class=_per_class(entry.get("per_class")), status=_text(entry.get("status")) or "Active",
+        notes=_text(entry.get("notes")))
+
+
 def _metrics_sidecar(model_path: Path) -> dict[str, Any]:
     """Metrics saved next to the weights as ``<name>.metrics.json`` or ``<name>.json``, if any."""
     for candidate in (model_path.with_suffix(".metrics.json"), model_path.with_suffix(".json")):
@@ -403,21 +458,14 @@ class ModelStore:
         data = _read_json(self.file, {"models": [], "active": None})
         # As with projects.json, a damaged file must not break adding or choosing a model.
         models = data.get("models")
-        data["models"] = [entry for entry in models if isinstance(entry, dict)
-                          and all(isinstance(entry.get(key), str) and entry.get(key) for key in ("id", "name", "path"))
-                          ] if isinstance(models, list) else []
+        cleaned = [clean_model_entry(entry) for entry in models] if isinstance(models, list) else []
+        data["models"] = [dict(model.__dict__) for model in cleaned if model is not None]
         if not isinstance(data.get("active"), str) or not data.get("active"):
             data["active"] = None
         return data
 
     def versions(self) -> list[ModelVersion]:
-        versions = []
-        for entry in self._load()["models"]:
-            try:
-                versions.append(ModelVersion(**entry))
-            except TypeError:
-                continue
-        return versions
+        return [ModelVersion(**entry) for entry in self._load()["models"]]
 
     def active_id(self) -> str | None:
         return self._load().get("active")
@@ -442,17 +490,12 @@ class ModelStore:
         while model_id in used:
             model_id, number = f"{base_id}-{number}", number + 1
 
-        def number_or_none(key):
-            value = metrics.get(key)
-            return float(value) if isinstance(value, (int, float)) else None
-
-        epochs = metrics.get("epochs")
         model = ModelVersion(
-            id=model_id, name=(name or metrics.get("name") or path.stem), path=str(path.resolve()),
-            created=metrics.get("created") or now_iso(), dataset=metrics.get("dataset"),
-            base_weights=metrics.get("base_weights"), epochs=int(epochs) if isinstance(epochs, int) else None,
-            map50=number_or_none("map50"), map50_95=number_or_none("map50_95"),
-            per_class={key: value for key, value in (metrics.get("per_class") or {}).items() if isinstance(value, dict)},
+            id=model_id, name=(name or _text(metrics.get("name")) or path.stem), path=str(path.resolve()),
+            created=_text(metrics.get("created")) or now_iso(), dataset=_text(metrics.get("dataset")),
+            base_weights=_text(metrics.get("base_weights")), epochs=_epochs(metrics.get("epochs")),
+            map50=_number(metrics.get("map50")), map50_95=_number(metrics.get("map50_95")),
+            per_class=_per_class(metrics.get("per_class")),
         )
         data["models"].append(model.__dict__)
         if not data.get("active"):
