@@ -212,6 +212,8 @@ class QueuePage(QWidget):
     # ----- state from the runner -----
 
     def set_runner_state(self, running_job: int | None, paused: bool) -> None:
+        if running_job is not None and running_job != self.running_job:
+            self._progress.pop(int(running_job), None)  # A retried job starts again from 0%.
         self.running_job, self.paused = running_job, paused
         if running_job is not None:
             self.banner.hide()
