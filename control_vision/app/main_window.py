@@ -914,7 +914,7 @@ class MainWindow(QMainWindow):
         column_layout.addWidget(content, 1)
         shell_layout.addWidget(column, 1)
         for keys, slot in (("Ctrl+N", self.show_new_project_wizard), ("Ctrl+O", self.open_project),
-                           ("Ctrl+,", self.open_settings), ("?", self.show_shortcuts), ("F1", self.show_shortcuts)):
+                           ("Ctrl+,", self.open_settings), ("F1", self.show_shortcuts)):
             QShortcut(QKeySequence(keys), self).activated.connect(slot)
         return shell
 
@@ -952,6 +952,13 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         return dialog
+
+    def keyPressEvent(self, event):
+        # "?" opens the shortcuts only when no text field took the key, so "?" can still be typed.
+        if event.text() == "?":
+            self.show_shortcuts()
+            return
+        super().keyPressEvent(event)
 
     def open_settings(self):
         self.settings_dialog.show()
