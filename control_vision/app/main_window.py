@@ -1235,7 +1235,14 @@ class MainWindow(QMainWindow):
             # Pause rather than move on: the same fault (a database error, say) would fail every job in turn.
             self._queue_paused = True
             if self._queue_job is not None:
-                self._queue_job_finished("failed", message)
+                # process() may have marked the match running, disabled Process and attached the run log:
+                # processing_failed undoes all of that and fails the job.
+                self.processing_failed(message)
+                logger = getattr(self, "logger", None)
+                for handler in list(logger.handlers) if logger is not None else []:
+                    if isinstance(handler, logging.FileHandler):
+                        logger.removeHandler(handler)
+                        handler.close()
             else:
                 self.queue_page.set_runner_state(None, True)
             self._show_status(f"Queue paused. {message}", "danger")
