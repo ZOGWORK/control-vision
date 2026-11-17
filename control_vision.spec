@@ -45,7 +45,9 @@ a = Analysis(
     pathex=[str(root)],
     binaries=[(ffmpeg_binary, "imageio_ffmpeg/binaries")] + torchvision_native,
     datas=datas,
-    hiddenimports=["control_vision.smoke_test", "ultralytics.trackers.bot_sort", "ultralytics.trackers.byte_tracker",
+    # control_vision.ui is imported by the smoke test before pages use it; qfluentwidgets' icons and
+    # stylesheets are compiled into its _rc module, which import analysis follows from there.
+    hiddenimports=["control_vision.smoke_test", "control_vision.ui.components", "qfluentwidgets._rc.resource", "ultralytics.trackers.bot_sort", "ultralytics.trackers.byte_tracker",
                    "onnxruntime", "rapidocr_onnxruntime"],
     hookspath=[],
     hooksconfig={},
