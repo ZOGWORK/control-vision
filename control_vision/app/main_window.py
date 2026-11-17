@@ -47,6 +47,11 @@ from control_vision.app.pages.import_page import ImportPage
 from control_vision.app.pages.splitter import SplitterPage
 from control_vision.app.pages.calibrate import CalibratePage
 from control_vision.app.pages.identity import IdentityPage
+from control_vision.app.pages.queue_page import QueuePage
+from control_vision.app.pages.live_page import LivePage
+from control_vision.app.pages.results_page import ResultsPage
+from control_vision.app.pages.fieldmap_page import FieldMapPage
+from control_vision.app.runlog import RunLogHandler, RunLogRelay, time_left
 
 # Review and timeline rows keep the stored status and confidence for re-tinting.
 EVENT_STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -389,13 +394,16 @@ def workflow_steps(*, project_open: bool, video_name: str | None, corners: int, 
 SETTINGS_TAB, RULES_TAB = 7, 8
 HOME_TAB, PROJECTS_TAB, WIZARD_TAB, DATASETS_TAB, MODELS_TAB = 9, 10, 11, 12, 13
 IMPORT_TAB, SPLITTER_TAB, CALIBRATE_TAB, IDENTITY_TAB = 14, 15, 16, 17
+QUEUE_TAB, LIVE_TAB, RESULTS_TAB, FIELDMAP_TAB = 18, 19, 20, 21
 
 # The first nine pages get Ctrl+1..Ctrl+9 in this order. Settings opens from the top bar.
 NAV_ENTRIES = (
     ("section", "Projects"), (HOME_TAB, "Home"), (PROJECTS_TAB, "Projects"), (0, "Current project"),
     ("section", "Match setup"), (IMPORT_TAB, "Import videos"), (SPLITTER_TAB, "Livestream splitter"),
     (CALIBRATE_TAB, "Calibrate field"), (IDENTITY_TAB, "Robots"),
-    ("section", "Match workflow"), (1, "Set up and process"), (3, "Review queue"), (4, "Scoring timeline"),
+    ("section", "Match workflow"), (1, "Set up and process"), (QUEUE_TAB, "Processing queue"),
+    (LIVE_TAB, "Processing live"), (RESULTS_TAB, "Match results"), (FIELDMAP_TAB, "Field map"),
+    (3, "Review queue"), (4, "Scoring timeline"),
     (2, "Cycles and stats"), (5, "Highlights"), (6, "Score and export"),
     ("section", "Training"), (DATASETS_TAB, "Datasets"), (MODELS_TAB, "Models"),
     ("section", "Reference"), (RULES_TAB, "BIOBUZZ rules"),
@@ -796,6 +804,21 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.splitter_page, "Livestream splitter")
         self.tabs.addTab(self.calibrate_page, "Calibrate field")
         self.tabs.addTab(self.identity_page, "Robots")
+        self.queue_page = QueuePage(self._job_defaults)
+        self.live_page = LivePage(self.scoring_config["match_periods_s"])
+        self.results_page = ResultsPage()
+        self.fieldmap_page = FieldMapPage()
+        self.tabs.addTab(self.queue_page, "Processing queue")
+        self.tabs.addTab(self.live_page, "Processing live")
+        self.tabs.addTab(self.results_page, "Match results")
+        self.tabs.addTab(self.fieldmap_page, "Field map")
+        self._queue_job: int | None = None
+        self._queue_paused = True
+        self._queue_project = None
+        self._queue_saved_settings = None
+        self._run_log_relay = RunLogRelay(self)
+        self._run_log_handler = None
+        self._run_started = 0.0
         self.tabs.tabBar().hide()
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self._build_shell())
@@ -831,6 +854,28 @@ class MainWindow(QMainWindow):
         self.calibrate_page.continue_identity.connect(self.open_in_identity)
         self.identity_page.saved.connect(self._setup_saved)
         self.identity_page.continue_processing.connect(self._continue_to_processing)
+        for page in (self.queue_page, self.results_page, self.fieldmap_page):
+            page.new_project.connect(self.show_new_project_wizard)
+        self.queue_page.start_requested.connect(self.start_queue)
+        self.queue_page.pause_requested.connect(self.pause_queue)
+        self.queue_page.cancel_requested.connect(self._cancel_job)
+        self.queue_page.open_live.connect(lambda: self.tabs.setCurrentIndex(LIVE_TAB))
+        self.queue_page.open_results.connect(self.open_results)
+        self.queue_page.open_calibrate.connect(self.open_in_calibrate)
+        self.queue_page.open_identity.connect(self.open_in_identity)
+        self.live_page.stop_requested.connect(self.cancel_process)
+        self.live_page.open_queue.connect(lambda: self.tabs.setCurrentIndex(QUEUE_TAB))
+        self.live_page.open_results.connect(self.open_results)
+        self.live_page.retry_requested.connect(self._retry_video)
+        self._run_log_relay.line.connect(self.live_page.add_line)
+        self.results_page.open_map.connect(self.open_field_map)
+        self.results_page.open_timeline.connect(lambda video: self._open_loaded(video, 4))
+        self.results_page.open_highlights.connect(lambda video: self._open_loaded(video, 5))
+        self.results_page.open_review.connect(lambda video: self._open_loaded(video, 3))
+        self.results_page.open_queue.connect(lambda: self.tabs.setCurrentIndex(QUEUE_TAB))
+        self.results_page.official_saved.connect(self._setup_saved)
+        self.fieldmap_page.open_calibrate.connect(self.open_in_calibrate)
+        self.fieldmap_page.open_queue.connect(lambda: self.tabs.setCurrentIndex(QUEUE_TAB))
         self.open_project_btn.clicked.connect(self.open_project)
         self.video_btn.clicked.connect(self.import_video)
         self.load_video_btn.clicked.connect(self.load_saved_video)
@@ -1026,13 +1071,20 @@ class MainWindow(QMainWindow):
             self.calibrate_page.refresh_videos()
         elif index == IDENTITY_TAB:
             self.identity_page.refresh_videos()
+        elif index == QUEUE_TAB:
+            self.queue_page.refresh()
+        elif index == RESULTS_TAB:
+            self.results_page.refresh_videos(select=self.video_id)
+        elif index == FIELDMAP_TAB:
+            self.fieldmap_page.refresh_videos(select=self.video_id)
 
     # ----- Match setup: import, livestream, calibrate, robots -----
 
     def _sync_setup_pages(self):
         """Give the setup pages the open project (or none)."""
         db, project_id = (self.db, self.project_id) if self.db is not None and self.project_id is not None else (None, None)
-        pages = (self.import_page, self.splitter_page, self.calibrate_page, self.identity_page)
+        pages = (self.import_page, self.splitter_page, self.calibrate_page, self.identity_page,
+                 self.queue_page, self.results_page, self.fieldmap_page)
         try:
             folder = self.project_dir() if db is not None else None
             for page in pages:
@@ -1048,6 +1100,23 @@ class MainWindow(QMainWindow):
                 else:
                     page.set_project(None, None)
             self._show_status(f"The setup pages could not read this project: {exc}", "danger")
+        self._sync_queue_project()
+
+    def _sync_queue_project(self):
+        """A newly opened project: jobs left running when the app closed are queued again, and the user asked."""
+        key = (id(self.db), self.project_id) if self.db is not None and self.project_id is not None else None
+        if key == self._queue_project:
+            return
+        self._queue_project = key
+        self._queue_paused = True
+        waiting = 0
+        if key is not None and self._queue_job is None:
+            try:
+                waiting = self.db.recover_interrupted_jobs()
+            except sqlite3.Error:
+                waiting = 0
+        self.queue_page.show_resume_prompt(waiting)
+        self.queue_page.set_runner_state(self._queue_job, self._queue_paused)
 
     def setup_edits_allow_leaving(self) -> bool:
         """Ask before unsaved calibration or robots are lost by switching project."""
@@ -1090,6 +1159,143 @@ class MainWindow(QMainWindow):
             self.load_saved_video_id(int(video_id))
         else:
             self._refresh_workflow()
+
+    # ----- Processing queue, live view and results -----
+
+    def _job_defaults(self):
+        """Settings a new job keeps: the sample rate, tracking mode and model chosen now."""
+        return (int(self.sample_rate.currentText()), self.tracking_mode.currentData(),
+                self.model_path_edit.text().strip() or None)
+
+    def _job_problem(self, job) -> str | None:
+        """Why a job cannot run; these are fixed by the user, never retried automatically."""
+        video_id = int(job["video_id"])
+        if not Path(job["path"]).is_file():
+            return f"Video file missing: {job['path']}"
+        try:
+            calibration = self.db.calibration_for(video_id)
+        except ValueError:
+            calibration = None
+        if not calibration or len(calibration[0]) != 4:
+            return "Calibration missing — calibrate this match first."
+        if not any(robot["seed_x"] is not None for robot in self.db.robots_for_video(video_id)):
+            return "Robot identities missing — mark at least one robot first."
+        if job["tracking_mode"] == "yolo" and not (job["model_path"] and Path(job["model_path"]).is_file()):
+            return f"Model not found: {job['model_path'] or 'no model set'}. Choose one in Settings, then retry."
+        return None
+
+    def start_queue(self):
+        self._queue_paused = False
+        self.queue_page.show_resume_prompt(0)
+        self._run_next_job()
+
+    def pause_queue(self):
+        self._queue_paused = True
+        self.queue_page.set_runner_state(self._queue_job, True)
+        self._show_status("Queue paused: the running match finishes, the next one does not start.")
+
+    def _run_next_job(self):
+        if self._queue_paused or self._queue_job is not None or self.db is None:
+            self.queue_page.set_runner_state(self._queue_job, self._queue_paused)
+            return
+        if _video_switch_blocked_quietly(self):
+            # Nothing restarts the queue when that run ends, so say so rather than wait silently.
+            self._queue_paused = True
+            self.queue_page.set_runner_state(None, True)
+            self._show_status("Queue paused: another run is in progress. Press Start queue when it ends.", "pending")
+            return
+        try:
+            job = self.db.next_queued_job()
+            if job is None:
+                self._queue_paused = True
+                self.queue_page.set_runner_state(None, True)
+                self._show_status("Processing queue finished.", "success")
+                return
+            problem = self._job_problem(job)
+            if problem is None:
+                self.load_saved_video_id(int(job["video_id"]))
+                if self.video_id is None or int(self.video_id) != int(job["video_id"]):
+                    problem = "Could not open this match."
+            if problem is not None:
+                self.db.set_job_status(int(job["id"]), "failed", problem)
+                self.queue_page.refresh()
+                QTimer.singleShot(0, self._run_next_job)
+                return
+            self._queue_job = int(job["id"])
+            self._queue_saved_settings = (self.sample_rate.currentText(), self.tracking_mode.currentIndex(),
+                                          self.model_path_edit.text())
+            self.sample_rate.setCurrentText(str(job["sample_fps"]))
+            self.tracking_mode.setCurrentIndex(max(0, self.tracking_mode.findData(job["tracking_mode"])))
+            self.model_path_edit.setText(job["model_path"] or "")
+            self.db.set_job_status(self._queue_job, "running")
+            self.queue_page.set_runner_state(self._queue_job, False)
+            self.process()
+        except Exception as exc:  # A job that cannot start must not leave the queue stuck "running".
+            message = f"Processing could not start: {exc}"
+            # Pause rather than move on: the same fault (a database error, say) would fail every job in turn.
+            self._queue_paused = True
+            if self._queue_job is not None:
+                # process() may have marked the match running, disabled Process and attached the run log:
+                # processing_failed undoes all of that and fails the job.
+                self.processing_failed(message)
+                logger = getattr(self, "logger", None)
+                for handler in list(logger.handlers) if logger is not None else []:
+                    if isinstance(handler, logging.FileHandler):
+                        logger.removeHandler(handler)
+                        handler.close()
+            else:
+                self.queue_page.set_runner_state(None, True)
+            self._show_status(f"Queue paused. {message}", "danger")
+            return
+        if not self._processing_active:
+            self._queue_job_finished("failed", "Processing could not start.")
+
+    def _queue_job_finished(self, status: str, error: str | None = None):
+        if self._queue_job is None:
+            return
+        job, self._queue_job = self._queue_job, None
+        if status == "cancelled":
+            self._queue_paused = True  # The user stopped this run: do not start the next one.
+        try:
+            self.db.set_job_status(job, status, error)
+        except sqlite3.Error:
+            pass
+        if self._queue_saved_settings is not None:
+            fps, mode, model = self._queue_saved_settings
+            self.sample_rate.setCurrentText(fps)
+            self.tracking_mode.setCurrentIndex(mode)
+            self.model_path_edit.setText(model)
+            self._queue_saved_settings = None
+        self.queue_page.set_runner_state(None, self._queue_paused)
+        QTimer.singleShot(0, self._run_next_job)
+
+    def _cancel_job(self, job_id: int):
+        if self._queue_job is not None and int(job_id) == self._queue_job:
+            self.cancel_process()
+
+    def _retry_video(self, video_id: int):
+        self.queue_page.queue([int(video_id)])
+        self.start_queue()
+
+    def _open_loaded(self, video_id: int, tab: int):
+        """Open a result screen that shows the loaded video, loading this one first."""
+        if self.video_id is None or int(self.video_id) != int(video_id):
+            self.load_saved_video_id(int(video_id))
+        if self.video_id is not None and int(self.video_id) == int(video_id):
+            self.tabs.setCurrentIndex(tab)
+
+    def open_results(self, video_id: int):
+        self.results_page.refresh_videos(select=int(video_id))
+        self.tabs.setCurrentIndex(RESULTS_TAB)
+
+    def open_field_map(self, video_id: int):
+        self.fieldmap_page.refresh_videos(select=int(video_id))
+        self.tabs.setCurrentIndex(FIELDMAP_TAB)
+
+    def _end_run_log(self):
+        if self._run_log_handler is not None and getattr(self, "logger", None) is not None:
+            self.logger.removeHandler(self._run_log_handler)
+        self._run_log_handler = None
 
     def _continue_to_processing(self, video_id: int):
         if self.video_id is None or int(self.video_id) != int(video_id):
@@ -1339,7 +1545,8 @@ class MainWindow(QMainWindow):
         if index in (2, 3, 4, 5, 6) and not self.tabs.isTabEnabled(index):
             return f"{self._nav_labels[index]}: process the video to see results"
         if index == 3 and self._review_pending:
-            return f"Review queue: {self._review_pending} event(s) need review ({self._nav_shortcuts[3]})"
+            shortcut = self._nav_shortcuts.get(3)   # The sidebar order decides which pages get Ctrl+1..9.
+            return f"Review queue: {self._review_pending} event(s) need review" + (f" ({shortcut})" if shortcut else "")
         return self._nav_tooltips[index]
 
     def _set_review_badge(self, flagged: int):
@@ -2155,6 +2362,11 @@ class MainWindow(QMainWindow):
         self.logger = logging.getLogger(f"control_vision.{stamp}"); self.logger.setLevel(logging.INFO)
         handler = logging.FileHandler(log_dir / f"run-{stamp}.log", encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s")); self.logger.addHandler(handler)
+        self._run_log_handler = RunLogHandler(self._run_log_relay)
+        self.logger.addHandler(self._run_log_handler)
+        self._run_started = time.monotonic()
+        self.live_page.periods = self.scoring_config["match_periods_s"]
+        self.live_page.start_run(int(self.video_id), Path(self.video_path), float(self.sample_rate.currentText()))
         self.logger.info("Video probed: %s; %s", self.video_path, self.metadata)
         self.logger.info("Zones: %s; sample fps: %s; confidence threshold: %s; tracking mode: %s", self.zones, self.sample_rate.currentText(), self.confidence_spin.value(), mode)
         self.db.set_analysis_status(self.video_id, "running")
@@ -2191,6 +2403,9 @@ class MainWindow(QMainWindow):
         self._show_status(f"{stage} — {percent:.0f}% — {detail}")
         self.status_progress.setValue(max(0, min(100, round(percent))))
         self._step_widgets["process"][1].setText(f"{stage} — {percent:.0f}%")
+        self.live_page.set_progress(stage, percent, detail)
+        if self._queue_job is not None:
+            self.queue_page.set_progress(self._queue_job, percent, time_left(time.monotonic() - self._run_started, percent))
 
     def processing_done(self, rows):
         (track_rows, _, _), tracking_mode = rows
@@ -2215,6 +2430,9 @@ class MainWindow(QMainWindow):
         self._processing_active = False
         self.status_progress.hide()
         self._refresh_workflow()
+        self._end_run_log()
+        self.live_page.finished()
+        self._queue_job_finished("done")
 
     def _store_processing_results(self, rows):
         (track_rows, photos, roi_events), tracking_mode = rows
@@ -2694,6 +2912,13 @@ class MainWindow(QMainWindow):
         self._processing_active = False
         self.status_progress.hide()
         self._refresh_workflow()
+        if getattr(self, "_run_log_handler", None) is not None:
+            MainWindow._end_run_log(self)
+        live = getattr(self, "live_page", None)
+        if live is not None:
+            live.failed(message)
+        if getattr(self, "_queue_job", None) is not None:
+            self._queue_job_finished("cancelled" if "cancelled" in message.lower() else "failed", message)
 
     def cancel_process(self):
         if self._worker: self._worker.cancel(); self.statusBar().showMessage("Cancelling after the current frame…")

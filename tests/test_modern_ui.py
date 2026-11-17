@@ -157,7 +157,7 @@ class ShellWindowTests(unittest.TestCase):
         window._sync_nav()
         self.assertIn("2 event(s) need review", window.nav.item(window._nav_rows[3]).toolTip())
         window._set_review_badge(0)
-        self.assertEqual(window.nav.item(window._nav_rows[3]).toolTip(), "Review queue (Ctrl+9)")
+        self.assertEqual(window.nav.item(window._nav_rows[3]).toolTip(), "Review queue")  # Ctrl+9 is now the Processing queue.
 
     def test_minimum_window_width_fits_every_panel(self):
         # Fixed and minimum widths only, so the check does not depend on installed fonts.
