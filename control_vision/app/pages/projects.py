@@ -72,7 +72,7 @@ def matches_filter(summary: ProjectSummary, text: str, season: str | None, event
         if not team.strip().isdigit() or int(team.strip()) not in summary.teams:
             return False
     if status:
-        if summary.missing or summary.status != status:
+        if summary.missing or summary.unreadable or summary.status != status:
             return False
     return True
 
