@@ -427,9 +427,12 @@ class ProjectDatabase:
                 "DELETE FROM processing_jobs WHERE status IN ('done','cancelled')").rowcount
 
     def retry_failed_jobs(self) -> int:
+        """Queue failed and cancelled jobs again, at most one per video, and none for a video already waiting."""
         with self.connection:
             return self.connection.execute(
-                "UPDATE processing_jobs SET status='queued', error=NULL WHERE status IN ('failed','cancelled')").rowcount
+                "UPDATE processing_jobs SET status='queued', error=NULL WHERE id IN ("
+                " SELECT MAX(id) FROM processing_jobs WHERE status IN ('failed','cancelled') AND video_id NOT IN"
+                " (SELECT video_id FROM processing_jobs WHERE status IN ('queued','running')) GROUP BY video_id)").rowcount
 
     def recover_interrupted_jobs(self) -> int:
         """A job left running when the app closed saved nothing; queue it again. Returns how many jobs wait."""
