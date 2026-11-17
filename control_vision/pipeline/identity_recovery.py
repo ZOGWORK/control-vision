@@ -27,11 +27,16 @@ re-linked to a lost robot only when every rule below holds:
 6. After ``max_absence_s`` the robot's recovery window closes for the rest of
    the run and it stays lost.
 7. Alliance colour, when the robot's alliance is known: inside the new box the
-   other alliance's colour covers at most ``colour_other_max`` of the pixels
-   and no more than the robot's own colour, and the own-colour fraction is
-   within ``colour_ratio_max`` times the robot's reference (the median over its
-   first sightings after seeding, never updated after a re-link). A robot
-   without a reference never passes. This rejects robots of the other alliance
+   other alliance's colour covers at most ``colour_other_max`` of the pixels,
+   or ``colour_ratio_max`` times the other colour the robot itself showed in
+   its first sightings if that is more (a robot with parts of the other
+   colour), and the own-colour fraction is at most ``colour_ratio_max`` times
+   the robot's reference (the median over its first sightings after seeding,
+   never updated after a re-link). For a robot whose reference is at least
+   ``colour_low_reference`` the own colour must also be within that ratio
+   below the reference and no less than the other colour; a robot showing
+   less own colour than that is not judged by its absence. A robot without a
+   reference never passes. This rejects robots of the other alliance
    and robots of a very different colour level, but it cannot tell apart two
    same-alliance robots that show similar amounts of their alliance colour.
 
@@ -58,7 +63,7 @@ MIN_ABSENCE_S = 0.5
 # that only the exclusivity rules protect the identity. Unseeded robots that
 # are undetected at the time can still be mistaken for the lost one, and the
 # longer the gap, the more likely that becomes. Stop trying after this long.
-MAX_ABSENCE_S = 10.0
+MAX_ABSENCE_S = 20.0
 # Alliance colour check (rule 7). Field tape, game elements and shadows put a
 # little of either colour in most boxes, hence the small tolerances.
 COLOUR_OTHER_MAX = 0.02
@@ -66,6 +71,10 @@ COLOUR_OWN_MIN = 0.01
 COLOUR_RATIO_MAX = 3.0
 COLOUR_UPPER_FLOOR = 0.05
 COLOUR_REFERENCE_SAMPLES = 8
+# A robot whose own-colour reference is below this shows almost none of its
+# alliance colour from this camera (bumpers hidden or not coloured), so a box
+# without own colour is not evidence of a different robot.
+COLOUR_LOW_REFERENCE = 0.03
 
 
 @dataclass(frozen=True)
@@ -97,6 +106,7 @@ class RecoveryRules:
     colour_ratio_max: float = COLOUR_RATIO_MAX
     colour_upper_floor: float = COLOUR_UPPER_FLOOR
     colour_reference_samples: int = COLOUR_REFERENCE_SAMPLES
+    colour_low_reference: float = COLOUR_LOW_REFERENCE
 
     def gate_ft(self, elapsed_s: float) -> float:
         return self.max_speed_ft_s * max(0.0, elapsed_s) + self.margin_ft
@@ -143,6 +153,9 @@ class IdentityRecovery:
     # which only unit tests of the other rules do.
     alliances: dict[int, str] | None = None
     colour_samples: dict[int, list[float]] = field(default_factory=dict)
+    # The other alliance's colour in the robot's own first sightings (parts,
+    # stickers or elements it carries), sampled alongside colour_samples.
+    other_colour_samples: dict[int, list[float]] = field(default_factory=dict)
     # Unassigned tracks seen inside each missing robot's gate since it vanished.
     rivals_seen: dict[int, set[int]] = field(default_factory=dict)
     reference_closed: set[int] = field(default_factory=set)
@@ -161,10 +174,17 @@ class IdentityRecovery:
         self.reference_closed.add(recovery.robot_id)
         self.rivals_seen.pop(recovery.robot_id, None)
 
+    def reseed(self, robot_id: int, track_id: int) -> None:
+        """A user assigned ``track_id`` to the robot: reopen its recovery window."""
+        self.ever_assigned.add(track_id)
+        self.expired.discard(robot_id)
+        self.rivals_seen.pop(robot_id, None)
+
     def forget_robot(self, robot_id: int) -> None:
         """Drop a robot's sightings and colour samples after it is re-seeded to another track."""
         self.last_seen.pop(robot_id, None)
         self.colour_samples.pop(robot_id, None)
+        self.other_colour_samples.pop(robot_id, None)
         self.rivals_seen.pop(robot_id, None)
 
     def observe_tracks(self, t_s: float, visible: dict[int, tuple[float, float] | None]) -> None:
@@ -179,7 +199,9 @@ class IdentityRecovery:
         samples = self.colour_samples.setdefault(robot_id, [])
         if (colour is not None and robot_id not in self.reference_closed
                 and len(samples) < self.rules.colour_reference_samples):
-            samples.append(self._own_other(robot_id, colour)[0])
+            own, other = self._own_other(robot_id, colour)
+            samples.append(own)
+            self.other_colour_samples.setdefault(robot_id, []).append(other)
 
     def wants_colour(self, robot_id: int) -> bool:
         """True while the robot's colour reference is still being collected."""
@@ -195,6 +217,10 @@ class IdentityRecovery:
         samples = self.colour_samples.get(robot_id)
         return statistics.median(samples) if samples else None
 
+    def other_colour_reference(self, robot_id: int) -> float | None:
+        samples = self.other_colour_samples.get(robot_id)
+        return statistics.median(samples) if samples else None
+
     def colour_matches(self, robot_id: int, colour: tuple[float, float] | None) -> bool:
         """Rule 7. Without an alliance, a reference or a measurement, it fails."""
         if self.alliances is None:
@@ -204,9 +230,16 @@ class IdentityRecovery:
             return False
         rules = self.rules
         own, other = self._own_other(robot_id, colour)
-        lower = max(rules.colour_own_min, reference / rules.colour_ratio_max)
         upper = max(rules.colour_upper_floor, reference * rules.colour_ratio_max)
-        return other <= rules.colour_other_max and other <= own and lower <= own <= upper
+        # A robot that itself shows some of the other alliance's colour may show that much again.
+        other_limit = max(rules.colour_other_max, (self.other_colour_reference(robot_id) or 0.0) * rules.colour_ratio_max)
+        if other > other_limit or own > upper:
+            return False
+        if reference < rules.colour_low_reference:
+            # Too little own colour to judge by: its absence is not evidence.
+            return True
+        lower = max(rules.colour_own_min, reference / rules.colour_ratio_max)
+        return other <= own and own >= lower
 
     def recover(self, t_s: float, visible: dict[int, tuple[float, float] | None],
                 seed_to_track: dict[int, int], logger=None,

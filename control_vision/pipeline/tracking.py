@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 import tempfile
 from pathlib import Path
@@ -108,6 +109,69 @@ def _overlap_of_smaller(a, b) -> float:
     return width * height / smaller if smaller > 0 else 0.0
 
 
+# A re-seed is tried on each sampled frame from its time until this much later.
+RESEED_WINDOW_S = 1.0
+# A click this close outside a box (in pixels) still selects it, so clicking a
+# robot's floor contact point just under its box works.
+RESEED_BOX_MARGIN_PX = 20.0
+
+
+def _validate_reseeds(reseeds, robot_ids) -> list[tuple[int, float, float, float]]:
+    """Check user re-seeds and return them sorted by time."""
+    checked = []
+    for item in reseeds or []:
+        if len(item) != 4:
+            raise ValueError(f"A re-seed needs robot id, time, x and y, not {item!r}.")
+        robot_id, t_s, x, y = item
+        if robot_id not in robot_ids:
+            raise ValueError(f"Re-seed for robot {robot_id}, which has no seed.")
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (t_s, x, y)) or t_s < 0:
+            raise ValueError(f"Re-seed for robot {robot_id} needs a time of 0 s or later and a pixel position.")
+        checked.append((int(robot_id), float(t_s), float(x), float(y)))
+    return sorted(checked, key=lambda item: item[1])
+
+
+def _apply_reseed(robot_id, x, y, t_s, detections, visible, seed_to_track, recovery, unowned_rows, rows,
+                  frame_index, logger) -> bool:
+    """Give ``robot_id`` the tracked box under a user's click. False if no tracked box is there.
+
+    The click is the user's identity call, so it outranks the automatic rules: the
+    robot is tracked again even after its recovery window closed, and a robot that
+    held the clicked track loses it and becomes lost. Positions the track recorded
+    while unowned, after the robot was last seen, are kept for the robot.
+    """
+    def hits(margin):
+        return [(math.hypot(fx - x, fy - y), tid) for tid, fx, fy, _, (x1, y1, x2, y2) in detections
+                if tid >= 0 and visible.get(tid) is not None
+                and x1 - margin <= x <= x2 + margin and y1 - margin <= y <= y2 + margin]
+
+    # A box the click is inside wins over one it is only near.
+    candidates = hits(0.0) or hits(RESEED_BOX_MARGIN_PX)
+    if not candidates:
+        return False
+    track_id = min(candidates)[1]
+    if seed_to_track.get(robot_id) == track_id:
+        # The user vouches for this identity now, so an expired robot can be re-linked again later.
+        recovery.reseed(robot_id, track_id)
+        logger.info("Re-seed of robot %d at %.2fs confirms its current track %d", robot_id, t_s, track_id)
+        return True
+    previous_owner = next((rid for rid, tid in seed_to_track.items() if tid == track_id), None)
+    if previous_owner is not None:
+        del seed_to_track[previous_owner]
+        logger.warning("Robot %d released from track %d at %.2fs: the user re-seeded robot %d to it; robot %d "
+                       "stays lost until re-seeded", previous_owner, track_id, t_s, robot_id, previous_owner)
+    old_track = seed_to_track.get(robot_id)
+    seed_to_track[robot_id] = track_id
+    recovery.reseed(robot_id, track_id)
+    last = recovery.last_seen.get(robot_id)
+    kept = [row for row in unowned_rows.pop(track_id, [])
+            if row[0] != frame_index and (last is None or row[1] > last.t_s)]
+    rows.extend((robot_id, *row) for row in kept)
+    logger.info("Re-seeded robot %d at %.2fs by the user: track %s -> %d; %d earlier positions kept",
+                robot_id, t_s, "none" if old_track is None else old_track, track_id, len(kept))
+    return True
+
+
 # Highest class id that is a scoring element: 1-2 in the three-class schema,
 # 1-3 in the four-class one (train_yolo.SUPPORTED_CLASSES). Class 0 is robot.
 MAX_ELEMENT_CLASS_ID = 3
@@ -202,6 +266,7 @@ def track_video(
     reid_model_path: str | None = None,
     gmc_method: str | None = None,
     alliances: dict[int, str] | None = None,
+    reseeds: list[tuple[int, float, float, float]] | None = None,
 ) -> tuple[list[tuple[int, int, float, float, float, float]], list[tuple[int, Path, float]], list[dict]]:
     """Run local YOLO tracking at the requested sampling rate and map robot footpoints.
 
@@ -211,7 +276,10 @@ def track_video(
     new track under strict one-to-one gating; otherwise the robot stays lost.
     ``gmc_method`` overrides the configured BoT-SORT global motion compensation.
     ``alliances`` maps robot id to "red" or "blue"; re-linking is off without it.
+    ``reseeds`` are a user's mid-match corrections, each (robot id, time s, x pixel,
+    y pixel): see ``_apply_reseed``.
     """
+    pending_reseeds = _validate_reseeds(reseeds, [seed[0] for seed in seed_points])
     if not model_path.is_file():
         raise RuntimeError(f"YOLO11n model was not found at {model_path}. Add a trained local model in Settings.")
     try:
@@ -392,15 +460,28 @@ def track_video(
                         seed_boxes[robot_id] = box
             visible: dict[int, tuple[float, float] | None] = {}
             boxes_by_track = {det[0]: det[4] for det in detections if det[0] >= 0}
+            owned_now = set(seed_to_track.values())
             for tid, x, y, conf, _ in detections:
                 if tid < 0:
                     continue
                 x_ft, y_ft = project_point(matrix, x, y)
                 in_field = 0 <= x_ft <= 12 and 0 <= y_ft <= 12
                 visible[tid] = (x_ft, y_ft) if in_field else None
-                if in_field and tid not in recovery.ever_assigned:
+                # Automatic recovery only uses never-assigned tracks; a pending
+                # re-seed can also take a track a robot was moved off.
+                if in_field and tid not in owned_now and (tid not in recovery.ever_assigned or pending_reseeds):
                     unowned_rows.setdefault(tid, []).append((frame_index, t_s, x_ft, y_ft, conf))
             recovery.observe_tracks(t_s, visible)
+            # Each due re-seed is tried on its own, until it applies or its window passes.
+            for item in [item for item in pending_reseeds if item[1] <= t_s]:
+                robot_id, click_t, click_x, click_y = item
+                if t_s - click_t > RESEED_WINDOW_S:
+                    logger.warning("Re-seed of robot %d at %.2fs was not applied: no tracked robot box at the "
+                                   "click within %.1fs", robot_id, click_t, RESEED_WINDOW_S)
+                    pending_reseeds.remove(item)
+                elif _apply_reseed(robot_id, click_x, click_y, t_s, detections, visible, seed_to_track,
+                                   recovery, unowned_rows, rows, frame_index, logger):
+                    pending_reseeds.remove(item)
             if seed_to_track:
                 owned = set(seed_to_track.values())
                 colours = {}
@@ -422,8 +503,10 @@ def track_video(
                                 "footpoint %.2f ft from last position (gate %.2f ft); %d earlier positions kept",
                                 item.robot_id, t_s, item.old_track_id, item.new_track_id, item.absence_s,
                                 item.distance_ft, item.gate_ft, len(backfill))
+            owned_now = set(seed_to_track.values())
             for tid in [tid for tid, buffered in unowned_rows.items()
-                        if tid in recovery.ever_assigned or t_s - buffered[-1][1] > recovery.rules.max_absence_s]:
+                        if tid in owned_now or (tid in recovery.ever_assigned and not pending_reseeds)
+                        or t_s - buffered[-1][1] > recovery.rules.max_absence_s]:
                 # Keep only buffers that could still be re-linked.
                 del unowned_rows[tid]
             for tid, x, y, conf, bbox in detections:
@@ -503,6 +586,9 @@ def track_video(
         cap.release()
         if tracker_override:
             Path(tracker_override.name).unlink(missing_ok=True)
+    for robot_id, click_t, _, _ in pending_reseeds:
+        logger.warning("Re-seed of robot %d at %.2fs was not applied: the video ended before a tracked robot box "
+                       "was found at the click", robot_id, click_t)
     if sampled and sampled < 30 and empty == sampled:
         raise RuntimeError("No robots were detected in the first sampled frames. Check the video and robot model.")
     if not rows:
@@ -522,7 +608,8 @@ def track_video(
     for robot_id in robot_ids:
         reference = recovery.colour_reference(robot_id)
         if reference is not None:
-            logger.info("Robot %d own alliance-colour reference: %.3f", robot_id, reference)
+            logger.info("Robot %d own alliance-colour reference: %.3f; other alliance's colour: %.3f", robot_id,
+                        reference, recovery.other_colour_reference(robot_id) or 0.0)
     if len(seed_to_track) < len(robot_ids):
         logger.warning("Only %d of %d robot identities were safely matched within %.1fs. Unmatched seeds are omitted instead of guessed.",
                        len(seed_to_track), len(robot_ids), seed_assignment_deadline_s)

@@ -65,7 +65,7 @@ class _Logs(logging.Handler):
         self.messages.append(record.getMessage())
 
 
-def run_script(script, seeds, confidence=0.25, track_kwargs=None, paint=None, alliances="red"):
+def run_script(script, seeds, confidence=0.25, track_kwargs=None, paint=None, alliances="red", reseeds=None):
     """Run track_video on a scripted tracker output.
 
     ``script`` is a list, one entry per frame at 8 fps, of (track id, x ft, y ft)
@@ -100,7 +100,8 @@ def run_script(script, seeds, confidence=0.25, track_kwargs=None, paint=None, al
              patch("ultralytics.YOLO", return_value=SimpleNamespace(track=track)):
             rows, _, _ = track_video(Path("match.mp4"), model_path, CORNERS, seed_points, FPS,
                                      lambda: False, lambda *_: None, logger,
-                                     confidence_threshold=confidence, alliances=alliances)
+                                     confidence_threshold=confidence, alliances=alliances,
+                                     reseeds=[(rid, t, _px(x), _px(y)) for rid, t, x, y in reseeds or []])
     return rows, logs.messages, calls
 
 
@@ -209,15 +210,15 @@ class IdentityRecoveryRunTests(unittest.TestCase):
         self.assertEqual(len(recovered(messages)), 1, messages)
 
     def test_no_recovery_after_the_maximum_absence(self):
-        # 10.5 s gap at 8 fps.
-        rows, messages, _ = run_script(_lost_then([(5, 3, 3)], gap_frames=84), [(1, 3, 3)])
+        # Born 20.125 s after the last sighting (0.875 s), past the 20 s limit.
+        rows, messages, _ = run_script(_lost_then([(5, 3, 3)], gap_frames=160), [(1, 3, 3)])
         self.assertEqual(recovered(messages), [])
         self.assertEqual(max(robot_times(rows, 1)), 0.875)
         self.assertTrue(any("identity recovery stopped" in m for m in messages), messages)
 
     def test_recovery_just_before_the_maximum_absence(self):
-        # Born 9.6 s after the last sighting, alone on the field.
-        rows, messages, _ = run_script(_lost_then([(5, 3, 3)], gap_frames=76), [(1, 3, 3)])
+        # Born 19.625 s after the last sighting, alone on the field.
+        rows, messages, _ = run_script(_lost_then([(5, 3, 3)], gap_frames=156), [(1, 3, 3)])
         self.assertEqual(len(recovered(messages)), 1, messages)
 
     def test_tracked_robot_is_never_reassigned(self):
@@ -293,6 +294,114 @@ class SeedWindowReseedTests(unittest.TestCase):
         self.assertEqual(_overlap_of_smaller((0, 0, 10, 10), (10, 0, 20, 10)), 0.0)
 
 
+class UserReseedTests(unittest.TestCase):
+    """Mid-match re-seeds: (robot id, time s, x ft, y ft) in these tests."""
+
+    def test_reseed_brings_back_a_robot_after_its_recovery_window_closed(self):
+        # Lost at 0.875 s; track 5 appears at 21.5 s, too late for automatic recovery.
+        script = _lost_then([(5, 3, 3)], gap_frames=164, tail=10)
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 21.5, 3, 3)])
+        self.assertTrue(any("identity recovery stopped" in m for m in messages), messages)
+        self.assertIn("Re-seeded robot 1 at 21.50s by the user: track 1 -> 5; 0 earlier positions kept",
+                      messages)
+        times = robot_times(rows, 1)
+        self.assertEqual([t for t in times if t > 1], [21.5 + 0.125 * i for i in range(10)])
+
+    def test_reseed_keeps_the_new_tracks_positions_since_the_robot_vanished(self):
+        # Two candidates block automatic recovery; the user picks track 5 at 1.625 s.
+        script = _lost_then([(5, 4, 3), (6, 3, 4)])
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 1.625, 4, 3)])
+        self.assertEqual(recovered(messages), [])
+        self.assertIn("Re-seeded robot 1 at 1.62s by the user: track 1 -> 5; 4 earlier positions kept", messages)
+        # Positions are smoothed over +-2 samples, so check past the switch.
+        positions = {(round(row[3], 1), round(row[4], 1)) for row in rows if row[0] == 1 and row[2] >= 1.375}
+        self.assertEqual(positions, {(4.0, 3.0)})
+        times = robot_times(rows, 1)
+        self.assertEqual(len(times), len(set(times)))
+        self.assertEqual(min(t for t in times if t > 1), 1.125)
+
+    def test_reseed_onto_another_robots_track_releases_that_robot(self):
+        script = [[(1, 3, 3), (2, 8, 8)] for _ in range(16)]
+        rows, messages, _ = run_script(script, [(1, 3, 3), (2, 8, 8)], reseeds=[(1, 1.0, 8, 8)])
+        self.assertTrue(any(m.startswith("Robot 2 released from track 2 at 1.00s") for m in messages), messages)
+        self.assertEqual(max(robot_times(rows, 2)), 0.875)
+        after = {(round(row[3], 1), round(row[4], 1)) for row in rows if row[0] == 1 and row[2] >= 1.25}
+        self.assertEqual(after, {(8.0, 8.0)})
+
+    def test_click_on_no_robot_is_not_applied(self):
+        script = [[(1, 3, 3)] for _ in range(20)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 1.0, 9, 9)])
+        self.assertIn("Re-seed of robot 1 at 1.00s was not applied: no tracked robot box at the click within 1.0s",
+                      messages)
+        self.assertEqual(len(robot_times(rows, 1)), 20)
+
+    def test_click_on_the_robots_own_track_changes_nothing(self):
+        script = [[(1, 3, 3)] for _ in range(20)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 1.0, 3, 3)])
+        self.assertIn("Re-seed of robot 1 at 1.00s confirms its current track 1", messages)
+        self.assertEqual(len(robot_times(rows, 1)), 20)
+
+    def test_a_click_that_finds_no_box_does_not_hold_up_another(self):
+        # After the seed window, robot 2 is lost at 4.0 s with two candidates (no automatic recovery). At
+        # 4.0 s the user clicks empty field for robot 1 and track 5 for robot 2; robot 2's must apply at once.
+        script = ([[(1, 3, 3), (2, 8, 8)] for _ in range(32)]
+                  + [[(1, 3, 3), (5, 8, 8), (6, 6.5, 8)] for _ in range(16)])
+        rows, messages, _ = run_script(script, [(1, 3, 3), (2, 8, 8)],
+                                       reseeds=[(1, 4.0, 10, 1), (2, 4.0, 8, 8)])
+        self.assertTrue(any(m.startswith("Re-seeded robot 2 at 4.00s by the user") for m in messages), messages)
+        self.assertTrue(any(m.startswith("Re-seed of robot 1 at 4.00s was not applied") for m in messages), messages)
+
+    def test_a_click_is_not_applied_after_its_window(self):
+        # Nothing is at the click until 2.125 s, 1.125 s after it: too late, even though a box is there then.
+        script = [[(1, 3, 3)] for _ in range(17)] + [[(1, 3, 3), (7, 9, 9)] for _ in range(6)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 1.0, 9, 9)])
+        self.assertEqual([m for m in messages if m.startswith("Re-seeded")], [])
+        self.assertIn("Re-seed of robot 1 at 1.00s was not applied: no tracked robot box at the click within 1.0s",
+                      messages)
+
+    def test_reseed_onto_a_track_another_robot_was_moved_off_keeps_its_positions(self):
+        # 1.0 s: robot 1 is re-seeded onto robot 2's track 2, so track 1 is unowned.
+        # 2.0 s: robot 2 is re-seeded onto track 1 and keeps its positions from 1.125 s to 1.875 s.
+        script = [[(1, 3, 3), (2, 8, 8)] for _ in range(24)]
+        rows, messages, _ = run_script(script, [(1, 3, 3), (2, 8, 8)],
+                                       reseeds=[(1, 1.0, 8, 8), (2, 2.0, 3, 3)])
+        self.assertIn("Re-seeded robot 2 at 2.00s by the user: track none -> 1; 7 earlier positions kept", messages)
+        times = robot_times(rows, 2)
+        self.assertEqual([t for t in times if t > 1], [1.125 + 0.125 * i for i in range(15)])
+
+    def test_confirming_an_expired_robots_own_track_reopens_its_recovery(self):
+        # Track 1 vanishes at 0.875 s; robot 1 expires after 20 s; track 1 itself comes back at 22 s and the
+        # user confirms it at 22.5 s. When it vanishes again at 24 s, a clean new track must be re-linked.
+        script = ([[(1, 3, 3)] for _ in range(8)] + [[] for _ in range(168)]
+                  + [[(1, 3, 3)] for _ in range(16)] + [[]] + [[(5, 4, 3)] for _ in range(8)])
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 22.5, 3, 3)])
+        self.assertTrue(any("identity recovery stopped" in m for m in messages), messages)
+        self.assertIn("Re-seed of robot 1 at 22.50s confirms its current track 1", messages)
+        self.assertEqual(len(recovered(messages)), 1, messages)
+        self.assertIn("track 1 -> new track 5", recovered(messages)[0])
+
+    def test_a_click_inside_a_box_beats_a_nearer_box_it_is_only_near(self):
+        # Boxes are 8 px wide and 8 px tall above the footpoint (10 px per ft). Track 2's box is x 56-64,
+        # y 22-30 px; track 3 (footpoint (6.7, 2.2) ft) has box x 63-71, y 14-22 px. The click at (63.9, 22.5) px
+        # is inside track 2's box and 0.5 px below track 3's, yet 3.1 px from track 3's footpoint and 8.4 px
+        # from track 2's. Robot 1 must get track 2.
+        script = [[(1, 3, 3), (2, 6, 3), (3, 6.7, 2.2)] for _ in range(40)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 4.0, 6.39, 2.25)])
+        self.assertIn("Re-seeded robot 1 at 4.00s by the user: track 1 -> 2; 0 earlier positions kept", messages)
+
+    def test_a_reseed_after_the_last_frame_is_reported(self):
+        script = [[(1, 3, 3)] for _ in range(8)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 50.0, 3, 3)])
+        self.assertIn("Re-seed of robot 1 at 50.00s was not applied: the video ended before a tracked robot box "
+                      "was found at the click", messages)
+
+    def test_invalid_reseeds_are_rejected_before_processing(self):
+        script = [[(1, 3, 3)] for _ in range(4)]
+        for bad in ([(2, 1.0, 3, 3)], [(1, -1.0, 3, 3)], [(1, float("nan"), 3, 3)]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                run_script(script, [(1, 3, 3)], reseeds=bad)
+
+
 class AllianceColourRunTests(unittest.TestCase):
     def test_other_alliance_colour_blocks_recovery(self):
         rows, messages, _ = run_script(_lost_then([(5, 4, 3)]), [(1, 3, 3)], paint={5: "blue"})
@@ -323,6 +432,19 @@ class AllianceColourRunTests(unittest.TestCase):
             worker.run()
         self.assertEqual(tracker.call_args.kwargs["alliances"], {1: "blue"})
         self.assertEqual(tracker.call_args.kwargs["confidence_threshold"], 0.2)
+
+    def test_worker_passes_reviewer_reseeds_to_yolo_tracking(self):
+        from control_vision.app.main_window import ProcessingWorker
+        logger = logging.getLogger("worker-reseed-test")
+        clicks = [(1, 60.0, 876.0, 818.0)]
+        for reseeds, expected in ((clicks, clicks), ([], None)):
+            with self.subTest(reseeds=reseeds):
+                worker = ProcessingWorker((Path("match.mp4"), Path("robot.onnx"), [], [(1, 20, 30)], 8.0, logger,
+                                           None, 0.2, None, "", "yolo", {1: "blue"}, reseeds))
+                with patch("control_vision.app.main_window.track_video", autospec=True,
+                           return_value=([], [], [])) as tracker:
+                    worker.run()
+                self.assertEqual(tracker.call_args.kwargs["reseeds"], expected)
 
 
 class AllianceColourRuleTests(unittest.TestCase):
@@ -361,13 +483,30 @@ class AllianceColourRuleTests(unittest.TestCase):
         self.assertAlmostEqual(state.colour_reference(1), 0.1)
         self.assertIn(5, state.ever_assigned)
 
-    def test_low_reference_still_needs_some_own_colour(self):
-        state = self.state(0.0)
-        self.assertFalse(state.colour_matches(1, (0.0, 0.0)))
-        self.assertTrue(state.colour_matches(1, (0.04, 0.0)))
-        self.assertFalse(state.colour_matches(1, (0.06, 0.0)))
-        # Within the bounds, but more of the other alliance's colour than its own.
-        self.assertFalse(state.colour_matches(1, (0.012, 0.018)))
+    def test_robot_showing_little_own_colour_is_not_judged_by_its_absence(self):
+        # Reference below 0.03: its bumpers barely show from this camera.
+        for reference in (0.0, 0.029):
+            with self.subTest(reference=reference):
+                state = self.state(reference)
+                self.assertTrue(state.colour_matches(1, (0.0, 0.0)))
+                self.assertTrue(state.colour_matches(1, (0.04, 0.0)))
+                self.assertTrue(state.colour_matches(1, (0.012, 0.018)))
+                self.assertFalse(state.colour_matches(1, (0.0, 0.03)))   # the other alliance's colour
+                self.assertFalse(state.colour_matches(1, (0.2, 0.0)))    # far more own colour than it shows
+        # At 0.03 the own-colour bounds apply again.
+        self.assertFalse(self.state(0.03).colour_matches(1, (0.0, 0.0)))
+
+    def test_other_colour_the_robot_itself_shows_is_allowed(self):
+        # A red robot with blue parts: 0.03 of blue in its own first sightings.
+        state = IdentityRecovery(alliances={1: "red"})
+        for index in range(8):
+            state.observe_robot(1, index / 8, 3.0, 3.0, (0.1, 0.03))
+        self.assertAlmostEqual(state.other_colour_reference(1), 0.03)
+        self.assertTrue(state.colour_matches(1, (0.1, 0.09)))    # up to 3x its own blue
+        self.assertFalse(state.colour_matches(1, (0.1, 0.091)))
+        self.assertFalse(state.colour_matches(1, (0.05, 0.06)))  # still more blue than red: rejected
+        # A robot with no blue of its own keeps the 0.02 limit.
+        self.assertFalse(self.state(0.1).colour_matches(1, (0.1, 0.021)))
 
     def test_blue_alliance_uses_blue_as_own_colour(self):
         state = self.state(0.1, "blue")
@@ -435,12 +574,12 @@ class IdentityRecoveryRuleTests(unittest.TestCase):
         self.assertEqual(state.recover(2.0, {5: (3.0, 3.0)}, {1: 1}), [])
 
     def test_expiry_is_permanent_even_if_the_robot_is_seen_again(self):
-        self.assertEqual(self.recover(11.5, {}), [])
+        self.assertEqual(self.recover(21.5, {}), [])
         # Its own track comes back briefly, then it is lost once more.
-        self.recover(12.0, {1: (3.0, 3.0)})
-        self.state.observe_robot(1, 12.0, 3.0, 3.0)
-        self.recover(12.2, {})
-        self.assertEqual(self.recover(12.6, {5: (3.2, 3.0)}), [])
+        self.recover(22.0, {1: (3.0, 3.0)})
+        self.state.observe_robot(1, 22.0, 3.0, 3.0)
+        self.recover(22.2, {})
+        self.assertEqual(self.recover(22.6, {5: (3.2, 3.0)}), [])
 
     def test_previously_assigned_track_is_not_a_candidate(self):
         self.state.note_assignment(5)
@@ -453,9 +592,11 @@ class IdentityRecoveryRuleTests(unittest.TestCase):
         self.assertAlmostEqual(rules.gate_ft(-1.0), 1.0)
 
     def test_expired_robot_stays_lost_even_if_a_clean_candidate_appears(self):
-        self.assertEqual(self.recover(11.5, {}), [])
+        self.assertEqual(self.recover(20.9, {}), [])
+        self.assertNotIn(1, self.state.expired)
+        self.assertEqual(self.recover(21.5, {}), [])
         self.assertIn(1, self.state.expired)
-        self.assertEqual(self.recover(11.6, {5: (3.0, 3.0)}), [])
+        self.assertEqual(self.recover(21.6, {5: (3.0, 3.0)}), [])
 
     def test_each_of_two_lost_robots_with_its_own_clean_candidate_is_recovered(self):
         state = IdentityRecovery()

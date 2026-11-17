@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -18,6 +19,7 @@ CREATE TABLE IF NOT EXISTS cycles (id INTEGER PRIMARY KEY, robot_id INTEGER NOT 
 CREATE TABLE IF NOT EXISTS scoring_events (id INTEGER PRIMARY KEY, robot_id INTEGER REFERENCES robots(id) ON DELETE SET NULL, video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE, origin_robot_id INTEGER, t_s REAL NOT NULL, points INTEGER NOT NULL DEFAULT 0, confidence TEXT NOT NULL DEFAULT 'low', status TEXT NOT NULL DEFAULT 'flagged', source TEXT NOT NULL DEFAULT 'zone_crossing', event_type TEXT NOT NULL DEFAULT 'unclassified', scoring_alliance TEXT CHECK(scoring_alliance IN ('red','blue')));
 CREATE TABLE IF NOT EXISTS clips (id INTEGER PRIMARY KEY, scoring_event_id INTEGER REFERENCES scoring_events(id) ON DELETE CASCADE, path TEXT NOT NULL, start_t_s REAL NOT NULL, end_t_s REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, path TEXT NOT NULL, t_s REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS robot_reseeds (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, t_s REAL NOT NULL, x_px REAL NOT NULL, y_px REAL NOT NULL);
 """
 
 _UNCHANGED: Any = object()
@@ -261,6 +263,31 @@ class ProjectDatabase:
         )
         self.connection.commit()
         return _inserted_id(cursor)
+
+    def add_reseed(self, video_id: int, robot_id: int, t_s: float, x_px: float, y_px: float) -> int:
+        """Store a reviewer's mid-match click: robot ``robot_id`` is at (x_px, y_px) in source pixels at ``t_s``.
+
+        Applied on the next analysis run (``track_video(reseeds=...)``)."""
+        values = (float(t_s), float(x_px), float(y_px))
+        if not all(math.isfinite(value) for value in values) or values[0] < 0:
+            raise ValueError("A re-seed needs a finite, non-negative time and a finite position")
+        robot = self.connection.execute("SELECT 1 FROM robots WHERE id=? AND video_id=?", (robot_id, video_id)).fetchone()
+        if robot is None:
+            raise ValueError(f"Robot {robot_id} does not belong to video {video_id}")
+        cursor = self.connection.execute("INSERT INTO robot_reseeds(robot_id,t_s,x_px,y_px) VALUES (?,?,?,?)",
+                                         (robot_id, *values))
+        self.connection.commit()
+        return _inserted_id(cursor)
+
+    def delete_reseed(self, reseed_id: int) -> None:
+        with self.connection:
+            self.connection.execute("DELETE FROM robot_reseeds WHERE id=?", (reseed_id,))
+
+    def reseeds_for_video(self, video_id: int):
+        """Rows (id, robot_id, t_s, x_px, y_px) in time order."""
+        return self.connection.execute(
+            "SELECT s.id,s.robot_id,s.t_s,s.x_px,s.y_px FROM robot_reseeds s JOIN robots r ON r.id=s.robot_id "
+            "WHERE r.video_id=? ORDER BY s.t_s,s.id", (video_id,)).fetchall()
 
     def replace_tracks(self, rows: list[tuple[int, int, float, float, float, float]], clear_robot_ids: list[int] | None = None) -> None:
         with self.connection:
