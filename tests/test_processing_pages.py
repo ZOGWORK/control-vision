@@ -56,6 +56,15 @@ class JobStorageTests(SetupTest):
         self.assertEqual(self.db.clear_finished_jobs(), 1)
         self.assertEqual(self.db.retry_failed_jobs(), 1)
         self.assertEqual(self.db.processing_jobs()[0]["error"], None)
+        # A match retried from the live page already waits: Retry failed does not queue it a second time.
+        self.db.set_job_status(ids[1], "failed", "Stopped")
+        [again] = self.db.queue_jobs([second], 6, "yolo", None)
+        self.assertEqual(self.db.retry_failed_jobs(), 0)
+        # A match that failed twice is queued once.
+        self.db.set_job_status(again, "cancelled")
+        self.assertEqual(self.db.retry_failed_jobs(), 1)
+        waiting = [job for job in self.db.processing_jobs() if job["status"] == "queued"]
+        self.assertEqual([int(job["id"]) for job in waiting], [again])
 
 
 class RunLogTests(unittest.TestCase):
