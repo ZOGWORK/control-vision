@@ -1199,32 +1199,47 @@ class MainWindow(QMainWindow):
             self.queue_page.set_runner_state(self._queue_job, self._queue_paused)
             return
         if _video_switch_blocked_quietly(self):
-            return  # Another run is active; the queue continues when it ends.
-        job = self.db.next_queued_job()
-        if job is None:
+            # Nothing restarts the queue when that run ends, so say so rather than wait silently.
             self._queue_paused = True
             self.queue_page.set_runner_state(None, True)
-            self._show_status("Processing queue finished.", "success")
+            self._show_status("Queue paused: another run is in progress. Press Start queue when it ends.", "pending")
             return
-        problem = self._job_problem(job)
-        if problem is None:
-            self.load_saved_video_id(int(job["video_id"]))
-            if self.video_id is None or int(self.video_id) != int(job["video_id"]):
-                problem = "Could not open this match."
-        if problem is not None:
-            self.db.set_job_status(int(job["id"]), "failed", problem)
-            self.queue_page.refresh()
-            QTimer.singleShot(0, self._run_next_job)
+        try:
+            job = self.db.next_queued_job()
+            if job is None:
+                self._queue_paused = True
+                self.queue_page.set_runner_state(None, True)
+                self._show_status("Processing queue finished.", "success")
+                return
+            problem = self._job_problem(job)
+            if problem is None:
+                self.load_saved_video_id(int(job["video_id"]))
+                if self.video_id is None or int(self.video_id) != int(job["video_id"]):
+                    problem = "Could not open this match."
+            if problem is not None:
+                self.db.set_job_status(int(job["id"]), "failed", problem)
+                self.queue_page.refresh()
+                QTimer.singleShot(0, self._run_next_job)
+                return
+            self._queue_job = int(job["id"])
+            self._queue_saved_settings = (self.sample_rate.currentText(), self.tracking_mode.currentIndex(),
+                                          self.model_path_edit.text())
+            self.sample_rate.setCurrentText(str(job["sample_fps"]))
+            self.tracking_mode.setCurrentIndex(max(0, self.tracking_mode.findData(job["tracking_mode"])))
+            self.model_path_edit.setText(job["model_path"] or "")
+            self.db.set_job_status(self._queue_job, "running")
+            self.queue_page.set_runner_state(self._queue_job, False)
+            self.process()
+        except Exception as exc:  # A job that cannot start must not leave the queue stuck "running".
+            message = f"Processing could not start: {exc}"
+            # Pause rather than move on: the same fault (a database error, say) would fail every job in turn.
+            self._queue_paused = True
+            if self._queue_job is not None:
+                self._queue_job_finished("failed", message)
+            else:
+                self.queue_page.set_runner_state(None, True)
+            self._show_status(f"Queue paused. {message}", "danger")
             return
-        self._queue_saved_settings = (self.sample_rate.currentText(), self.tracking_mode.currentIndex(),
-                                      self.model_path_edit.text())
-        self.sample_rate.setCurrentText(str(job["sample_fps"]))
-        self.tracking_mode.setCurrentIndex(max(0, self.tracking_mode.findData(job["tracking_mode"])))
-        self.model_path_edit.setText(job["model_path"] or "")
-        self._queue_job = int(job["id"])
-        self.db.set_job_status(self._queue_job, "running")
-        self.queue_page.set_runner_state(self._queue_job, False)
-        self.process()
         if not self._processing_active:
             self._queue_job_finished("failed", "Processing could not start.")
 
