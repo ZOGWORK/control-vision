@@ -306,8 +306,18 @@ def missing_robot_labels(robots, robot_ids, track_rows) -> list[str]:
 
 
 def _video_switch_blocked_quietly(window) -> bool:
-    """Whether a run is active, without telling the user (for background refreshes)."""
-    return bool(getattr(window, "_processing_active", False) or getattr(window, "_ocr_active", False))
+    """Whether any run is active (the same runs _video_switch_blocked checks), without telling the user."""
+    if (getattr(window, "_processing_active", False) or getattr(window, "_ocr_active", False)
+            or getattr(window, "_live_active", False)):
+        return True
+    for thread in (getattr(window, "_thread", None), getattr(window, "_ocr_thread", None),
+                   getattr(window, "_live_thread", None)):
+        try:
+            if thread is not None and thread.isRunning():
+                return True
+        except RuntimeError:  # Qt already deleted a finished thread.
+            continue
+    return False
 
 
 def _video_switch_blocked(window) -> bool:
@@ -1084,6 +1094,8 @@ class MainWindow(QMainWindow):
     def _continue_to_processing(self, video_id: int):
         if self.video_id is None or int(self.video_id) != int(video_id):
             self.load_saved_video_id(int(video_id))
+        if self.video_id is None or int(self.video_id) != int(video_id):
+            return  # A run is active (already explained): do not show another match's processing.
         self.tabs.setCurrentIndex(1)
 
     # ----- Projects: library, dashboard and the new project wizard -----
