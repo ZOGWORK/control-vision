@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import cv2
@@ -294,6 +295,18 @@ class SplitterTests(SetupTest):
         self.assertEqual(projects, [self.project])
         self.assertIsNone(page.worker)
 
+    def test_closing_a_playing_stream_resets_play(self):
+        from control_vision.app.pages.splitter import SplitterPage
+        page = SplitterPage()
+        self.addCleanup(page.close_source)
+        page.set_project(self.db, self.project, self.root)
+        page.open_source(write_video(self.root / "stream.mp4", seconds=3))
+        page.toggle_play()
+        self.assertEqual(page.play_btn.text(), "Pause")
+        page.close_source()
+        self.assertEqual(page.play_btn.text(), "Play")
+        self.assertFalse(page.timer.isActive())
+
     def test_detection_says_it_is_not_available(self):
         from control_vision.app.pages.splitter import SplitterPage
         page = SplitterPage()
@@ -560,6 +573,39 @@ class WindowSetupTests(SetupTest):
             self.window.open_in_calibrate(second)
         self.assertEqual(self.window.tabs.currentIndex(), mw.CALIBRATE_TAB)
         self.assertEqual(int(page.video["id"]), second)
+
+    def test_saving_during_live_scoring_stays_quiet(self):
+        from control_vision.app import main_window as mw
+        window = self.window
+        video, _ = self.add_video()
+        window.db, window.project_id = self.db, self.project
+        window.refresh_home()
+        window.load_saved_video_id(video)
+        self.assertTrue(mw._video_switch_blocked_quietly(SimpleNamespace(_live_active=True)))
+        window._live_active = True
+        self.addCleanup(setattr, window, "_live_active", False)
+        with patch.object(mw.QMessageBox, "information") as dialog, \
+                patch.object(window, "load_saved_video_id") as reload:
+            window._setup_saved(video)
+        dialog.assert_not_called()
+        reload.assert_not_called()
+
+    def test_continue_does_not_show_another_match_while_a_run_is_active(self):
+        from control_vision.app import main_window as mw
+        window = self.window
+        first, _ = self.add_video("Q1.mp4")
+        second, _ = self.add_video("Q2.mp4")
+        window.db, window.project_id = self.db, self.project
+        window.refresh_home()
+        window.load_saved_video_id(first)
+        window.tabs.setCurrentIndex(mw.IDENTITY_TAB)
+        window._processing_active = True
+        self.addCleanup(setattr, window, "_processing_active", False)
+        with patch.object(mw.QMessageBox, "information") as dialog:
+            window._continue_to_processing(second)
+        dialog.assert_called_once()  # The user is told why.
+        self.assertEqual(int(window.video_id), first)
+        self.assertEqual(window.tabs.currentIndex(), mw.IDENTITY_TAB)
 
     def test_damaged_calibration_does_not_block_opening(self):
         window = self.window
