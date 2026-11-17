@@ -1,6 +1,7 @@
 """Page 3 — New project wizard: four steps, nothing saved until Create Project."""
 from __future__ import annotations
 
+import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -28,6 +29,11 @@ class WizardVideo:
     size: int | None = None
     metadata: dict | None = None
     error: str | None = None
+
+    @property
+    def usable(self) -> bool:
+        """Readable when it was added and still there now."""
+        return not self.error and bool(self.metadata) and self.path.is_file()
 
     def describe(self) -> str:
         parts = [self.path.name]
@@ -88,7 +94,7 @@ def step_problem(step: int, spec: ProjectSpec, existing_names: set[str], models:
             return "That folder already holds a project — choose another"
         return None
     if step == 1:
-        if not [video for video in spec.videos if not video.error]:
+        if not [video for video in spec.videos if video.usable]:
             return "Add at least 1 video"
         return None
     if step == 2:
@@ -106,13 +112,23 @@ def create_project(spec: ProjectSpec) -> Path:
     """Write the project: folder, database, details, video paths (never copies) and model choice."""
     from control_vision.storage.database import ProjectDatabase
 
+    from control_vision.app.library import remove_partial_database
+
     folder = Path(spec.folder)
     db_path = folder / "control_vision.sqlite"
     if db_path.exists():
         raise FileExistsError(f"{db_path} already exists.")
-    folder.mkdir(parents=True, exist_ok=True)
-    database = ProjectDatabase(db_path)
+    created_folder = not folder.exists()
+    run_logs, settings_path = folder / "run_logs", folder / "settings.json"
+    created_logs, created_settings = not run_logs.exists(), not settings_path.exists()
+    database = None
     try:
+        # The side files first, so a folder that cannot take them never gets a database.
+        folder.mkdir(parents=True, exist_ok=True)
+        run_logs.mkdir(exist_ok=True)
+        settings = {"model_path": spec.model.path if spec.model else "", "tracking_mode": "yolo"}
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        database = ProjectDatabase(db_path)
         project_id = database.add_project(spec.name.strip())
         database.set_project_details(
             project_id, event_name=spec.event_name.strip(),
@@ -122,15 +138,27 @@ def create_project(spec: ProjectSpec) -> Path:
             model_path=spec.model.path if spec.model else None, last_opened=now_iso())
         code = normalise_event_code(spec.event_code) if spec.event_code else None
         for video in spec.videos:
-            if video.error or not video.metadata:
+            if not video.usable:
                 continue
             video_id = database.add_video(project_id, video.path, video.metadata, code, None)
             database.set_video_details(video_id, file_size=video.size)
-    finally:
         database.close()
-    (folder / "run_logs").mkdir(exist_ok=True)
-    settings = {"model_path": spec.model.path if spec.model else "", "tracking_mode": "yolo"}
-    (folder / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        database = None
+    except BaseException:
+        # Leave the folder as it was, so the same folder can be used on a retry.
+        if database is not None:
+            database.close()
+        remove_partial_database(db_path)
+        for path, created in ((settings_path, created_settings),):
+            if created:
+                path.unlink(missing_ok=True)
+        for path, created in ((run_logs, created_logs), (folder, created_folder)):
+            if created:
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
+        raise
     return db_path
 
 
@@ -277,6 +305,7 @@ class NewProjectWizard(QWidget):
         self.video_list = DropList()
         self.video_list.setAccessibleName("Videos to add")
         self.video_list.files_dropped.connect(self.add_videos)
+        self.video_list.currentRowChanged.connect(self._sync)
         layout.addWidget(self.video_list, 1)
         row = QHBoxLayout()
         row.addWidget(widgets.button("Browse…", "primary", on_click=self._browse_videos))
@@ -345,6 +374,7 @@ class NewProjectWizard(QWidget):
         self.youtube_status.hide()
         self.error.hide()
         self._refresh_videos()
+        self.model_list.clear()  # Otherwise the refresh would restore the last pick.
         self._refresh_models()
         self._show_step()
 
@@ -373,6 +403,7 @@ class NewProjectWizard(QWidget):
             theme.set_state(number, state)
             number.setText("✓" if index < self.step else str(index + 1))
         if self.step == 3:
+            self._recheck_videos()
             self._refresh_summary()
         if self.step == 2:
             self._refresh_models()
@@ -405,7 +436,15 @@ class NewProjectWizard(QWidget):
         self.reset()
         self.cancelled.emit()
 
+    def _recheck_videos(self):
+        """Mark videos that were moved or deleted after they were added."""
+        for video in self.videos:
+            if not video.error and not video.path.is_file():
+                video.error = "File moved or deleted"
+        self._refresh_videos()
+
     def create(self):
+        self._recheck_videos()
         problems = [p for p in (self.problem(index) for index in range(3)) if p]
         if problems:
             self._sync()
@@ -537,17 +576,21 @@ class NewProjectWizard(QWidget):
 
     def _refresh_summary(self):
         spec = self.spec()
-        usable = [video for video in spec.videos if not video.error]
+        usable = [video for video in spec.videos if video.usable]
         total = sum(video.duration_s or 0 for video in usable)
         skipped = len(spec.videos) - len(usable)
+        # Names and paths are typed by the user: escape them so "&" or "<" show as written.
+        event = html.escape(spec.event_name.strip())
+        if spec.event_code:
+            event += f" ({html.escape(normalise_event_code(spec.event_code))})"
         lines = [
-            f"<b>Name</b>: {spec.name.strip()}",
-            f"<b>Event</b>: {spec.event_name.strip()}" + (f" ({normalise_event_code(spec.event_code)})" if spec.event_code else ""),
-            f"<b>Date</b>: {spec.event_date}",
-            f"<b>Season</b>: {SEASON}",
+            f"<b>Name</b>: {html.escape(spec.name.strip())}",
+            f"<b>Event</b>: {event}",
+            f"<b>Date</b>: {html.escape(spec.event_date)}",
+            f"<b>Season</b>: {html.escape(SEASON)}",
             f"<b>Videos</b>: {len(usable)}, total {int(total // 60)} min {int(total % 60)} s"
-            + (f" ({skipped} unreadable file(s) will be skipped)" if skipped else ""),
-            f"<b>Model</b>: {spec.model.name if spec.model else '—'}",
-            f"<b>Folder</b>: {spec.folder}",
+            + (f" ({skipped} unreadable or missing file(s) will be skipped)" if skipped else ""),
+            f"<b>Model</b>: {html.escape(spec.model.name) if spec.model else '—'}",
+            f"<b>Folder</b>: {html.escape(str(spec.folder))}",
         ]
         self.summary.setText("<br>".join(lines))
