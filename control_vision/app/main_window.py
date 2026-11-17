@@ -1058,16 +1058,20 @@ class MainWindow(QMainWindow):
         self.splitter_page.open_source(Path(path))
 
     def open_in_calibrate(self, video_id: int):
+        page = self.calibrate_page
+        if page.video is None or int(page.video["id"]) != int(video_id):
+            if not page.confirm_discard():
+                return  # Cancel keeps the user where they were.
+            page.load_video(int(video_id))
         self.tabs.setCurrentIndex(CALIBRATE_TAB)
-        if self.calibrate_page.video is None or int(self.calibrate_page.video["id"]) != int(video_id):
-            if self.calibrate_page.confirm_discard():
-                self.calibrate_page.load_video(int(video_id))
 
     def open_in_identity(self, video_id: int):
+        page = self.identity_page
+        if page.video is None or int(page.video["id"]) != int(video_id):
+            if not page.confirm_discard():
+                return  # Cancel keeps the user where they were.
+            page.load_video(int(video_id))
         self.tabs.setCurrentIndex(IDENTITY_TAB)
-        if self.identity_page.video is None or int(self.identity_page.video["id"]) != int(video_id):
-            if self.identity_page.confirm_discard():
-                self.identity_page.load_video(int(video_id))
 
     def _setup_saved(self, video_id: int):
         """Calibration or robots changed in the database: reload them if that video is the one loaded."""
@@ -2695,6 +2699,9 @@ class MainWindow(QMainWindow):
         if self.current_time >= self.duration: self.timer.stop()
 
     def closeEvent(self, event):
+        if not self.setup_edits_allow_leaving():
+            event.ignore()
+            return
         for worker, thread, done_slot, failed_slot in (
             (self._worker, self._thread, self.processing_done, self.processing_failed),
             (self._ocr_worker, self._ocr_thread, self.scoreboard_ocr_done, self.scoreboard_ocr_failed),
