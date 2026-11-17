@@ -9,8 +9,8 @@ import numpy as np
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QIntValidator, QPainter, QPen
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QSlider,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
+    QMessageBox, QSlider, QVBoxLayout, QWidget,
 )
 
 from control_vision.app import theme, widgets
@@ -23,6 +23,8 @@ ROBOTS_PER_MATCH = 4
 # click on has to come from that window.
 SEED_WINDOW_S = 3.0
 POSITIONS = (("Not set", None), ("Left", "left"), ("Right", "right"))
+# Later corrections are drawn on the frame while the slider is this close to their time.
+CORRECTION_SHOW_S = 0.5
 
 
 @dataclass
@@ -94,14 +96,20 @@ class IdentityCanvas(FrameView):
         self.entries: list[RobotEntry] = []
         self.current = 0
         self.loupe_enabled = True
+        # Later-corrections mode: (x, y, robot index) of the corrections near the shown time, instead of the seeds.
+        self.corrections: list[tuple[float, float, int]] | None = None
 
     def paint_overlay(self, painter: QPainter) -> None:
         colours = tokens()
         font = QFont(painter.font()); font.setBold(True); painter.setFont(font)
-        for index, entry in enumerate(self.entries):
-            if entry.seed is None or entry.absent:
-                continue
-            point = self.to_widget(*entry.seed)
+        if self.corrections is not None:
+            marks = [(x, y, index) for x, y, index in self.corrections if index < len(self.entries)]
+        else:
+            marks = [(*entry.seed, index) for index, entry in enumerate(self.entries)
+                     if entry.seed is not None and not entry.absent]
+        for x, y, index in marks:
+            entry = self.entries[index]
+            point = self.to_widget(x, y)
             colour = {"red": colours.red, "blue": colours.blue}.get(entry.alliance, colours.text)
             if index == self.current:
                 painter.setPen(QPen(QColor(colours.accent), 3))
@@ -242,6 +250,7 @@ class IdentityPage(QWidget):
         self.video: dict | None = None
         self.entries = [RobotEntry() for _ in range(ROBOTS_PER_MATCH)]
         self.saved_entries: list[RobotEntry] = []
+        self.corrections: list[dict] = []
         self.dirty = False
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -260,7 +269,20 @@ class IdentityPage(QWidget):
         video_label.setBuddy(self.video_combo)
         self.video_combo.activated.connect(self._video_chosen)
         top.addWidget(self.video_combo)
-        top.addWidget(widgets.label(f"Use a clearer frame (first {SEED_WINDOW_S:.0f} s)", role="muted"))
+        self.start_mode = widgets.button("Start positions")
+        self.later_mode = widgets.button("Later corrections")
+        self.start_mode.setToolTip("Click each robot where it starts the match")
+        self.later_mode.setToolTip("When analysis loses or mixes up a robot, click where it really is at a later time. "
+                                   "Corrections apply the next time the match is processed.")
+        self.modes = QButtonGroup(self)
+        for button in (self.start_mode, self.later_mode):
+            button.setCheckable(True)
+            self.modes.addButton(button)
+            top.addWidget(button)
+        self.start_mode.setChecked(True)
+        self.modes.buttonClicked.connect(lambda *_: self._mode_changed())
+        self.slider_hint = widgets.label(f"Use a clearer frame (first {SEED_WINDOW_S:.0f} s)", role="muted")
+        top.addWidget(self.slider_hint)
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setRange(0, int(SEED_WINDOW_S * 10))
         self.frame_slider.setAccessibleName("Frame to assign robots on")
@@ -271,6 +293,7 @@ class IdentityPage(QWidget):
         top.addWidget(self.frame_slider, 1)
         self.frame_time = widgets.label("0.0 s", role="muted")
         self.frame_slider.valueChanged.connect(lambda value: self.frame_time.setText(f"{value / 10:.1f} s"))
+        self.frame_slider.valueChanged.connect(lambda *_: self._show_corrections())
         top.addWidget(self.frame_time)
         body.addLayout(top)
 
@@ -289,6 +312,20 @@ class IdentityPage(QWidget):
             card.swap.connect(self.swap)
             cards.addWidget(card, 1)
         body.addLayout(cards)
+
+        self.corrections_box = QWidget()
+        corrections = QHBoxLayout(self.corrections_box)
+        corrections.setContentsMargins(0, 0, 0, 0)
+        self.correction_list = QListWidget()
+        self.correction_list.setMaximumHeight(110)
+        self.correction_list.setAccessibleName("Later corrections")
+        self.correction_list.itemActivated.connect(self._go_to_correction)
+        self.correction_list.currentRowChanged.connect(lambda *_: self._render())
+        corrections.addWidget(self.correction_list, 1)
+        self.delete_correction_btn = widgets.button("Delete correction", on_click=self.delete_correction)
+        corrections.addWidget(self.delete_correction_btn, 0, Qt.AlignmentFlag.AlignTop)
+        body.addWidget(self.corrections_box)
+        self.corrections_box.setVisible(False)
 
         bottom = QHBoxLayout()
         self.status = widgets.label("", wrap=True)
@@ -382,6 +419,7 @@ class IdentityPage(QWidget):
         if index >= 0:
             self.video_combo.setCurrentIndex(index)
         self._load_saved(int(video_id))
+        self._set_slider_range()
         self.frame_slider.blockSignals(True); self.frame_slider.setValue(0); self.frame_slider.blockSignals(False)
         self.frame_time.setText("0.0 s")
         path = Path(row["path"])
@@ -390,6 +428,7 @@ class IdentityPage(QWidget):
         self.canvas.set_frame(frame)
         self.dirty = False
         self.current = next((i for i, entry in enumerate(self.entries) if entry.empty), 0)
+        self._load_corrections()
         self._render()
         return True
 
@@ -424,6 +463,9 @@ class IdentityPage(QWidget):
         self._render()
 
     def _frame_clicked(self, x: float, y: float) -> None:
+        if self.later_mode.isChecked():
+            self.add_correction(x, y)
+            return
         for index, entry in enumerate(self.entries):
             if entry.seed is not None and not entry.absent:
                 point = self.canvas.to_widget(*entry.seed)
@@ -471,6 +513,14 @@ class IdentityPage(QWidget):
         has_video = self.video is not None and self.canvas.frame is not None
         if self.video is None:
             message, tone, savable = "Import a video first.", "info", False
+        elif self.later_mode.isChecked():
+            count = len(self.corrections)
+            if not self.correction_robots():
+                message, tone = "Save the robots' start clicks first; then you can correct them later in the match.", "pending"
+            else:
+                message, tone = (f"Select a robot card, move to the moment it is lost or mixed up, and click where it "
+                                 f"touches the floor. {count} correction{'s' if count != 1 else ''} saved; they apply "
+                                 "the next time the match is processed."), "info"
         elif has_video and self.dirty:
             message += " Not saved yet."
         theme.set_tone(self.status, tone)
@@ -479,8 +529,119 @@ class IdentityPage(QWidget):
                                     "Nothing new to save" if savable else "Fix the robots marked above first")
         saved_ready = not self.dirty and any(entry.complete and not entry.absent for entry in self.entries)
         widgets.disable_with_reason(self.next_btn, saved_ready, "Save at least one visible robot first")
-        widgets.disable_with_reason(self.clear_btn, self.entries[self.current].seed is not None,
-                                    "This robot has no marker")
+        widgets.disable_with_reason(self.clear_btn, self.entries[self.current].seed is not None
+                                    and not self.later_mode.isChecked(), "This robot has no marker")
+        widgets.disable_with_reason(self.delete_correction_btn, self.correction_list.currentItem() is not None,
+                                    "Select a correction in the list")
+
+    # ----- later corrections -----
+
+    def _duration(self) -> float:
+        if self.video is None or self.db is None:
+            return 0.0
+        row = self.db.connection.execute("SELECT duration_s FROM videos WHERE id=?", (int(self.video["id"]),)).fetchone()
+        return float(row["duration_s"] or 0.0) if row else 0.0
+
+    def _set_slider_range(self) -> None:
+        later = self.later_mode.isChecked()
+        self.frame_slider.setRange(0, int(self._duration() * 10) if later else int(SEED_WINDOW_S * 10))
+        self.slider_hint.setText("Any time in the match" if later else f"Use a clearer frame (first {SEED_WINDOW_S:.0f} s)")
+        self.frame_slider.setToolTip("Move to the moment the robot is lost or mixed up" if later else
+                                     f"Robots are matched to your clicks only in the first {SEED_WINDOW_S:.0f} seconds.")
+
+    def _mode_changed(self) -> None:
+        later = self.later_mode.isChecked()
+        if later and self.dirty and not self.confirm_discard():
+            self.start_mode.setChecked(True)
+            return
+        if later and self.dirty:
+            # Discarded: go back to what is saved, which is what corrections refer to.
+            self.entries = [RobotEntry(**vars(entry)) for entry in self.saved_entries]
+            self.dirty = False
+        self._set_slider_range()
+        self.corrections_box.setVisible(later)
+        self.frame_slider.setValue(min(self.frame_slider.value(), self.frame_slider.maximum()))
+        self._show_corrections()
+        self._frame_changed()
+        self._render()
+
+    def correction_robots(self) -> list[int]:
+        """Indexes of saved robots that were clicked at the start: only those can be corrected later."""
+        return [index for index, entry in enumerate(self.saved_entries)
+                if entry.id is not None and entry.seed is not None and not entry.absent]
+
+    def _robot_index(self) -> dict[int, int]:
+        return {entry.id: index for index, entry in enumerate(self.saved_entries) if entry.id is not None}
+
+    def _load_corrections(self) -> None:
+        if self.video is None or self.db is None:
+            self.corrections = []
+        else:
+            self.corrections = [dict(row) for row in self.db.reseeds_for_video(int(self.video["id"]))]
+        index_of = self._robot_index()
+        self.correction_list.blockSignals(True)
+        self.correction_list.clear()
+        for row in self.corrections:
+            index = index_of.get(row["robot_id"])
+            name = "Robot"
+            if index is not None:
+                team = self.saved_entries[index].team
+                name = f"Robot {index + 1}" + (f" · {team}" if team else "")
+            item = QListWidgetItem(f"{row['t_s']:.1f} s — {name} at ({row['x_px']:.0f}, {row['y_px']:.0f})")
+            item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
+            self.correction_list.addItem(item)
+        self.correction_list.blockSignals(False)
+        self._show_corrections()
+
+    def _show_corrections(self) -> None:
+        if not self.later_mode.isChecked():
+            self.canvas.corrections = None
+        else:
+            t_s = self.frame_slider.value() / 10
+            index_of = self._robot_index()
+            self.canvas.corrections = [(row["x_px"], row["y_px"], index_of[row["robot_id"]]) for row in self.corrections
+                                       if row["robot_id"] in index_of and abs(row["t_s"] - t_s) <= CORRECTION_SHOW_S]
+        self.canvas.update()
+
+    def add_correction(self, x: float, y: float) -> bool:
+        """Save that the selected robot is at (x, y) at the slider's time; applied on the next processing run."""
+        if self.video is None or self.db is None:
+            return False
+        if self.current not in self.correction_robots():
+            theme.set_tone(self.status, "pending")
+            self.status.setText(f"Robot {self.current + 1} has to be saved with a start click before it can be "
+                                "corrected later.")
+            return False
+        try:
+            self.db.add_reseed(int(self.video["id"]), int(self.saved_entries[self.current].id),
+                               self.frame_slider.value() / 10, x, y)
+        except (ValueError, sqlite3.Error) as exc:
+            theme.set_tone(self.status, "danger")
+            self.status.setText(f"✕ {exc}")
+            return False
+        self._load_corrections()
+        self._render()
+        return True
+
+    def delete_correction(self) -> None:
+        item = self.correction_list.currentItem()
+        if item is None or self.db is None:
+            return
+        try:
+            self.db.delete_reseed(int(item.data(Qt.ItemDataRole.UserRole)))
+        except (ValueError, sqlite3.Error) as exc:
+            theme.set_tone(self.status, "danger")
+            self.status.setText(f"✕ Could not delete the correction: {exc}")
+            return
+        self._load_corrections()
+        self._render()
+
+    def _go_to_correction(self, item: QListWidgetItem) -> None:
+        wanted = item.data(Qt.ItemDataRole.UserRole)
+        row = next((row for row in self.corrections if row["id"] == wanted), None)
+        if row is not None:
+            self.frame_slider.setValue(int(round(row["t_s"] * 10)))
+            self._frame_changed()
 
     # ----- saving -----
 
@@ -531,6 +692,7 @@ class IdentityPage(QWidget):
         self.saved_entries = [RobotEntry(**vars(entry)) for entry in self.entries]
         self.refresh_videos()
         self.video = dict(next(row for row in self.videos() if int(row["id"]) == int(self.video["id"])))
+        self._load_corrections()  # their labels name the robots just saved
         self._render()
         self.saved.emit(int(self.video["id"]))
         return True
