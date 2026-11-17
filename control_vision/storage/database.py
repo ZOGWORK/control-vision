@@ -187,9 +187,16 @@ class ProjectDatabase:
         "is_holdout": "INTEGER NOT NULL DEFAULT 0", "camera_view": "TEXT NOT NULL DEFAULT 'unknown'",
         "file_size": "INTEGER",
     }
+    # A robot marked absent has no seed click; processing only follows seeded robots.
+    ROBOT_DETAIL_COLUMNS = {
+        "start_position": "TEXT",
+        "absent": "INTEGER NOT NULL DEFAULT 0",
+    }
+    START_POSITIONS = ("left", "right")
 
     def _migrate_details(self) -> None:
-        for table, columns in (("projects", self.PROJECT_DETAIL_COLUMNS), ("videos", self.VIDEO_DETAIL_COLUMNS)):
+        for table, columns in (("projects", self.PROJECT_DETAIL_COLUMNS), ("videos", self.VIDEO_DETAIL_COLUMNS),
+                               ("robots", self.ROBOT_DETAIL_COLUMNS)):
             existing = {row["name"] for row in self.connection.execute(f"PRAGMA table_info({table})")}
             for column, definition in columns.items():
                 if column not in existing:
@@ -294,6 +301,62 @@ class ProjectDatabase:
 
     def robots_for_video(self, video_id: int):
         return self.connection.execute("SELECT * FROM robots WHERE video_id=? ORDER BY id", (video_id,)).fetchall()
+
+    def calibration_for(self, video_id: int) -> tuple[list[list[float]], dict[str, Any]] | None:
+        """Saved corners (video pixels) and zones for a video, or None."""
+        row = self.connection.execute("SELECT corners_json,zones_json FROM calibrations WHERE video_id=?",
+                                      (video_id,)).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["corners_json"]), json.loads(row["zones_json"] or "{}")
+
+    def save_identity(self, video_id: int, entries: list[dict[str, Any]], mark_unprocessed: bool = False) -> list[int]:
+        """Save a match's robot identities in one transaction; returns the robot ids in entry order.
+
+        Each entry has team_number, alliance, start_position (or None), absent,
+        seed_x / seed_y (None when absent) and, for a robot already saved, its
+        id. Existing robots are updated in place so tracks, cycles and events
+        that point at them keep pointing at the right robot. Robots of this
+        video that are not in ``entries`` are deleted with their results.
+        With ``mark_unprocessed`` the video's results are marked out of date in
+        the same transaction, so robots and status can never disagree.
+        """
+        teams = [int(entry["team_number"]) for entry in entries]
+        if len(teams) != len(set(teams)):
+            raise ValueError("A team is assigned twice in this match.")
+        existing = {int(row["id"]) for row in self.robots_for_video(video_id)}
+        ids = []
+        with self.connection:
+            for entry in entries:
+                alliance = entry["alliance"]
+                if alliance not in ("red", "blue"):
+                    raise ValueError(f"Unknown alliance: {alliance}")
+                position = entry.get("start_position")
+                if position is not None and position not in self.START_POSITIONS:
+                    raise ValueError(f"Unknown starting position: {position}")
+                absent = bool(entry.get("absent"))
+                seed_x = None if absent else entry.get("seed_x")
+                seed_y = None if absent else entry.get("seed_y")
+                if not absent and (seed_x is None or seed_y is None):
+                    raise ValueError(f"Team {entry['team_number']} needs a click on the robot, or mark it not visible.")
+                values = (int(entry["team_number"]), alliance, None if seed_x is None else int(seed_x),
+                          None if seed_y is None else int(seed_y), position, int(absent))
+                robot_id = entry.get("id")
+                if robot_id is not None and int(robot_id) in existing:
+                    self.connection.execute(
+                        "UPDATE robots SET team_number=?,alliance=?,seed_x=?,seed_y=?,start_position=?,absent=? WHERE id=?",
+                        (*values, int(robot_id)))
+                    ids.append(int(robot_id))
+                else:
+                    cursor = self.connection.execute(
+                        "INSERT INTO robots(video_id,team_number,alliance,seed_x,seed_y,start_position,absent) "
+                        "VALUES (?,?,?,?,?,?,?)", (video_id, *values))
+                    ids.append(_inserted_id(cursor))
+            for robot_id in existing - set(ids):
+                self.connection.execute("DELETE FROM robots WHERE id=?", (robot_id,))
+            if mark_unprocessed:
+                self.connection.execute("UPDATE videos SET analysis_status='unprocessed' WHERE id=?", (video_id,))
+        return ids
 
     def tracks_for_video(self, video_id: int):
         return self.connection.execute(

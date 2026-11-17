@@ -152,12 +152,12 @@ class ShellWindowTests(unittest.TestCase):
         window = self.window
         self.assertIn("process the video", window.nav.item(window._nav_rows[4]).toolTip())
         window._set_results_enabled(True)
-        self.assertEqual(window.nav.item(window._nav_rows[4]).toolTip(), "Scoring timeline (Ctrl+6)")
+        self.assertEqual(window.nav.item(window._nav_rows[4]).toolTip(), "Scoring timeline")
         window._set_review_badge(2)
         window._sync_nav()
         self.assertIn("2 event(s) need review", window.nav.item(window._nav_rows[3]).toolTip())
         window._set_review_badge(0)
-        self.assertEqual(window.nav.item(window._nav_rows[3]).toolTip(), "Review queue (Ctrl+5)")
+        self.assertEqual(window.nav.item(window._nav_rows[3]).toolTip(), "Review queue (Ctrl+9)")
 
     def test_minimum_window_width_fits_every_panel(self):
         # Fixed and minimum widths only, so the check does not depend on installed fonts.

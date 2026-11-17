@@ -203,6 +203,9 @@ QFrame[card="true"][interactive="true"]:hover {{ border: 1px solid {t.text_muted
 QFrame[card="true"][selected="true"] {{ border: 2px solid {t.accent}; }}
 QFrame[card="true"][alliance="red"] {{ border: 2px solid {t.red}; }}
 QFrame[card="true"][alliance="blue"] {{ border: 2px solid {t.blue}; }}
+QFrame[card="true"][state="absent"] {{ border: 1px dashed {t.border}; background: {t.window}; }}
+/* Repeated after the alliance borders so a selected card always shows the volt outline. */
+QFrame[card="true"][selected="true"] {{ border: 2px solid {t.accent}; }}
 QLabel#Thumbnail {{ background: {t.canvas}; color: #FFFFFF; border-radius: 6px; font-weight: 700; }}
 QGroupBox {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: 8px;
     margin-top: 22px; padding: 12px 12px 10px 12px; font-weight: 700; }}
