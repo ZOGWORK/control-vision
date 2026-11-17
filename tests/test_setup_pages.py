@@ -115,6 +115,19 @@ class IdentityStorageTests(SetupTest):
         self.assertEqual(self.db.events_for_video(video)[0]["robot_id"], first[0])
         self.assertEqual(self.db.events_for_video(video)[0]["id"], event)
 
+    def test_identity_and_reprocess_flag_are_one_transaction(self):
+        video, _ = self.add_video()
+        self.db.save_identity(video, [{"team_number": 7, "alliance": "red", "seed_x": 5, "seed_y": 5}])
+        self.db.set_analysis_status(video, "ready")
+        status = lambda: self.db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (video,)).fetchone()[0]
+        with self.assertRaises(ValueError):  # Fails part-way: neither the robots nor the status change.
+            self.db.save_identity(video, [{"team_number": 7, "alliance": "blue", "seed_x": 5, "seed_y": 5},
+                                          {"team_number": 8, "alliance": "green", "seed_x": 1, "seed_y": 1}],
+                                  mark_unprocessed=True)
+        self.assertEqual((status(), self.db.robots_for_video(video)[0]["alliance"]), ("ready", "red"))
+        self.db.save_identity(video, [{"team_number": 7, "alliance": "blue", "seed_x": 5, "seed_y": 5}], mark_unprocessed=True)
+        self.assertEqual((status(), self.db.robots_for_video(video)[0]["alliance"]), ("unprocessed", "blue"))
+
     def test_identity_refuses_duplicates_and_missing_clicks(self):
         video, _ = self.add_video(real=False)
         with self.assertRaises(ValueError):
@@ -306,6 +319,52 @@ class SplitterTests(SetupTest):
         page.close_source()
         self.assertEqual(page.play_btn.text(), "Play")
         self.assertFalse(page.timer.isActive())
+
+    def splitter_with_a_confirmed_match(self):
+        from control_vision.app.pages import splitter
+        source = write_video(self.root / "stream.mp4", seconds=4)
+        page = splitter.SplitterPage()
+        self.addCleanup(page.close_source)
+        page.set_project(self.db, self.project, self.root)
+        page.open_source(source)
+        page.start_edit.setText("0:01"); page.end_edit.setText("0:03")
+        page.add_typed()
+        page.cards.setCurrentRow(0)
+        page.confirm_selected()
+        return splitter, page
+
+    def test_a_clip_that_cannot_be_read_is_removed(self):
+        splitter, page = self.splitter_with_a_confirmed_match()
+        with patch.object(splitter.ClipWorker, "start", lambda worker: worker.run()), \
+                patch("control_vision.pipeline.ingest.probe_video", side_effect=ValueError("unreadable")):
+            page.create_clips()
+        self.assertEqual(list((self.root / "matches").glob("*.mp4")), [])  # A retry is not blocked.
+        self.assertIsNone(page.worker)
+        with patch.object(splitter.ClipWorker, "start", lambda worker: worker.run()):
+            page.create_clips()
+        self.assertEqual(len(list((self.root / "matches").glob("*.mp4"))), 1)
+
+    def test_a_database_error_still_finishes_the_run(self):
+        import sqlite3
+        splitter, page = self.splitter_with_a_confirmed_match()
+        with patch.object(splitter.ClipWorker, "start", lambda worker: worker.run()), \
+                patch.object(self.db, "add_video", side_effect=sqlite3.OperationalError("database is locked")):
+            page.create_clips()
+        self.assertIsNone(page.worker)
+        self.assertTrue(page.create_btn.isEnabled())
+        self.assertIn("database is locked", page.message.text())
+        self.assertEqual(len(page.segments), 1)  # Not added, so still there to cut again.
+
+    def test_stopping_waits_for_cutting_and_adds_what_was_cut(self):
+        splitter, page = self.splitter_with_a_confirmed_match()
+        page.create_clips()  # A real background thread.
+        worker = page.worker
+        page.stop_clips()
+        self.assertIsNone(page.worker)
+        self.assertFalse(worker.isRunning())
+        cut = list((self.root / "matches").glob("*.mp4"))
+        rows = self.db.connection.execute("SELECT COUNT(*) FROM videos WHERE project_id=?", (self.project,)).fetchone()[0]
+        self.assertEqual(rows, len(cut))  # No cut file is left without its project row.
 
     def test_detection_says_it_is_not_available(self):
         from control_vision.app.pages.splitter import SplitterPage
@@ -510,6 +569,21 @@ class IdentityTests(SetupTest):
         status = self.db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (video,)).fetchone()[0]
         self.assertEqual(status, "unprocessed")
 
+    def test_a_database_error_on_save_is_reported(self):
+        import sqlite3
+        from control_vision.app.pages.identity import IdentityPage
+        video, _ = self.add_video()
+        page = IdentityPage()
+        page.set_project(self.db, self.project)
+        page.select(0)
+        page._frame_clicked(40, 60)
+        page.cards[0].team.setText("7"); page.cards[0].red.setChecked(True)
+        page._card_changed()
+        with patch.object(self.db, "save_identity", side_effect=sqlite3.OperationalError("database is locked")):
+            self.assertFalse(page.save())
+        self.assertIn("database is locked", page.status.text())
+        self.assertTrue(page.dirty)
+
     def test_robots_saved_elsewhere_are_shown(self):
         from control_vision.app.pages.identity import IdentityPage
         video, _ = self.add_video()
@@ -617,6 +691,15 @@ class WindowSetupTests(SetupTest):
             window.refresh_home()
         self.assertIn("could not read", status.call_args.args[0])
         self.assertIsNone(window.calibrate_page.db)
+
+    def test_closing_stops_clip_cutting_before_the_database_closes(self):
+        from PySide6.QtGui import QCloseEvent
+        window = self.window
+        calls = []
+        window.db = SimpleNamespace(close=lambda: calls.append("db_close"))
+        with patch.object(window.splitter_page, "stop_clips", side_effect=lambda: calls.append("stop_clips")):
+            window.closeEvent(QCloseEvent())
+        self.assertEqual(calls, ["stop_clips", "db_close"])
 
     def test_closing_the_app_asks_about_unsaved_setup_edits(self):
         from PySide6.QtGui import QCloseEvent
