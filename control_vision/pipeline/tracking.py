@@ -93,6 +93,21 @@ def _match_initial_seeds(seed_points, detections, assigned_robot_ids, assigned_t
     return best
 
 
+# A seed whose track vanishes inside the seed window moves to the one other
+# box covering at least this much of the smaller of the two boxes.
+SEED_RESEED_MIN_OVERLAP = 0.5
+
+
+def _overlap_of_smaller(a, b) -> float:
+    """Intersection area over the smaller box's area (1.0 when one box contains the other)."""
+    width = min(a[2], b[2]) - max(a[0], b[0])
+    height = min(a[3], b[3]) - max(a[1], b[1])
+    if width <= 0 or height <= 0:
+        return 0.0
+    smaller = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return width * height / smaller if smaller > 0 else 0.0
+
+
 # Highest class id that is a scoring element: 1-2 in the three-class schema,
 # 1-3 in the four-class one (train_yolo.SUPPORTED_CLASSES). Class 0 is robot.
 MAX_ELEMENT_CLASS_ID = 3
@@ -248,6 +263,8 @@ def track_video(
             Path(tracker_override.name).unlink(missing_ok=True)
         raise
     seed_to_track: dict[int, int] = {}
+    # Last box of each seeded robot inside the seed window.
+    seed_boxes: dict[int, tuple[float, float, float, float]] = {}
     recovery_alliances = {rid: str(value).strip().lower() for rid, value in (alliances or {}).items()}
     recovery = IdentityRecovery(alliances=recovery_alliances)
     if not alliances:
@@ -331,24 +348,48 @@ def track_video(
             if sampled == 29 and empty == 30:
                 raise RuntimeError("No robots were detected in the first 30 sampled frames. Check the video and robot model.")
             logger.info("Sampled frame %d (%.3fs): %d robot detections; %d scoring elements in ROI", frame_index, t_s, len(detections), len(roi_balls))
-            if not identities_seeded and detections and t_s <= seed_assignment_deadline_s:
-                max_distance = max(60.0, min(frame.shape[:2]) * 0.22)
-                seed_gate_px = max_distance
-                for robot_id, seed_x, seed_y in seed_points:
-                    for track_id, x, y, *_ in detections:
-                        distance = ((x - seed_x) ** 2 + (y - seed_y) ** 2) ** 0.5
-                        # The matcher only considers detections with a tracker ID.
-                        closest = closest_tracked if track_id >= 0 else closest_untracked
-                        closest[robot_id] = min(distance, closest.get(robot_id, distance))
-                matches = _match_initial_seeds(seed_points, detections, set(seed_to_track),
-                                               recovery.ever_assigned, max_distance)
-                for robot_id, (track_id, distance) in matches.items():
-                    seed_to_track[robot_id] = track_id
-                    recovery.note_assignment(track_id)
-                    logger.info("Seeded robot %d to detector track %d at %.1f px from click", robot_id, track_id, distance)
-                identities_seeded = len(seed_to_track) == len(robot_ids)
-                if matches:
-                    logger.info("Seeded %d of %d identities during initial %.1fs window", len(seed_to_track), len(robot_ids), seed_assignment_deadline_s)
+            if detections and t_s <= seed_assignment_deadline_s:
+                # A seeded track that vanishes inside the window was usually a
+                # second, briefly detected box on the same robot. Re-seed that
+                # robot to a box covering the same place; otherwise its real
+                # track, alive since before the robot was "last seen", could
+                # never be re-linked later.
+                visible_ids = {det[0] for det in detections if det[0] >= 0}
+                for robot_id, old_track in sorted(seed_to_track.items()):
+                    if old_track in visible_ids or robot_id not in seed_boxes:
+                        continue
+                    overlapping = [det[0] for det in detections
+                                   if det[0] >= 0 and det[0] not in recovery.ever_assigned
+                                   and _overlap_of_smaller(det[4], seed_boxes[robot_id]) >= SEED_RESEED_MIN_OVERLAP]
+                    # Exactly one candidate, or the robot keeps its seed.
+                    if len(overlapping) == 1:
+                        seed_to_track[robot_id] = overlapping[0]
+                        recovery.note_assignment(overlapping[0])
+                        recovery.forget_robot(robot_id)
+                        logger.info("Re-seeded robot %d from track %d, which vanished within the seed window, "
+                                    "to overlapping track %d", robot_id, old_track, overlapping[0])
+                if not identities_seeded:
+                    max_distance = max(60.0, min(frame.shape[:2]) * 0.22)
+                    seed_gate_px = max_distance
+                    for robot_id, seed_x, seed_y in seed_points:
+                        for track_id, x, y, *_ in detections:
+                            distance = ((x - seed_x) ** 2 + (y - seed_y) ** 2) ** 0.5
+                            # The matcher only considers detections with a tracker ID.
+                            closest = closest_tracked if track_id >= 0 else closest_untracked
+                            closest[robot_id] = min(distance, closest.get(robot_id, distance))
+                    matches = _match_initial_seeds(seed_points, detections, set(seed_to_track),
+                                                   recovery.ever_assigned, max_distance)
+                    for robot_id, (track_id, distance) in matches.items():
+                        seed_to_track[robot_id] = track_id
+                        recovery.note_assignment(track_id)
+                        logger.info("Seeded robot %d to detector track %d at %.1f px from click", robot_id, track_id, distance)
+                    identities_seeded = len(seed_to_track) == len(robot_ids)
+                    if matches:
+                        logger.info("Seeded %d of %d identities during initial %.1fs window", len(seed_to_track), len(robot_ids), seed_assignment_deadline_s)
+                for robot_id, track_id in seed_to_track.items():
+                    box = next((det[4] for det in detections if det[0] == track_id), None)
+                    if box is not None:
+                        seed_boxes[robot_id] = box
             visible: dict[int, tuple[float, float] | None] = {}
             boxes_by_track = {det[0]: det[4] for det in detections if det[0] >= 0}
             for tid, x, y, conf, _ in detections:
