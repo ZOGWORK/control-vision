@@ -72,9 +72,11 @@ def merge_segments(segments: list[Segment], index: int) -> list[Segment]:
     return [*segments[:index], merged, *segments[index + 2:]]
 
 
-def clip_name(source: Path, index: int, segment: Segment) -> str:
+def clip_name(source: Path, segment: Segment) -> str:
+    """Named by where the match starts in the stream, so it never depends on which splits are left."""
     match = re.sub(r"[^A-Za-z0-9_-]+", "", segment.match)
-    return f"{source.stem}-match{index + 1:02d}" + (f"-{match}" if match else "") + ".mp4"
+    start = format_clock(segment.start).replace(":", "-")
+    return f"{source.stem}-at{start}" + (f"-{match}" if match else "") + ".mp4"
 
 
 def load_draft(project_dir: Path, source: Path) -> list[Segment]:
@@ -617,9 +619,9 @@ class SplitterPage(QWidget):
             return
         out_dir = self.project_dir / "matches"
         jobs = []
-        for index, segment in enumerate(self.segments):
+        for segment in self.segments:
             if segment.confirmed:
-                output = out_dir / clip_name(self.source, index, segment)
+                output = out_dir / clip_name(self.source, segment)
                 if output.exists():
                     self._say(f"✕ {output.name} already exists in {out_dir}. Delete or move it first.", "danger")
                     return
