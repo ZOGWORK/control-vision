@@ -311,6 +311,8 @@ class CalibratePage(QWidget):
         self.frame_slider = QSlider(Qt.Orientation.Horizontal); self.frame_slider.setRange(0, 1000)
         self.frame_slider.setAccessibleName("Frame to calibrate on")
         self.frame_slider.sliderReleased.connect(self._frame_changed)
+        # Keys, the wheel and track clicks change the value without a release.
+        self.frame_slider.valueChanged.connect(self._slider_value)
         self.frame_slider.valueChanged.connect(self._frame_label)
         top.addWidget(self.frame_slider, 1)
         self.frame_time = widgets.label("00:00", role="muted")
@@ -381,6 +383,10 @@ class CalibratePage(QWidget):
         self.video_combo.blockSignals(False)
         if current is not None and self.video_combo.findData(current) >= 0:
             self.video_combo.setCurrentIndex(self.video_combo.findData(current))
+            if not self.dirty:
+                # It may have been calibrated elsewhere (Set up and process) since it was loaded.
+                self._load_saved(int(current))
+                self._corners_changed(mark_dirty=False)
         elif self.video_combo.count():
             self.load_video(self.video_combo.itemData(0))
         else:
@@ -422,11 +428,7 @@ class CalibratePage(QWidget):
         index = self.video_combo.findData(int(video_id))
         if index >= 0:
             self.video_combo.setCurrentIndex(index)
-        saved = self.db.calibration_for(int(video_id))
-        corners, zones = saved if saved else ([], {})
-        self.canvas.corners = [list(map(float, point)) for point in corners]
-        self.zones = dict(zones)
-        self.map.zones, self.map.selected = self.zones, None
+        self._load_saved(int(video_id))
         self.frame_slider.blockSignals(True); self.frame_slider.setValue(0); self.frame_slider.blockSignals(False)
         self._frame_label(0)
         path = Path(row["path"])
@@ -437,9 +439,21 @@ class CalibratePage(QWidget):
         self._corners_changed(mark_dirty=False)
         return True
 
+    def _load_saved(self, video_id: int) -> None:
+        saved = self.db.calibration_for(video_id)
+        corners, zones = saved if saved else ([], {})
+        self.canvas.corners = [list(map(float, point)) for point in corners]
+        self.zones = dict(zones)
+        self.map.zones, self.map.selected = self.zones, None
+        self.canvas.update()
+
     def _frame_label(self, value: int) -> None:
         duration = float(self.video["duration_s"] or 0) if self.video else 0.0
         self.frame_time.setText(format_clock(duration * value / 1000))
+
+    def _slider_value(self, _value: int) -> None:
+        if not self.frame_slider.isSliderDown():
+            self._frame_changed()
 
     def _frame_changed(self) -> None:
         if self.video is None:
