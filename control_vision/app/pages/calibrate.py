@@ -384,9 +384,13 @@ class CalibratePage(QWidget):
         elif self.video_combo.count():
             self.load_video(self.video_combo.itemData(0))
         else:
-            self.video = None
+            self.video, self.dirty = None, False
             self.canvas.placeholder = "Import a video first"
+            self.canvas.corners = []
             self.canvas.set_frame(None)
+            self.zones = {}
+            self.map.zones, self.map.selected, self.map.background = self.zones, None, None
+            self.map.update()
         self._sync()
 
     def _video_chosen(self, index: int) -> None:
