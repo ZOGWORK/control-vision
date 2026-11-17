@@ -131,7 +131,7 @@ class ProjectsPage(QWidget):
         self.archive_btn = widgets.button("Archive", on_click=self._archive_selected)
         self.export_btn = widgets.button("Export project .db", on_click=lambda: self._emit_selected(self.export_db))
         self.locate_btn = widgets.button("Locate file…", on_click=lambda: self._emit_selected(self.locate))
-        self.delete_btn = widgets.button("Delete…", "danger", on_click=lambda: self._emit_selected(self.delete))
+        self.delete_btn = widgets.button("Delete…", "danger", on_click=self._delete_selected)
         for action in (self.open_btn, self.duplicate_btn, self.archive_btn, self.export_btn, self.locate_btn):
             actions.addWidget(action)
         actions.addStretch(1)
@@ -212,6 +212,9 @@ class ProjectsPage(QWidget):
             widget.clear()
         for combo in (self.season, self.event, self.status):
             combo.setCurrentIndex(0)
+        # When every project is archived, clearing the filters must still show something.
+        if not self.visible() and any(summary.archived for summary in self._summaries):
+            self.show_archived.setChecked(True)
 
     def _render(self, *_):
         visible = self.visible()
@@ -274,6 +277,12 @@ class ProjectsPage(QWidget):
         if summary is not None:
             signal.emit(summary.path)
 
+    def _delete_selected(self):
+        """A missing file can only be removed from the list; anything else is deleted (after asking)."""
+        summary = self.selected()
+        if summary is not None:
+            (self.forget if summary.missing else self.delete).emit(summary.path)
+
     def _archive_selected(self):
         summary = self.selected()
         if summary is not None:
@@ -302,6 +311,11 @@ class ProjectsPage(QWidget):
         if summary.missing:
             menu.addAction("Locate file…", lambda: self.locate.emit(summary.path))
             menu.addAction("Remove from list", lambda: self.forget.emit(summary.path))
+        elif summary.unreadable:
+            # The file is there but is not a readable project: only list and file actions make sense.
+            menu.addAction("Remove from list", lambda: self.forget.emit(summary.path))
+            menu.addSeparator()
+            menu.addAction("Delete…", lambda: self.delete.emit(summary.path))
         else:
             menu.addAction("Open", lambda: self.open_project.emit(summary.path))
             menu.addAction("Duplicate", lambda: self.duplicate.emit(summary.path))
