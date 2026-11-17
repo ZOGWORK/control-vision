@@ -57,7 +57,7 @@ class ClockAndFileTests(SetupTest):
         self.assertEqual(parse_clock("1:23:45"), 5025)
         self.assertEqual(parse_clock("2:30"), 150)
         self.assertEqual(parse_clock("45.5"), 45.5)
-        for bad in ("", "1:2:3:4", "1:75", "abc", "-5"):
+        for bad in ("", "1:2:3:4", "1:75", "abc", "-5", "nan", "1:nan", "inf", "1:00:inf"):
             with self.assertRaises(ValueError):
                 parse_clock(bad)
 
@@ -255,6 +255,15 @@ class SplitterTests(SetupTest):
         self.assertEqual(Path(row["path"]).parent, self.root / "matches")
         self.assertEqual(len(page.segments), 1)  # The unconfirmed match stays to be checked.
         self.assertTrue(source.is_file())
+        # The remaining match gets its own name, not the first one's (names follow the start time).
+        page.cards.setCurrentRow(0)
+        page.confirm_selected()
+        with patch.object(splitter.ClipWorker, "start", lambda worker: worker.run()),                 patch.object(page, "clips_created") as created:
+            page.create_clips()
+        created.emit.assert_called_once()
+        self.assertEqual(len(list((self.root / "matches").glob("*.mp4"))), 2)
+        self.assertNotEqual(splitter.clip_name(source, splitter.Segment(1, 3)), splitter.clip_name(source, splitter.Segment(3.5, 5.5)))
+        self.assertEqual(splitter.clip_name(source, splitter.Segment(65, 90, "Q 7")), "stream-at01-05-Q7.mp4")
 
     def test_detection_says_it_is_not_available(self):
         from control_vision.app.pages.splitter import SplitterPage
@@ -312,6 +321,35 @@ class CalibrateTests(SetupTest):
         with patch.object(calibrate.QMessageBox, "question", return_value=calibrate.QMessageBox.StandardButton.Save):
             self.assertTrue(page.confirm_discard())
         self.assertIsNotNone(self.db.calibration_for(int(page.video["id"])))
+
+    def test_corner_drag_ends_when_released_over_the_black_bars(self):
+        import numpy as np
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        from control_vision.app.pages.calibrate import CornerCanvas
+        canvas = CornerCanvas()
+        canvas.resize(800, 300)  # A 4:3 frame here leaves black bars left and right.
+        canvas.set_frame(np.zeros((240, 320, 3), dtype=np.uint8))
+        canvas.corners = [[160.0, 120.0]]
+        canvas._press(160, 120)
+        self.assertEqual(canvas._dragging, 0)
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(5, 150))
+        self.assertIsNone(canvas._dragging)
+
+    def test_a_project_without_videos_shows_nothing_from_the_last_one(self):
+        from control_vision.app.pages.calibrate import CalibratePage
+        self.add_video("Q1.mp4")
+        page = CalibratePage()
+        page.set_project(self.db, self.project)
+        page.canvas.corners = [list(point) for point in CORNERS]
+        page._corners_changed()
+        page.add_zone("Hive", "scoring", [[5, 5], [7, 5], [7, 7], [5, 7]])
+        self.assertTrue(page.save())
+        empty = self.db.add_project("Empty")
+        page.set_project(self.db, empty)
+        self.assertIsNone(page.video)
+        self.assertEqual((page.canvas.corners, page.zones, page.map.zones), ([], {}, {}))
+        self.assertIsNone(page.map.background)
 
     def test_zone_names_are_checked(self):
         from control_vision.app.pages.calibrate import ZoneDialog, zone_type_for
@@ -387,6 +425,37 @@ class IdentityTests(SetupTest):
         self.assertEqual(status, "unprocessed")
         self.assertEqual([r["id"] for r in self.db.robots_for_video(video)], ids)
 
+    def test_processing_after_the_page_loaded_still_asks(self):
+        from control_vision.app.pages import identity
+        video, _ = self.add_video()
+        self.db.save_identity(video, [{"team_number": 7, "alliance": "red", "seed_x": 5, "seed_y": 5}])
+        page = identity.IdentityPage()
+        page.set_project(self.db, self.project)  # Loaded while still unprocessed.
+        self.db.set_analysis_status(video, "ready")  # Then processed elsewhere.
+        page.refresh_videos()
+        self.assertEqual(page.video["analysis_status"], "ready")
+        page.cards[0].blue.setChecked(True)
+        page._card_changed()
+        with patch.object(identity.QMessageBox, "question", return_value=identity.QMessageBox.StandardButton.Save) as asked:
+            self.assertTrue(page.save())
+        asked.assert_called_once()
+        status = self.db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (video,)).fetchone()[0]
+        self.assertEqual(status, "unprocessed")
+
+    def test_typing_after_a_click_goes_to_the_next_robot(self):
+        from control_vision.app.pages.identity import IdentityPage
+        self.add_video()
+        page = IdentityPage()
+        page.set_project(self.db, self.project)
+        page.show()
+        self.addCleanup(page.close)
+        page.cards[0].team.setText("21229"); page.cards[0].red.setChecked(True)
+        page._card_changed()
+        page.select(0)
+        page._frame_clicked(40, 60)
+        self.assertEqual(page.current, 1)
+        self.assertIs(page.focusWidget(), page.cards[1].team)
+
 
 class WindowSetupTests(SetupTest):
     def setUp(self):
@@ -398,8 +467,45 @@ class WindowSetupTests(SetupTest):
         self.window.model_store = library.ModelStore(self.root / "home")
 
     def tearDown(self):
+        self.window.calibrate_page.dirty = self.window.identity_page.dirty = False
         self.window.db = None
         self.window.close()
+
+    def calibrate_with_unsaved_corners(self):
+        window = self.window
+        first, _ = self.add_video("Q1.mp4")
+        second, _ = self.add_video("Q2.mp4")
+        window.db, window.project_id = self.db, self.project
+        window.refresh_home()
+        page = window.calibrate_page
+        page.load_video(first)
+        page.canvas.corners = [list(point) for point in CORNERS]
+        page._corners_changed()
+        return page, second
+
+    def test_cancel_keeps_the_user_on_their_page(self):
+        from control_vision.app import main_window as mw
+        from control_vision.app.pages import calibrate
+        page, second = self.calibrate_with_unsaved_corners()
+        self.window.tabs.setCurrentIndex(mw.IMPORT_TAB)
+        with patch.object(calibrate.QMessageBox, "question", return_value=calibrate.QMessageBox.StandardButton.Cancel):
+            self.window.open_in_calibrate(second)
+        self.assertEqual(self.window.tabs.currentIndex(), mw.IMPORT_TAB)
+        self.assertTrue(page.dirty)
+        with patch.object(calibrate.QMessageBox, "question", return_value=calibrate.QMessageBox.StandardButton.Discard):
+            self.window.open_in_calibrate(second)
+        self.assertEqual(self.window.tabs.currentIndex(), mw.CALIBRATE_TAB)
+        self.assertEqual(int(page.video["id"]), second)
+
+    def test_closing_the_app_asks_about_unsaved_setup_edits(self):
+        from PySide6.QtGui import QCloseEvent
+        from control_vision.app.pages import calibrate
+        self.calibrate_with_unsaved_corners()
+        event = QCloseEvent()
+        with patch.object(calibrate.QMessageBox, "question", return_value=calibrate.QMessageBox.StandardButton.Cancel):
+            self.window.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+        self.assertIsNotNone(self.window.db)
 
     def test_sidebar_lists_the_setup_pages_and_they_get_the_project(self):
         from control_vision.app import main_window as mw
