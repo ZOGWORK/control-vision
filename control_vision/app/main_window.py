@@ -1030,8 +1030,8 @@ class MainWindow(QMainWindow):
                     page.set_project(db, project_id, folder)
                 else:
                     page.set_project(db, project_id)
-        except (sqlite3.Error, TypeError, AttributeError, KeyError) as exc:
-            # A project the pages cannot read leaves them empty instead of breaking the window.
+        except (sqlite3.Error, TypeError, AttributeError, KeyError, ValueError) as exc:
+            # A project the pages cannot read (ValueError: damaged calibration JSON) leaves them empty instead of breaking the window.
             for page in pages:
                 if page is self.splitter_page:
                     page.set_project(None, None, None)
