@@ -116,6 +116,30 @@ class LibraryTests(TempFolderTest):
         store.forget(project)
         self.assertEqual(store.paths(), [Path("x.sqlite")])
 
+    def test_locating_a_file_already_listed_keeps_it_once(self):
+        store = library.ProjectLibrary(self.root / "home")
+        a, b = self.make_project(folder="a"), self.make_project(folder="b")
+        moved = self.root / "moved" / "control_vision.sqlite"
+        store.register(b); store.register(moved)
+        store.replace(moved, b)
+        self.assertEqual(store.paths(), [b.resolve()])
+
+    def test_a_failed_open_of_the_duplicate_leaves_no_file(self):
+        from unittest.mock import patch
+        source = self.make_project()
+        target = self.root / "copy" / "control_vision.sqlite"
+        target.parent.mkdir()
+        real_migrate = ProjectDatabase._migrate
+
+        def failing_migrate(database):
+            if Path(database.path) == target:
+                raise OSError("disk full")
+            return real_migrate(database)
+        with patch.object(ProjectDatabase, "_migrate", failing_migrate):
+            with self.assertRaises(OSError):
+                library.duplicate_project(source, target, "copy")
+        self.assertFalse(target.exists())
+
     def test_a_failed_duplicate_leaves_no_partial_file(self):
         from unittest.mock import patch
         source = self.make_project()
@@ -163,6 +187,15 @@ class ModelStoreTests(TempFolderTest):
         self.assertIsNone(bare.map50)
         self.assertEqual(store.active().id, bare.id)  # The first model becomes active.
         self.assertEqual(store.recommended()[0], None)
+
+    def test_a_damaged_models_file_still_takes_new_models(self):
+        store = library.ModelStore(self.root / "home")
+        store.file.parent.mkdir(parents=True)
+        store.file.write_text(json.dumps({"models": [1, "x", None], "active": 3}), encoding="utf-8")
+        self.assertEqual(store.versions(), [])
+        model = store.add_file(self.write_model("v1"))
+        store.set_active(model.id)
+        self.assertEqual(store.active().id, model.id)
 
     def test_recommendation_prefers_robot_recall(self):
         store = library.ModelStore(self.root / "home")
