@@ -287,6 +287,9 @@ def duplicate_project(source: Path, target: Path, new_name: str) -> Path:
     source, target = Path(source), Path(target)
     if target.exists():
         raise FileExistsError(f"{target} already exists.")
+    if not source.is_file():
+        # Opening a missing path would create an empty project there.
+        raise FileNotFoundError(f"{source} was not found.")
     original = ProjectDatabase(source)
     try:
         project = original.connection.execute("SELECT * FROM projects ORDER BY id LIMIT 1").fetchone()
@@ -400,7 +403,9 @@ class ModelStore:
         data = _read_json(self.file, {"models": [], "active": None})
         # As with projects.json, a damaged file must not break adding or choosing a model.
         models = data.get("models")
-        data["models"] = [entry for entry in models if isinstance(entry, dict)] if isinstance(models, list) else []
+        data["models"] = [entry for entry in models if isinstance(entry, dict)
+                          and all(isinstance(entry.get(key), str) and entry.get(key) for key in ("id", "name", "path"))
+                          ] if isinstance(models, list) else []
         if not isinstance(data.get("active"), str) or not data.get("active"):
             data["active"] = None
         return data
