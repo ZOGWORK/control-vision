@@ -593,6 +593,35 @@ class IdentityTests(SetupTest):
         self.assertEqual(self.db.reseeds_for_video(video), [])
         self.assertEqual(page.correction_list.count(), 0)
 
+    def test_correction_labels_follow_a_saved_team_change(self):
+        from control_vision.app.pages.identity import IdentityPage
+        video, _ = self.add_video()
+        ids = self.db.save_identity(video, [{"team_number": 7, "alliance": "red", "seed_x": 5, "seed_y": 5}])
+        self.db.add_reseed(video, ids[0], 1.0, 30, 40)
+        page = IdentityPage()
+        page.set_project(self.db, self.project)
+        self.assertIn("Robot 1 · 7", page.correction_list.item(0).text())
+        page.cards[0].team.setText("8")
+        page._card_changed()
+        self.assertTrue(page.save())
+        page.later_mode.click()
+        self.assertIn("Robot 1 · 8", page.correction_list.item(0).text())
+
+    def test_a_failed_delete_is_reported_not_raised(self):
+        import sqlite3
+        from control_vision.app.pages.identity import IdentityPage
+        video, _ = self.add_video()
+        ids = self.db.save_identity(video, [{"team_number": 7, "alliance": "red", "seed_x": 5, "seed_y": 5}])
+        self.db.add_reseed(video, ids[0], 1.0, 30, 40)
+        page = IdentityPage()
+        page.set_project(self.db, self.project)
+        page.later_mode.click()
+        page.correction_list.setCurrentRow(0)
+        with patch.object(self.db, "delete_reseed", side_effect=sqlite3.OperationalError("database is locked")):
+            page.delete_correction()
+        self.assertIn("Could not delete the correction: database is locked", page.status.text())
+        self.assertEqual(page.correction_list.count(), 1)
+
     def test_start_clicks_do_not_make_corrections(self):
         from control_vision.app.pages.identity import IdentityPage
         video, _ = self.add_video()

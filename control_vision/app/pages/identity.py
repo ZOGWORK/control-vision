@@ -627,7 +627,12 @@ class IdentityPage(QWidget):
         item = self.correction_list.currentItem()
         if item is None or self.db is None:
             return
-        self.db.delete_reseed(int(item.data(Qt.ItemDataRole.UserRole)))
+        try:
+            self.db.delete_reseed(int(item.data(Qt.ItemDataRole.UserRole)))
+        except (ValueError, sqlite3.Error) as exc:
+            theme.set_tone(self.status, "danger")
+            self.status.setText(f"✕ Could not delete the correction: {exc}")
+            return
         self._load_corrections()
         self._render()
 
@@ -687,6 +692,7 @@ class IdentityPage(QWidget):
         self.saved_entries = [RobotEntry(**vars(entry)) for entry in self.entries]
         self.refresh_videos()
         self.video = dict(next(row for row in self.videos() if int(row["id"]) == int(self.video["id"])))
+        self._load_corrections()  # their labels name the robots just saved
         self._render()
         self.saved.emit(int(self.video["id"]))
         return True
