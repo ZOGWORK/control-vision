@@ -113,6 +113,15 @@ class ProjectsPageTests(PageTest):
         self.assertEqual(len(forgotten), 1)
         self.assertEqual(deleted, [])
 
+    def test_unreadable_files_match_no_status_filter(self):
+        from control_vision.app import library
+        from control_vision.app.pages.projects import matches_filter
+        junk = self.root / "junk.sqlite"
+        junk.write_bytes(b"not a database")
+        summary = library.summarize_project(junk)
+        self.assertTrue(matches_filter(summary, "", None, None, "", None, False))
+        self.assertFalse(matches_filter(summary, "", None, None, "", "Not processed", False))
+
     def test_clear_filters_reveals_a_fully_archived_library(self):
         from control_vision.app import library
         from control_vision.app.pages.projects import ProjectsPage
@@ -293,6 +302,19 @@ class WindowProjectTests(PageTest):
         self.assertIs(window.theme_combo.window(), window.settings_dialog)
         window.settings_dialog.reject()
         self.assertEqual(window.top_scout.text(), "Local only")
+
+    def test_question_mark_types_in_fields_and_opens_help_elsewhere(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        window = self.window
+        window.show()
+        with patch.object(window, "show_shortcuts") as shown:
+            window.top_search.setFocus()
+            QTest.keyClicks(window.top_search, "?")
+            self.assertEqual(window.top_search.text(), "?")
+            shown.assert_not_called()
+            QTest.keyClick(window, Qt.Key.Key_Question, Qt.KeyboardModifier.ShiftModifier)
+            shown.assert_called_once()
 
     def test_opening_from_the_library_registers_and_updates_the_top_bar(self):
         window = self.window
