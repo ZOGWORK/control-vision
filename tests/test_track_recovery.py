@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 
 from control_vision.pipeline.identity_recovery import IdentityRecovery, RecoveryRules
-from control_vision.pipeline.tracking import _tracker_config, track_video
+from control_vision.pipeline.tracking import _overlap_of_smaller, _tracker_config, track_video
 
 # 120 px square mapped to the 12 ft field: 10 px per foot.
 CORNERS = [[0, 0], [120, 0], [120, 120], [0, 120]]
@@ -248,6 +248,49 @@ class IdentityRecoveryRunTests(unittest.TestCase):
         self.assertEqual(len(recovered(messages)), 1)
         positions = {(round(row[3], 1), round(row[4], 1)) for row in rows if row[0] == 1}
         self.assertNotIn((8.0, 8.0), positions)
+
+
+def reseeded(messages):
+    return [message for message in messages if message.startswith("Re-seeded robot")]
+
+
+class SeedWindowReseedTests(unittest.TestCase):
+    """A seed that lands on a short-lived duplicate box moves to the robot's real track."""
+
+    def test_seed_on_a_vanishing_duplicate_moves_to_the_overlapping_track(self):
+        # Frame 0: the robot (track 1) and a duplicate box 0.3 ft to its right
+        # (track 2), which the click is nearest to. Track 2 is never seen again.
+        script = [[(1, 3, 3), (2, 3.3, 3)]] + [[(1, 3, 3)] for _ in range(19)]
+        rows, messages, _ = run_script(script, [(1, 3.3, 3)])
+        self.assertIn("Seeded robot 1 to detector track 2", "\n".join(messages))
+        self.assertEqual(reseeded(messages), ["Re-seeded robot 1 from track 2, which vanished within the seed "
+                                              "window, to overlapping track 1"])
+        self.assertEqual(len(robot_times(rows, 1)), 20)
+
+    def test_two_overlapping_boxes_leave_the_seed_unchanged(self):
+        # Tracks 1 and 3 both overlap the vanished duplicate: no single answer.
+        script = [[(1, 3, 3), (2, 3.3, 3), (3, 3.6, 3)]] + [[(1, 3, 3), (3, 3.6, 3)] for _ in range(19)]
+        rows, messages, _ = run_script(script, [(1, 3.3, 3)])
+        self.assertEqual(reseeded(messages), [])
+        self.assertEqual(robot_times(rows, 1), [0.0])
+
+    def test_box_that_does_not_overlap_is_not_used(self):
+        script = [[(1, 5, 3), (2, 3, 3)]] + [[(1, 5, 3)] for _ in range(19)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)])
+        self.assertEqual(reseeded(messages), [])
+        self.assertEqual(robot_times(rows, 1), [0.0])
+
+    def test_no_reseed_after_the_seed_window(self):
+        # The seeded track lasts 3.5 s, then vanishes next to an older overlapping track.
+        script = [[(1, 3, 3), (2, 3.3, 3)] for _ in range(28)] + [[(1, 3, 3)] for _ in range(10)]
+        rows, messages, _ = run_script(script, [(1, 3.3, 3)])
+        self.assertEqual(reseeded(messages), [])
+        self.assertEqual(max(robot_times(rows, 1)), 3.375)
+
+    def test_overlap_of_smaller(self):
+        self.assertEqual(_overlap_of_smaller((0, 0, 10, 10), (2, 2, 6, 6)), 1.0)
+        self.assertEqual(_overlap_of_smaller((0, 0, 10, 10), (5, 0, 15, 10)), 0.5)
+        self.assertEqual(_overlap_of_smaller((0, 0, 10, 10), (10, 0, 20, 10)), 0.0)
 
 
 class AllianceColourRunTests(unittest.TestCase):

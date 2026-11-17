@@ -161,6 +161,12 @@ class IdentityRecovery:
         self.reference_closed.add(recovery.robot_id)
         self.rivals_seen.pop(recovery.robot_id, None)
 
+    def forget_robot(self, robot_id: int) -> None:
+        """Drop a robot's sightings and colour samples after it is re-seeded to another track."""
+        self.last_seen.pop(robot_id, None)
+        self.colour_samples.pop(robot_id, None)
+        self.rivals_seen.pop(robot_id, None)
+
     def observe_tracks(self, t_s: float, visible: dict[int, tuple[float, float] | None]) -> None:
         """Record each track's first sighting; None marks an out-of-field footpoint."""
         for track_id, position in visible.items():
