@@ -63,7 +63,7 @@ MIN_ABSENCE_S = 0.5
 # that only the exclusivity rules protect the identity. Unseeded robots that
 # are undetected at the time can still be mistaken for the lost one, and the
 # longer the gap, the more likely that becomes. Stop trying after this long.
-MAX_ABSENCE_S = 10.0
+MAX_ABSENCE_S = 20.0
 # Alliance colour check (rule 7). Field tape, game elements and shadows put a
 # little of either colour in most boxes, hence the small tolerances.
 COLOUR_OTHER_MAX = 0.02

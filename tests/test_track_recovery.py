@@ -210,15 +210,15 @@ class IdentityRecoveryRunTests(unittest.TestCase):
         self.assertEqual(len(recovered(messages)), 1, messages)
 
     def test_no_recovery_after_the_maximum_absence(self):
-        # 10.5 s gap at 8 fps.
-        rows, messages, _ = run_script(_lost_then([(5, 3, 3)], gap_frames=84), [(1, 3, 3)])
+        # Born 20.125 s after the last sighting (0.875 s), past the 20 s limit.
+        rows, messages, _ = run_script(_lost_then([(5, 3, 3)], gap_frames=160), [(1, 3, 3)])
         self.assertEqual(recovered(messages), [])
         self.assertEqual(max(robot_times(rows, 1)), 0.875)
         self.assertTrue(any("identity recovery stopped" in m for m in messages), messages)
 
     def test_recovery_just_before_the_maximum_absence(self):
-        # Born 9.6 s after the last sighting, alone on the field.
-        rows, messages, _ = run_script(_lost_then([(5, 3, 3)], gap_frames=76), [(1, 3, 3)])
+        # Born 19.625 s after the last sighting, alone on the field.
+        rows, messages, _ = run_script(_lost_then([(5, 3, 3)], gap_frames=156), [(1, 3, 3)])
         self.assertEqual(len(recovered(messages)), 1, messages)
 
     def test_tracked_robot_is_never_reassigned(self):
@@ -298,14 +298,14 @@ class UserReseedTests(unittest.TestCase):
     """Mid-match re-seeds: (robot id, time s, x ft, y ft) in these tests."""
 
     def test_reseed_brings_back_a_robot_after_its_recovery_window_closed(self):
-        # Lost at 0.875 s; track 5 appears 10.5 s later, too late for automatic recovery.
-        script = _lost_then([(5, 3, 3)], gap_frames=84, tail=10)
-        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 11.5, 3, 3)])
+        # Lost at 0.875 s; track 5 appears at 21.5 s, too late for automatic recovery.
+        script = _lost_then([(5, 3, 3)], gap_frames=164, tail=10)
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 21.5, 3, 3)])
         self.assertTrue(any("identity recovery stopped" in m for m in messages), messages)
-        self.assertIn("Re-seeded robot 1 at 11.50s by the user: track 1 -> 5; 0 earlier positions kept",
+        self.assertIn("Re-seeded robot 1 at 21.50s by the user: track 1 -> 5; 0 earlier positions kept",
                       messages)
         times = robot_times(rows, 1)
-        self.assertEqual([t for t in times if t > 1], [11.5 + 0.125 * i for i in range(10)])
+        self.assertEqual([t for t in times if t > 1], [21.5 + 0.125 * i for i in range(10)])
 
     def test_reseed_keeps_the_new_tracks_positions_since_the_robot_vanished(self):
         # Two candidates block automatic recovery; the user picks track 5 at 1.625 s.
@@ -370,13 +370,13 @@ class UserReseedTests(unittest.TestCase):
         self.assertEqual([t for t in times if t > 1], [1.125 + 0.125 * i for i in range(15)])
 
     def test_confirming_an_expired_robots_own_track_reopens_its_recovery(self):
-        # Track 1 vanishes at 0.875 s; robot 1 expires after 10 s; track 1 itself comes back at 12 s and the
-        # user confirms it at 12.5 s. When it vanishes again at 14 s, a clean new track must be re-linked.
-        script = ([[(1, 3, 3)] for _ in range(8)] + [[] for _ in range(88)]
+        # Track 1 vanishes at 0.875 s; robot 1 expires after 20 s; track 1 itself comes back at 22 s and the
+        # user confirms it at 22.5 s. When it vanishes again at 24 s, a clean new track must be re-linked.
+        script = ([[(1, 3, 3)] for _ in range(8)] + [[] for _ in range(168)]
                   + [[(1, 3, 3)] for _ in range(16)] + [[]] + [[(5, 4, 3)] for _ in range(8)])
-        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 12.5, 3, 3)])
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 22.5, 3, 3)])
         self.assertTrue(any("identity recovery stopped" in m for m in messages), messages)
-        self.assertIn("Re-seed of robot 1 at 12.50s confirms its current track 1", messages)
+        self.assertIn("Re-seed of robot 1 at 22.50s confirms its current track 1", messages)
         self.assertEqual(len(recovered(messages)), 1, messages)
         self.assertIn("track 1 -> new track 5", recovered(messages)[0])
 
@@ -561,12 +561,12 @@ class IdentityRecoveryRuleTests(unittest.TestCase):
         self.assertEqual(state.recover(2.0, {5: (3.0, 3.0)}, {1: 1}), [])
 
     def test_expiry_is_permanent_even_if_the_robot_is_seen_again(self):
-        self.assertEqual(self.recover(11.5, {}), [])
+        self.assertEqual(self.recover(21.5, {}), [])
         # Its own track comes back briefly, then it is lost once more.
-        self.recover(12.0, {1: (3.0, 3.0)})
-        self.state.observe_robot(1, 12.0, 3.0, 3.0)
-        self.recover(12.2, {})
-        self.assertEqual(self.recover(12.6, {5: (3.2, 3.0)}), [])
+        self.recover(22.0, {1: (3.0, 3.0)})
+        self.state.observe_robot(1, 22.0, 3.0, 3.0)
+        self.recover(22.2, {})
+        self.assertEqual(self.recover(22.6, {5: (3.2, 3.0)}), [])
 
     def test_previously_assigned_track_is_not_a_candidate(self):
         self.state.note_assignment(5)
@@ -579,9 +579,11 @@ class IdentityRecoveryRuleTests(unittest.TestCase):
         self.assertAlmostEqual(rules.gate_ft(-1.0), 1.0)
 
     def test_expired_robot_stays_lost_even_if_a_clean_candidate_appears(self):
-        self.assertEqual(self.recover(11.5, {}), [])
+        self.assertEqual(self.recover(20.9, {}), [])
+        self.assertNotIn(1, self.state.expired)
+        self.assertEqual(self.recover(21.5, {}), [])
         self.assertIn(1, self.state.expired)
-        self.assertEqual(self.recover(11.6, {5: (3.0, 3.0)}), [])
+        self.assertEqual(self.recover(21.6, {5: (3.0, 3.0)}), [])
 
     def test_each_of_two_lost_robots_with_its_own_clean_candidate_is_recovered(self):
         state = IdentityRecovery()
