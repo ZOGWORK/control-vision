@@ -38,6 +38,11 @@ from control_vision.scout.exports import export_scout_json, export_stats_csv, ma
 from control_vision.storage.database import ProjectDatabase
 from control_vision.game.scoreboard import classify_match_time
 from control_vision.app import theme
+from control_vision.app import library as project_library
+from control_vision.app import widgets
+from control_vision.app.pages.home import HomePage
+from control_vision.app.pages.projects import ProjectsPage
+from control_vision.app.pages.wizard import NewProjectWizard
 
 # Review and timeline rows keep the stored status and confidence for re-tinting.
 EVENT_STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -361,12 +366,34 @@ def workflow_steps(*, project_open: bool, video_name: str | None, corners: int, 
     return steps
 
 
+# Tab indices. 0-8 are the original pages; the pages from the UI report come after them.
+SETTINGS_TAB, RULES_TAB = 7, 8
+HOME_TAB, PROJECTS_TAB, WIZARD_TAB, DATASETS_TAB, MODELS_TAB = 9, 10, 11, 12, 13
+
+# The first nine pages get Ctrl+1..Ctrl+9 in this order. Settings opens from the top bar.
 NAV_ENTRIES = (
-    ("section", "Project"), (0, "Home"),
+    ("section", "Projects"), (HOME_TAB, "Home"), (PROJECTS_TAB, "Projects"), (0, "Current project"),
     ("section", "Match workflow"), (1, "Set up and process"), (3, "Review queue"), (4, "Scoring timeline"),
     (2, "Cycles and stats"), (5, "Highlights"), (6, "Score and export"),
-    ("section", "App"), (7, "Settings"), (8, "BIOBUZZ rules"),
+    ("section", "Training"), (DATASETS_TAB, "Datasets"), (MODELS_TAB, "Models"),
+    ("section", "Reference"), (RULES_TAB, "BIOBUZZ rules"),
 )
+
+NAV_PARENTS = {WIZARD_TAB: PROJECTS_TAB}
+
+SHORTCUTS = (
+    ("Ctrl+1 … Ctrl+9", "Go to the first nine sidebar pages"),
+    ("Ctrl+N", "New project"),
+    ("Ctrl+O", "Open a project file"),
+    ("Ctrl+,", "Settings"),
+    ("? or F1", "Show these shortcuts"),
+)
+
+
+def shortcuts_html() -> str:
+    rows = "".join(f"<tr><td style='padding:2px 16px 2px 0'><b>{keys}</b></td><td>{text}</td></tr>"
+                   for keys, text in SHORTCUTS)
+    return f"<table>{rows}</table>"
 
 
 def _card() -> QFrame:
@@ -394,7 +421,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Control Vision — Match analysis")
         self.resize(1360, 860)
         # Sidebar, setup steps and the minimum video and map widths fit in 1280 px.
-        self.setMinimumSize(1280, 720)
+        self.setMinimumSize(1280, 800)
         self.db: ProjectDatabase | None = None
         self.project_id = None
         self.video_id = None
@@ -417,18 +444,24 @@ class MainWindow(QMainWindow):
         self._step_widgets: dict[str, tuple[QLabel, QLabel]] = {}
         self._theme_mode = theme.saved_mode()
         self._tokens = theme.apply_theme(QApplication.instance(), self._theme_mode)
+        self.library = project_library.ProjectLibrary()
+        self.model_store = project_library.ModelStore()
+        self._wizard_names: set[str] = set()
         self.setStatusBar(QStatusBar())
         self.status_progress = QProgressBar(); self.status_progress.setRange(0, 100)
         self.status_progress.setFixedWidth(180); self.status_progress.setAccessibleName("Processing progress")
         self.status_progress.hide()
         self.context_label = QLabel("No project open")
+        self.db_label = QLabel(""); self.db_label.setProperty("role", "muted")
+        self.db_label.setAccessibleName("Project file")
         self.statusBar().addPermanentWidget(self.status_progress)
+        self.statusBar().addPermanentWidget(self.db_label)
         self.statusBar().addPermanentWidget(self.context_label)
 
         # Analysis: setup steps on the left in workflow order, video and map on the right.
         root = QWidget(); root.setObjectName("Page"); layout = QHBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(16)
-        self.project_btn = _primary(QPushButton("&New project"))
+        self.project_btn = _primary(QPushButton("&New project…"))
         self.open_project_btn = QPushButton("&Open project")
         self.video_btn = QPushButton("Import video")
         self.load_video_btn = QPushButton("Load saved video")
@@ -687,8 +720,22 @@ class MainWindow(QMainWindow):
         theme_label = QLabel("&Theme"); theme_label.setBuddy(self.theme_combo)
         appearance_layout.addRow(theme_label, self.theme_combo)
         appearance_layout.addRow(_label("Saved for this computer, not with the project.", role="muted"))
-        settings_outer.addWidget(appearance_box); settings_outer.addStretch(1)
-        self.tabs.addTab(self._scroll_page(settings_page), "Settings")
+        settings_outer.addWidget(appearance_box)
+        scout_box = QGroupBox("Scout"); scout_layout = QVBoxLayout(scout_box)
+        scout_layout.addWidget(_label("Local only. Syncing with Scout is not available in this build; exports are files "
+                                      "you share yourself.", role="muted", wrap=True))
+        settings_outer.addWidget(scout_box)
+        models_box = QGroupBox("Models"); models_layout = QVBoxLayout(models_box)
+        models_layout.addWidget(_label(f"Model versions are listed in {self.model_store.file}.", role="muted", wrap=True))
+        settings_outer.addWidget(models_box)
+        shortcuts_box = QGroupBox("Keyboard shortcuts"); shortcuts_layout = QVBoxLayout(shortcuts_box)
+        shortcuts_label = _label(shortcuts_html()); shortcuts_label.setTextFormat(Qt.TextFormat.RichText)
+        shortcuts_layout.addWidget(shortcuts_label)
+        settings_outer.addWidget(shortcuts_box); settings_outer.addStretch(1)
+        self.settings_dialog = self._build_settings_dialog(self._scroll_page(settings_page))
+        # Settings opens as a window from the top bar; the tab only points there.
+        self.tabs.addTab(widgets.EmptyState("Settings open in their own window", "Use Settings in the top bar, or Ctrl+,.",
+                                            "Open settings", self.open_settings, primary=False), "Settings")
         rules_page = QWidget(); rules_page.setObjectName("Page"); rules_layout = QVBoxLayout(rules_page)
         rules_layout.setContentsMargins(0, 0, 0, 0)
         self.rules_browser = QTextBrowser(); self.rules_browser.setOpenExternalLinks(True)
@@ -706,12 +753,42 @@ class MainWindow(QMainWindow):
         for table, name in ((self.cycles_table, "Zone-trip cycles"), (self.stats_table, "Per-robot statistics"),
                             (self.review_table, "Review queue"), (self.scoring_table, "Scoring timeline")):
             table.setAccessibleName(name)
+        self.home_page = HomePage()
+        self.projects_page = ProjectsPage()
+        self.wizard = NewProjectWizard(self.model_store, lambda: self._wizard_names, self._default_project_folder)
+        self.tabs.addTab(self.home_page, "Home")
+        self.tabs.addTab(self.projects_page, "Projects")
+        self.tabs.addTab(self.wizard, "New project")
+        self.tabs.addTab(widgets.PlannedPage(
+            "Datasets", "Labelled frames, the train / validation / holdout split and class balance will live here.",
+            "Not available in this build yet. Training data stays where the training scripts keep it."), "Datasets")
+        self.tabs.addTab(widgets.PlannedPage(
+            "Models", "Compare trained model versions and choose the one new projects use.",
+            "Not available in this build yet. You can add a model file in the New project wizard today.",
+            "New project", self.show_new_project_wizard), "Models")
         self.tabs.tabBar().hide()
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self._build_shell())
         self.tabs.currentChanged.connect(self._tab_changed)
 
-        self.project_btn.clicked.connect(self.new_project)
+        self.project_btn.clicked.connect(self.show_new_project_wizard)
+        self.home_page.new_project.connect(self.show_new_project_wizard)
+        self.home_page.import_video.connect(self._import_from_home)
+        self.home_page.resume.connect(lambda: self.open_project_path(self.library.last()))
+        self.home_page.open_project.connect(self.open_project_path)
+        self.home_page.open_processing.connect(lambda: self._go_to_tab(1))
+        self.projects_page.open_project.connect(self.open_project_path)
+        self.projects_page.new_project.connect(self.show_new_project_wizard)
+        self.projects_page.duplicate.connect(self.duplicate_project_file)
+        self.projects_page.archive.connect(self.set_project_archived)
+        self.projects_page.delete.connect(self.delete_project_file)
+        self.projects_page.export_db.connect(self.export_project_db)
+        self.projects_page.locate.connect(self.locate_project_file)
+        self.projects_page.forget.connect(self.forget_project_file)
+        self.wizard.created.connect(self._wizard_created)
+        self.wizard.cancelled.connect(lambda: self.tabs.setCurrentIndex(HOME_TAB))
+        self.wizard.open_models.connect(lambda: self._go_to_tab(MODELS_TAB))
+        self.tabs.currentChanged.connect(self._page_shown)
         self.open_project_btn.clicked.connect(self.open_project)
         self.video_btn.clicked.connect(self.import_video)
         self.load_video_btn.clicked.connect(self.load_saved_video)
@@ -780,8 +857,10 @@ class MainWindow(QMainWindow):
         self.scoreboard_ocr = None
         # No video is loaded yet, so there are no results to show.
         self._set_results_enabled(False)
+        self.tabs.setCurrentIndex(HOME_TAB)
         self._tab_changed(self.tabs.currentIndex())
         self._refresh_workflow()
+        self.refresh_dashboard()
 
     # ----- Shell: sidebar navigation, page header, theme -----
 
@@ -801,6 +880,7 @@ class MainWindow(QMainWindow):
         self._review_pending = 0
         section_font = QFont(self.font()); section_font.setPointSizeF(max(7.5, section_font.pointSizeF() - 1)); section_font.setBold(True)
         shortcut_number = 0
+        self._nav_shortcuts: dict[int, str] = {}
         for key, text in NAV_ENTRIES:
             item = QListWidgetItem(text.upper() if key == "section" else text)
             if key == "section":
@@ -809,16 +889,21 @@ class MainWindow(QMainWindow):
             else:
                 item.setData(Qt.ItemDataRole.UserRole, key)
                 shortcut_number += 1
-                self._nav_tooltips[key] = f"{text} (Ctrl+{shortcut_number})"
+                if shortcut_number <= 9:
+                    self._nav_shortcuts[key] = f"Ctrl+{shortcut_number}"
+                    shortcut = QShortcut(QKeySequence(self._nav_shortcuts[key]), self)
+                    shortcut.activated.connect(lambda index=key: self._go_to_tab(index))
+                self._nav_tooltips[key] = f"{text} ({self._nav_shortcuts[key]})" if key in self._nav_shortcuts else text
                 item.setToolTip(self._nav_tooltips[key])
-                shortcut = QShortcut(QKeySequence(f"Ctrl+{shortcut_number}"), self)
-                shortcut.activated.connect(lambda index=key: self._go_to_tab(index))
                 self._nav_rows[key] = self.nav.count()
                 self._nav_labels[key] = text
             self.nav.addItem(item)
         self.nav.currentItemChanged.connect(self._nav_selected)
         side_layout.addWidget(self.nav, 1)
         shell_layout.addWidget(sidebar)
+        column = QWidget(); column_layout = QVBoxLayout(column)
+        column_layout.setContentsMargins(0, 0, 0, 0); column_layout.setSpacing(0)
+        column_layout.addWidget(self._build_top_bar())
         content = QWidget(); content.setObjectName("Page"); content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(24, 18, 24, 16); content_layout.setSpacing(12)
         self.page_title = QLabel(""); self.page_title.setObjectName("PageTitle")
@@ -826,8 +911,250 @@ class MainWindow(QMainWindow):
         header = QVBoxLayout(); header.setSpacing(2); header.addWidget(self.page_title); header.addWidget(self.page_context)
         content_layout.addLayout(header)
         content_layout.addWidget(self.tabs, 1)
-        shell_layout.addWidget(content, 1)
+        column_layout.addWidget(content, 1)
+        shell_layout.addWidget(column, 1)
+        for keys, slot in (("Ctrl+N", self.show_new_project_wizard), ("Ctrl+O", self.open_project),
+                           ("Ctrl+,", self.open_settings), ("F1", self.show_shortcuts)):
+            QShortcut(QKeySequence(keys), self).activated.connect(slot)
         return shell
+
+    def _build_top_bar(self) -> QFrame:
+        bar = QFrame(); bar.setObjectName("TopBar")
+        layout = QHBoxLayout(bar); layout.setContentsMargins(20, 8, 16, 8); layout.setSpacing(10)
+        self.top_project = QLabel("No project open"); self.top_project.setObjectName("TopProject")
+        self.top_project.setAccessibleName("Open project")
+        self.top_event = _label("", role="muted"); self.top_event.setAccessibleName("Event")
+        self.top_model = widgets.badge("muted", "No model")
+        self.top_model.setAccessibleName("Detector model")
+        self.top_scout = widgets.badge("muted", "Local only")
+        self.top_scout.setToolTip("Syncing with Scout is not available in this build; everything stays on this computer.")
+        self.top_search = QLineEdit(); self.top_search.setPlaceholderText("Search projects")
+        self.top_search.setAccessibleName("Search projects"); self.top_search.setFixedWidth(220)
+        self.top_search.setClearButtonEnabled(True)
+        self.top_search.returnPressed.connect(self._search_projects)
+        settings_btn = widgets.button("Settings", tooltip="Settings (Ctrl+,)", on_click=self.open_settings)
+        rules_btn = widgets.button("Rules", tooltip="BIOBUZZ rules", on_click=lambda: self._go_to_tab(RULES_TAB))
+        help_btn = widgets.button("?", tooltip="Keyboard shortcuts (? or F1)", on_click=self.show_shortcuts)
+        help_btn.setAccessibleName("Keyboard shortcuts")
+        layout.addWidget(self.top_project); layout.addSpacing(8); layout.addWidget(self.top_event, 1)
+        for widget in (self.top_model, self.top_scout, self.top_search, settings_btn, rules_btn, help_btn):
+            layout.addWidget(widget)
+        return bar
+
+    def _build_settings_dialog(self, page: QWidget) -> QDialog:
+        dialog = QDialog(self); dialog.setWindowTitle("Settings"); dialog.setModal(True)
+        dialog.resize(940, 680)
+        if isinstance(page, QScrollArea):
+            page.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout = QVBoxLayout(dialog); layout.setContentsMargins(20, 16, 20, 16)
+        layout.addWidget(page, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        return dialog
+
+    def keyPressEvent(self, event):
+        # "?" opens the shortcuts only when no text field took the key, so "?" can still be typed.
+        if event.text() == "?":
+            self.show_shortcuts()
+            return
+        super().keyPressEvent(event)
+
+    def open_settings(self):
+        self.settings_dialog.show()
+        self.settings_dialog.raise_()
+        self.settings_dialog.activateWindow()
+
+    def show_shortcuts(self):
+        box = QMessageBox(self); box.setWindowTitle("Keyboard shortcuts")
+        box.setTextFormat(Qt.TextFormat.RichText); box.setText(shortcuts_html())
+        box.setStandardButtons(QMessageBox.StandardButton.Close)
+        box.open()
+
+    def _search_projects(self):
+        self.projects_page.search.setText(self.top_search.text())
+        self._go_to_tab(PROJECTS_TAB)
+
+    def _page_shown(self, index: int):
+        if index in (HOME_TAB, PROJECTS_TAB):
+            self.refresh_dashboard()
+
+    # ----- Projects: library, dashboard and the new project wizard -----
+
+    def _library_names(self) -> set[str]:
+        return {summary.display_name for summary in self.library.summaries()}
+
+    @staticmethod
+    def _default_project_folder(name: str) -> Path:
+        return Path.home() / "Documents" / "Control Vision" / name
+
+    def refresh_dashboard(self):
+        summaries = self.library.summaries()
+        active = self.model_store.active()
+        processing = None
+        if getattr(self, "_processing_active", False):
+            video = self.video_path.name if self.video_path else "a match"
+            processing = f"Processing {video}" + (f" in {self._project_name}" if self._project_name else "")
+        self.home_page.refresh(summaries, project_library.home_stats(summaries), active, self.library.last(), processing)
+        self.projects_page.refresh(summaries, active.name if active else None)
+        self._refresh_top_bar()
+
+    def _refresh_top_bar(self):
+        details = None
+        if self.db and self.project_id is not None:
+            try:
+                details = self.db.project_details(self.project_id)
+            except (sqlite3.Error, AttributeError, TypeError):
+                details = None
+        details = details if isinstance(details, dict) else {}
+        self.top_project.setText(self._project_name or "No project open")
+        event = " · ".join(str(part) for part in (details.get("event_name"), details.get("event_code"),
+                                                  details.get("event_date")) if part)
+        self.top_event.setText(event)
+        model = details.get("model_name")
+        theme.set_badge(self.top_model, "accent" if model else "muted", f"Model {model}" if model else "No model")
+        path = getattr(self.db, "path", None) if self.db else None
+        self.db_label.setText(Path(path).name if isinstance(path, (str, Path)) else "")
+
+    def _remember_project(self):
+        """Add the open project to the library and record when it was opened."""
+        if not self.db or self.project_id is None:
+            return
+        try:
+            self.db.touch_project(self.project_id, project_library.now_iso())
+            self.library.register(Path(self.db.path))
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            self._show_status(f"The project is open, but the recent list was not updated: {exc}", "pending")
+        self.refresh_dashboard()
+
+    def show_new_project_wizard(self):
+        if _video_switch_blocked(self): return
+        self._wizard_names = self._library_names()
+        if self.tabs.currentIndex() != WIZARD_TAB:
+            self.wizard.reset()
+        self.tabs.setCurrentIndex(WIZARD_TAB)
+
+    def _wizard_created(self, path):
+        if self.open_project_path(Path(path)):
+            self.tabs.setCurrentIndex(1)
+        else:
+            self.tabs.setCurrentIndex(HOME_TAB)
+
+    def _import_from_home(self):
+        if self.db is None:
+            self.show_new_project_wizard()
+            return
+        self.tabs.setCurrentIndex(1)
+        self.import_video()
+
+    def _is_open_project(self, path) -> bool:
+        current = getattr(self.db, "path", None) if self.db else None
+        try:
+            return current is not None and Path(current).resolve() == Path(path).resolve()
+        except OSError:
+            return False
+
+    def duplicate_project_file(self, path):
+        source = Path(path)
+        summary = project_library.summarize_project(source)
+        name = project_library.unique_name(f"{summary.display_name} copy", self._library_names())
+        folder = QFileDialog.getExistingDirectory(self, f"Choose a folder for \"{name}\"")
+        if not folder:
+            return
+        target = Path(folder) / "control_vision.sqlite"
+        try:
+            project_library.duplicate_project(source, target, name)
+            settings = source.parent / "settings.json"
+            if settings.is_file() and not (Path(folder) / "settings.json").exists():
+                shutil.copy2(settings, Path(folder) / "settings.json")
+            (Path(folder) / "run_logs").mkdir(exist_ok=True)
+            self.library.register(target, make_last=False)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            QMessageBox.critical(self, "Could not duplicate the project", str(exc))
+            return
+        self._show_status(f"Duplicated as \"{name}\". Videos and calibration were copied; results were not.", "success")
+        self.refresh_dashboard()
+
+    def set_project_archived(self, path, archived: bool):
+        path = Path(path)
+        try:
+            if self._is_open_project(path):
+                self.db.set_project_details(self.project_id, archived=int(bool(archived)))
+            else:
+                if not path.is_file():
+                    raise FileNotFoundError(f"{path} is missing.")
+                database = ProjectDatabase(path)
+                try:
+                    project = database.connection.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()
+                    if project is None:
+                        raise ValueError("This file has no Control Vision project.")
+                    database.set_project_details(project["id"], archived=int(bool(archived)))
+                finally:
+                    database.close()
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            QMessageBox.critical(self, "Could not change the project", str(exc))
+            return
+        self.refresh_dashboard()
+
+    def delete_project_file(self, path):
+        path = Path(path)
+        summary = project_library.summarize_project(path)
+        if summary.missing:
+            # Nothing to move to the Recycle Bin: just drop the stale entry.
+            self.forget_project_file(path)
+            return
+        if self._is_open_project(path):
+            QMessageBox.information(self, "Project is open",
+                                    f"\"{summary.display_name}\" is open. Open another project before deleting it.")
+            return
+        matches = f"{summary.matches} match" + ("" if summary.matches == 1 else "es")
+        answer = QMessageBox.question(
+            self, "Delete project",
+            f"Delete \"{summary.display_name}\" ({matches})?\n\nThe project file moves to the Recycle Bin. "
+            "Match videos are not deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not project_library.remove_file_to_trash(path):
+            QMessageBox.critical(self, "Could not delete the project",
+                                 "The file could not be moved to the Recycle Bin, so nothing was deleted.")
+            return
+        self.library.forget(path)
+        self._show_status(f"Moved \"{summary.display_name}\" to the Recycle Bin.", "success")
+        self.refresh_dashboard()
+
+    def export_project_db(self, path):
+        path = Path(path)
+        summary = project_library.summarize_project(path)
+        target, _ = QFileDialog.getSaveFileName(self, "Export project file", f"{summary.display_name}.db",
+                                                "Control Vision project (*.db *.sqlite)")
+        if not target:
+            return
+        try:
+            project_library.export_project_file(path, Path(target))
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            QMessageBox.critical(self, "Could not export the project", str(exc))
+            return
+        self._show_status(f"Project file saved to {target}.", "success")
+
+    def locate_project_file(self, path):
+        selected, _ = QFileDialog.getOpenFileName(self, "Locate project file", "", "Control Vision project (*.sqlite *.db)")
+        if not selected:
+            return
+        self.library.replace(Path(path), Path(selected))
+        self.refresh_dashboard()
+
+    def forget_project_file(self, path):
+        self.library.forget(Path(path))
+        self.refresh_dashboard()
+
+    def _mark_exported(self):
+        if not self.db or self.project_id is None:
+            return
+        try:
+            self.db.set_project_details(self.project_id, last_exported=project_library.now_iso())
+        except (sqlite3.Error, AttributeError, TypeError):
+            pass
 
     def _scroll_page(self, page: QWidget) -> QScrollArea:
         scroll = QScrollArea(); scroll.setObjectName("PageScroll"); scroll.setWidgetResizable(True)
@@ -854,6 +1181,8 @@ class MainWindow(QMainWindow):
         return card
 
     def _go_to_tab(self, index: int):
+        if index == SETTINGS_TAB:
+            self.open_settings(); return
         if self.tabs.isTabEnabled(index):
             self.tabs.setCurrentIndex(index)
 
@@ -867,9 +1196,15 @@ class MainWindow(QMainWindow):
             self._sync_nav()
 
     def _tab_changed(self, index: int):
-        row = self._nav_rows.get(index)
-        if row is not None and self.nav.currentRow() != row:
-            self.nav.blockSignals(True); self.nav.setCurrentRow(row); self.nav.blockSignals(False)
+        # A page without its own sidebar entry highlights its parent (the wizard belongs to Projects).
+        row = self._nav_rows.get(index, self._nav_rows.get(NAV_PARENTS.get(index)))
+        if self.nav.currentRow() != (row if row is not None else -1):
+            self.nav.blockSignals(True)
+            if row is None:
+                self.nav.setCurrentRow(-1)
+            else:
+                self.nav.setCurrentRow(row)
+            self.nav.blockSignals(False)
         self.page_title.setText(self._nav_labels.get(index, self.tabs.tabText(index)))
 
     def _sync_nav(self):
@@ -885,7 +1220,7 @@ class MainWindow(QMainWindow):
         if index in (2, 3, 4, 5, 6) and not self.tabs.isTabEnabled(index):
             return f"{self._nav_labels[index]}: process the video to see results"
         if index == 3 and self._review_pending:
-            return f"Review queue: {self._review_pending} event(s) pending review (Ctrl+3)"
+            return f"Review queue: {self._review_pending} event(s) need review ({self._nav_shortcuts[3]})"
         return self._nav_tooltips[index]
 
     def _set_review_badge(self, flagged: int):
@@ -1213,6 +1548,7 @@ class MainWindow(QMainWindow):
             self.home_empty.setText("Open a project to see its match videos.")
             self.home_empty.show()
             self._refresh_workflow()
+            self._refresh_top_bar()
             return
         project = self.db.connection.execute("SELECT name FROM projects WHERE id=?", (self.project_id,)).fetchone()
         self._project_name = project["name"]
@@ -1225,6 +1561,7 @@ class MainWindow(QMainWindow):
         self.home_empty.setText("No videos yet. Import a match video to start.")
         self.home_empty.setVisible(self.home_recent.count() == 0)
         self._refresh_workflow()
+        self._refresh_top_bar()
 
     def load_settings(self):
         folder = self.project_dir()
@@ -1359,6 +1696,7 @@ class MainWindow(QMainWindow):
             self.load_settings()
             self.statusBar().showMessage(f"Project ready: {name.strip()}")
             self.refresh_home()
+            self._remember_project()
         except Exception as exc:
             # The previous database is already closed; never keep using it.
             if self.db: self.db.close()
@@ -1371,9 +1709,22 @@ class MainWindow(QMainWindow):
         selected, _ = QFileDialog.getOpenFileName(self, "Open Control Vision project", "", "Control Vision project (*.sqlite *.db)")
         if not selected:
             return
+        self._open_project_file(Path(selected))
+
+    def open_project_path(self, path) -> bool:
+        """Open a project from the library; returns whether it opened."""
+        if path is None or _video_switch_blocked(self): return False
+        if not Path(path).is_file():
+            # Opening a missing path would create an empty database there.
+            self._show_status(f"Project file missing: {path}. Locate it from Projects.", "danger")
+            self.refresh_dashboard()
+            return False
+        return self._open_project_file(Path(path))
+
+    def _open_project_file(self, path: Path) -> bool:
         try:
             if self.db: self.db.close()
-            self.db = ProjectDatabase(Path(selected))
+            self.db = ProjectDatabase(Path(path))
             project = self.db.connection.execute("SELECT id,name FROM projects ORDER BY id LIMIT 1").fetchone()
             if project is None:
                 raise ValueError("This database does not contain a Control Vision project.")
@@ -1388,6 +1739,9 @@ class MainWindow(QMainWindow):
             self.project_id = None
             self._clear_closed_project(f"Could not open project: {exc}")
             QMessageBox.critical(self, "Could not open project", str(exc))
+            return False
+        self._remember_project()
+        return True
 
     def _clear_closed_project(self, message: str):
         """After a failed project switch the previous project is closed: show no project or video."""
@@ -2162,6 +2516,7 @@ class MainWindow(QMainWindow):
                          [tuple(row) for row in self.db.tracks_for_video(self.video_id)],
                          [dict(row) for row in self.db.cycles_for_video(self.video_id)], self.zones,
                          events=[dict(row) for row in self.db.events_for_video(self.video_id)], video=video)
+        self._mark_exported()
         QMessageBox.information(self, "Export complete", f"Saved {target}")
 
     def export_json(self):
@@ -2178,6 +2533,7 @@ class MainWindow(QMainWindow):
                           [dict(row) for row in self.db.photos_for_video(self.video_id)], self.zones,
                           {"red": int(self.official_red.text()) if self.official_red.text().isdigit() else None,
                            "blue": int(self.official_blue.text()) if self.official_blue.text().isdigit() else None})
+        self._mark_exported()
         QMessageBox.information(self, "Export complete", f"Saved {target}")
 
     def export_photos(self):

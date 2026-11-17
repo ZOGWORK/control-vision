@@ -162,6 +162,7 @@ class ProjectDatabase:
             "(SELECT 1 FROM robots r JOIN videos v ON v.id=r.video_id WHERE r.id=scoring_events.robot_id)")
         if "origin_robot_id" not in event_columns:
             self.connection.execute("ALTER TABLE scoring_events ADD COLUMN origin_robot_id INTEGER")
+        self._migrate_details()
         if added_analysis_status:
             # Old projects have no processing marker. Preserve access to videos
             # with saved evidence while leaving empty imports unprocessed.
@@ -171,6 +172,60 @@ class ProjectDatabase:
                 "OR EXISTS (SELECT 1 FROM cycles c JOIN robots r ON r.id=c.robot_id WHERE r.video_id=videos.id) "
                 "OR EXISTS (SELECT 1 FROM scoring_events e WHERE e.video_id=videos.id)"
             )
+
+    # Project and video fields used by the project library, Home and the New
+    # Project wizard. They describe the project; they never change analysis.
+    PROJECT_DETAIL_COLUMNS = {
+        "event_name": "TEXT", "event_code": "TEXT", "event_date": "TEXT",
+        "season": "TEXT NOT NULL DEFAULT 'BIOBUZZ 2026-27'", "notes": "TEXT", "last_opened": "TEXT",
+        "model_name": "TEXT", "model_path": "TEXT", "archived": "INTEGER NOT NULL DEFAULT 0",
+        "last_exported": "TEXT",
+    }
+    VIDEO_DETAIL_COLUMNS = {
+        "is_holdout": "INTEGER NOT NULL DEFAULT 0", "camera_view": "TEXT NOT NULL DEFAULT 'unknown'",
+        "file_size": "INTEGER",
+    }
+
+    def _migrate_details(self) -> None:
+        for table, columns in (("projects", self.PROJECT_DETAIL_COLUMNS), ("videos", self.VIDEO_DETAIL_COLUMNS)):
+            existing = {row["name"] for row in self.connection.execute(f"PRAGMA table_info({table})")}
+            for column, definition in columns.items():
+                if column not in existing:
+                    self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def project_details(self, project_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_project_details(self, project_id: int, **fields: Any) -> None:
+        """Update descriptive project fields; unknown field names are refused."""
+        unknown = set(fields) - set(self.PROJECT_DETAIL_COLUMNS) - {"name"}
+        if unknown:
+            raise ValueError("Unknown project field(s): " + ", ".join(sorted(unknown)))
+        if "event_code" in fields and fields["event_code"] is not None:
+            fields["event_code"] = normalise_event_code(fields["event_code"])
+        if not fields:
+            return
+        assignments = ",".join(f"{column}=?" for column in fields)
+        with self.connection:
+            self.connection.execute(f"UPDATE projects SET {assignments} WHERE id=?", (*fields.values(), project_id))
+
+    def touch_project(self, project_id: int, when: str) -> None:
+        """Record when the project was last opened (an ISO timestamp)."""
+        with self.connection:
+            self.connection.execute("UPDATE projects SET last_opened=? WHERE id=?", (when, project_id))
+
+    def set_video_details(self, video_id: int, *, is_holdout: bool | None = None, camera_view: str | None = None,
+                          file_size: int | None = None) -> None:
+        if camera_view is not None and camera_view not in {"wide", "close", "unknown"}:
+            raise ValueError(f"Unknown camera view: {camera_view}")
+        fields = {key: value for key, value in (("is_holdout", None if is_holdout is None else int(bool(is_holdout))),
+                                                ("camera_view", camera_view), ("file_size", file_size)) if value is not None}
+        if not fields:
+            return
+        assignments = ",".join(f"{column}=?" for column in fields)
+        with self.connection:
+            self.connection.execute(f"UPDATE videos SET {assignments} WHERE id=?", (*fields.values(), video_id))
 
     def add_project(self, name: str) -> int:
         cursor = self.connection.execute("INSERT INTO projects(name) VALUES (?)", (name,))
@@ -615,3 +670,8 @@ class ProjectDatabase:
 
     def close(self) -> None:
         self.connection.close()
+
+
+def normalise_event_code(code: str) -> str:
+    """Event codes are stored as typed, uppercased, without spaces."""
+    return "".join(str(code).split()).upper()
