@@ -140,6 +140,13 @@ class LibraryTests(TempFolderTest):
                 library.duplicate_project(source, target, "copy")
         self.assertFalse(target.exists())
 
+    def test_duplicating_a_missing_project_creates_nothing(self):
+        source = self.root / "gone" / "control_vision.sqlite"
+        with self.assertRaises(FileNotFoundError):
+            library.duplicate_project(source, self.root / "copy.sqlite", "copy")
+        self.assertFalse(source.parent.exists())
+        self.assertFalse((self.root / "copy.sqlite").exists())
+
     def test_a_failed_duplicate_leaves_no_partial_file(self):
         from unittest.mock import patch
         source = self.make_project()
@@ -191,7 +198,8 @@ class ModelStoreTests(TempFolderTest):
     def test_a_damaged_models_file_still_takes_new_models(self):
         store = library.ModelStore(self.root / "home")
         store.file.parent.mkdir(parents=True)
-        store.file.write_text(json.dumps({"models": [1, "x", None], "active": 3}), encoding="utf-8")
+        store.file.write_text(json.dumps({"models": [1, "x", None, {"id": ["bad"], "name": "x", "path": "y"}],
+                                          "active": 3}), encoding="utf-8")
         self.assertEqual(store.versions(), [])
         model = store.add_file(self.write_model("v1"))
         store.set_active(model.id)
