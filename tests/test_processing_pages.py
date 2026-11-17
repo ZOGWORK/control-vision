@@ -63,6 +63,9 @@ class RunLogTests(unittest.TestCase):
         self.assertEqual(frames_progress(10, "Processed 12 of 120 sampled frames at 1.5 s"), (12, 120))
         self.assertEqual(frames_progress(25, "Processed 30 sampled frames · elapsed 4s"), (30, 120))
         self.assertIsNone(frames_progress(0, "Loading model"))
+        # The pipeline formats counts with thousands separators.
+        self.assertEqual(frames_progress(25, "Processed 1,234 of 5,000 sampled frames at 205.6s"), (1234, 5000))
+        self.assertEqual(frames_progress(50, "Processed 1,500 sampled frames"), (1500, 3000))
         self.assertEqual(progress_time("Processed 12 of 120 sampled frames at 1.5 s"), 1.5)
         self.assertEqual(sampled_frame("Sampled frame 48 (1.600s): 3 robot detections; 0 scoring elements in ROI"),
                          (48, 1.6, 3))
@@ -290,6 +293,29 @@ class WindowQueueTests(ReadyMatch):
         self.assertIsNone(window._queue_job)
         self.assertEqual(window.live_page.state, "idle")      # process() was replaced, so no run started here.
         self.assertIn((mw.QUEUE_TAB, "Processing queue"), [(tab, label) for tab, label in mw.NAV_ENTRIES if tab != "section"])
+
+    def test_stopping_a_queued_run_pauses_the_queue(self):
+        first_video, _ = self.ready_match("Q1.mp4", processed=False)
+        second_video, _ = self.ready_match("Q2.mp4", processed=False)
+        self.open()
+        model = self.root / "model.onnx"; model.write_bytes(b"x")
+        first, second = self.db.queue_jobs([first_video, second_video], 8, "yolo", str(model))
+        window = self.window
+        started = []
+        with patch.object(window, "process", side_effect=lambda: (started.append(window.video_id),
+                                                                 setattr(window, "_processing_active", True))):
+            window.start_queue()
+            self.app.processEvents()
+            window.processing_failed("Processing was cancelled.")
+            self.app.processEvents()
+            jobs = {int(job["id"]): job["status"] for job in self.db.processing_jobs()}
+            self.assertEqual(jobs, {first: "cancelled", second: "queued"})
+            self.assertTrue(window._queue_paused)
+            self.assertEqual(len(started), 1)               # The next match did not start.
+            window.start_queue()                            # Start queue carries on with the next one.
+            self.app.processEvents()
+        self.assertEqual(len(started), 2)
+        self.assertEqual(window._queue_job, second)
 
     def test_a_finished_job_is_marked_done(self):
         video, ids = self.ready_match(processed=False)
