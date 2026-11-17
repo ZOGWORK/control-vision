@@ -2699,7 +2699,7 @@ class MainWindow(QMainWindow):
         if self.current_time >= self.duration: self.timer.stop()
 
     def closeEvent(self, event):
-        if not self.setup_edits_allow_leaving():
+        if not MainWindow.setup_edits_allow_leaving(self):
             event.ignore()
             return
         for worker, thread, done_slot, failed_slot in (
@@ -2730,7 +2730,9 @@ class MainWindow(QMainWindow):
                     event.ignore()
                     return
         if self.capture: self.capture.release()
-        self.splitter_page.close_source()
+        splitter = getattr(self, "splitter_page", None)
+        if splitter is not None:
+            splitter.close_source()
         if self.db: self.db.close()
         event.accept()
 
