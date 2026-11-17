@@ -366,12 +366,47 @@ class ProjectDatabaseTests(unittest.TestCase):
             "SELECT analysis_status FROM videos WHERE id=?", (self.red_video,)).fetchone()[0], "failed")
 
 
+    def test_reseeds_are_stored_per_video_in_time_order(self):
+        late = self.db.add_reseed(self.red_video, self.red_robot, 61.5, 876.0, 818.5)
+        early = self.db.add_reseed(self.red_video, self.red_robot, 20.0, 400, 300)
+        self.db.add_reseed(self.blue_video, self.blue_robot, 30.0, 10, 10)
+        rows = self.db.reseeds_for_video(self.red_video)
+        self.assertEqual([tuple(row) for row in rows],
+                         [(early, self.red_robot, 20.0, 400.0, 300.0), (late, self.red_robot, 61.5, 876.0, 818.5)])
+        reopened = ProjectDatabase(self.path)
+        self.addCleanup(reopened.close)
+        self.assertEqual(len(reopened.reseeds_for_video(self.red_video)), 2)
+        self.db.delete_reseed(early)
+        self.assertEqual([row["id"] for row in self.db.reseeds_for_video(self.red_video)], [late])
+
+    def test_reseed_rejects_a_robot_of_another_video_and_bad_values(self):
+        with self.assertRaises(ValueError):
+            self.db.add_reseed(self.red_video, self.blue_robot, 10.0, 1, 1)
+        for t_s, x, y in ((-0.5, 1, 1), (float("nan"), 1, 1), (1.0, float("inf"), 1)):
+            with self.subTest(t_s=t_s, x=x), self.assertRaises(ValueError):
+                self.db.add_reseed(self.red_video, self.red_robot, t_s, x, y)
+        self.assertEqual(self.db.reseeds_for_video(self.red_video), [])
+
+    def test_deleting_a_robot_deletes_its_reseeds(self):
+        self.db.add_reseed(self.red_video, self.red_robot, 10.0, 1, 1)
+        with self.db.connection:
+            self.db.connection.execute("DELETE FROM robots WHERE id=?", (self.red_robot,))
+        self.assertEqual(self.db.connection.execute("SELECT COUNT(*) FROM robot_reseeds").fetchone()[0], 0)
+
+
 class LegacyMigrationTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.path = Path(self.folder.name) / "spec.sqlite"
         _write_spec_era_project(self.path)
+
+    def test_old_project_gets_an_empty_reseed_table(self):
+        db = ProjectDatabase(self.path)
+        self.addCleanup(db.close)
+        self.assertEqual(db.reseeds_for_video(1), [])
+        db.add_reseed(1, 1, 5.0, 2, 3)
+        self.assertEqual(len(db.reseeds_for_video(1)), 1)
 
     def _assert_spec_era_migrated(self, db):
         statuses = dict(db.connection.execute("SELECT id,analysis_status FROM videos").fetchall())
