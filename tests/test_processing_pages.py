@@ -7,9 +7,9 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from test_setup_pages import CORNERS, SetupTest, select_row
+    from test_setup_pages import CORNERS, SetupTest, qt_app, select_row
 except ImportError:  # run as tests.test_processing_pages
-    from tests.test_setup_pages import CORNERS, SetupTest, select_row
+    from tests.test_setup_pages import CORNERS, SetupTest, qt_app, select_row
 
 PERIODS = {"auto": 30, "transition": 8, "teleop": 120}
 
@@ -134,7 +134,6 @@ class QueuePageTests(SetupTest):
 
 class LivePageTests(unittest.TestCase):
     def setUp(self):
-        from test_setup_pages import qt_app
         self.app = qt_app()
 
     def test_live_view_reads_the_run(self):
