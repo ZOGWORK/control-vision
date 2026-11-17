@@ -31,6 +31,13 @@ def write_video(path: Path, seconds: float = 2.0, fps: int = 10, size=(320, 240)
     return path
 
 
+def select_row(table, row: int) -> None:
+    """Select one row whatever keyboard modifiers an earlier test left behind (selectRow reads them)."""
+    from PySide6.QtCore import QItemSelectionModel
+    flags = QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows
+    table.selectionModel().select(table.model().index(row, 0), flags)
+
+
 class SetupTest(unittest.TestCase):
     def setUp(self):
         self.app = qt_app()
@@ -153,7 +160,7 @@ class ImportPageTests(SetupTest):
         self.assertEqual(page.duplicates(), [True])
         self.assertEqual(page.ready(), [])
         self.assertIn("Duplicate", page.table.item(0, 8).text())
-        page.table.selectRow(0)
+        select_row(page.table, 0)
         page.import_anyway()
         self.assertEqual(len(page.ready()), 1)
 
@@ -179,7 +186,7 @@ class ImportPageTests(SetupTest):
         self.assertIs(page.table.cellWidget(1, 6), match)
         self.assertIs(page.table.cellWidget(1, 7), holdout)
         self.assertEqual(match.text(), "Q5")
-        page.table.selectRow(0)
+        select_row(page.table, 0)
         page.remove_selected()
         # The remaining file's widgets move up with it; the removed file's are not left on screen.
         self.assertEqual(page.table.cellWidget(0, 6).text(), "Q5")
