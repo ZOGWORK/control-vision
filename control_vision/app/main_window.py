@@ -2744,6 +2744,7 @@ class MainWindow(QMainWindow):
         if self.capture: self.capture.release()
         splitter = getattr(self, "splitter_page", None)
         if splitter is not None:
+            splitter.stop_clips()  # Finish adding cut clips while the database is still open.
             splitter.close_source()
         if self.db: self.db.close()
         event.accept()
