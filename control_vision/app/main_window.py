@@ -1232,6 +1232,8 @@ class MainWindow(QMainWindow):
         if self._queue_job is None:
             return
         job, self._queue_job = self._queue_job, None
+        if status == "cancelled":
+            self._queue_paused = True  # The user stopped this run: do not start the next one.
         try:
             self.db.set_job_status(job, status, error)
         except sqlite3.Error:
