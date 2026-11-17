@@ -247,6 +247,15 @@ class FieldMapTests(ReadyMatch):
         page.refresh_videos(select=uncalibrated)
         self.assertEqual(page.empty.title.text(), "No calibration — calibrate first")
         video, ids = self.ready_match()
+        damaged, _ = self.ready_match("Q5.mp4")
+        self.db.connection.execute("UPDATE calibrations SET corners_json='[[0, 0], [1' WHERE video_id=?", (damaged,))
+        page.refresh_videos(select=video)
+        page.refresh_videos(select=damaged)
+        self.assertEqual(page.empty.title.text(), "Calibration unreadable — calibrate again")
+        self.assertTrue(page.content.isHidden())             # The other match's trails are not left showing.
+        with patch.object(page, "open_calibrate") as calibrate:
+            page._empty_action()
+        calibrate.emit.assert_called_once_with(damaged)
         page.refresh_videos(select=video)
         self.assertTrue(page.empty.isHidden())
         legend = [page.legend.itemAt(i).widget().text() for i in range(page.legend.count())]
