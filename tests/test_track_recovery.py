@@ -470,13 +470,30 @@ class AllianceColourRuleTests(unittest.TestCase):
         self.assertAlmostEqual(state.colour_reference(1), 0.1)
         self.assertIn(5, state.ever_assigned)
 
-    def test_low_reference_still_needs_some_own_colour(self):
-        state = self.state(0.0)
-        self.assertFalse(state.colour_matches(1, (0.0, 0.0)))
-        self.assertTrue(state.colour_matches(1, (0.04, 0.0)))
-        self.assertFalse(state.colour_matches(1, (0.06, 0.0)))
-        # Within the bounds, but more of the other alliance's colour than its own.
-        self.assertFalse(state.colour_matches(1, (0.012, 0.018)))
+    def test_robot_showing_little_own_colour_is_not_judged_by_its_absence(self):
+        # Reference below 0.03: its bumpers barely show from this camera.
+        for reference in (0.0, 0.029):
+            with self.subTest(reference=reference):
+                state = self.state(reference)
+                self.assertTrue(state.colour_matches(1, (0.0, 0.0)))
+                self.assertTrue(state.colour_matches(1, (0.04, 0.0)))
+                self.assertTrue(state.colour_matches(1, (0.012, 0.018)))
+                self.assertFalse(state.colour_matches(1, (0.0, 0.03)))   # the other alliance's colour
+                self.assertFalse(state.colour_matches(1, (0.2, 0.0)))    # far more own colour than it shows
+        # At 0.03 the own-colour bounds apply again.
+        self.assertFalse(self.state(0.03).colour_matches(1, (0.0, 0.0)))
+
+    def test_other_colour_the_robot_itself_shows_is_allowed(self):
+        # A red robot with blue parts: 0.03 of blue in its own first sightings.
+        state = IdentityRecovery(alliances={1: "red"})
+        for index in range(8):
+            state.observe_robot(1, index / 8, 3.0, 3.0, (0.1, 0.03))
+        self.assertAlmostEqual(state.other_colour_reference(1), 0.03)
+        self.assertTrue(state.colour_matches(1, (0.1, 0.09)))    # up to 3x its own blue
+        self.assertFalse(state.colour_matches(1, (0.1, 0.091)))
+        self.assertFalse(state.colour_matches(1, (0.05, 0.06)))  # still more blue than red: rejected
+        # A robot with no blue of its own keeps the 0.02 limit.
+        self.assertFalse(self.state(0.1).colour_matches(1, (0.1, 0.021)))
 
     def test_blue_alliance_uses_blue_as_own_colour(self):
         state = self.state(0.1, "blue")

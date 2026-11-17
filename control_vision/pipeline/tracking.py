@@ -608,7 +608,8 @@ def track_video(
     for robot_id in robot_ids:
         reference = recovery.colour_reference(robot_id)
         if reference is not None:
-            logger.info("Robot %d own alliance-colour reference: %.3f", robot_id, reference)
+            logger.info("Robot %d own alliance-colour reference: %.3f; other alliance's colour: %.3f", robot_id,
+                        reference, recovery.other_colour_reference(robot_id) or 0.0)
     if len(seed_to_track) < len(robot_ids):
         logger.warning("Only %d of %d robot identities were safely matched within %.1fs. Unmatched seeds are omitted instead of guessed.",
                        len(seed_to_track), len(robot_ids), seed_assignment_deadline_s)
