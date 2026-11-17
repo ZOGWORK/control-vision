@@ -265,6 +265,13 @@ class WizardTests(PageTest):
         wizard.cancel()
         self.assertIsNone(wizard.model_list.currentItem())
 
+    def test_cancel_hides_the_old_name_suggestion(self):
+        wizard = self.wizard(names={"Meet"})
+        wizard.name.setText("Meet")
+        self.assertFalse(wizard.use_suggestion.isHidden())
+        wizard.cancel()
+        self.assertTrue(wizard.use_suggestion.isHidden())
+
     def test_moved_videos_are_skipped_and_names_are_escaped(self):
         wizard = self.wizard()
         self.reach_confirm(wizard, name="Meet <Final> & Co")
