@@ -503,9 +503,10 @@ class SplitterPage(QWidget):
 
     def select(self, index: int) -> None:
         if 0 <= index < len(self.segments) and self.cards.currentRow() != index:
-            self.cards.setCurrentRow(index)
-        self.timeline.current = index
-        self.timeline.update()
+            self.cards.setCurrentRow(index)       # _card_selected follows.
+        else:
+            # Same row after a delete or merge: it is another split now, so show its number and time.
+            self._card_selected(index)
 
     def _card_selected(self, index: int) -> None:
         self.timeline.current = index
@@ -514,6 +515,8 @@ class SplitterPage(QWidget):
             segment = self.segments[index]
             self.match_edit.setText(segment.match)
             self.seek(segment.start)
+        else:
+            self.match_edit.clear()
         self._sync_actions()
 
     def _jump(self, side: str) -> None:
