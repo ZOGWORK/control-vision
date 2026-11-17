@@ -327,6 +327,8 @@ class IdentityPage(QWidget):
         self.video_combo.blockSignals(True)
         self.video_combo.clear()
         for row in self.videos():
+            if current is not None and int(row["id"]) == int(current):
+                self.video = dict(row)  # e.g. processed since it was loaded
             mark = "✓" if row["robot_count"] else "⚑"
             self.video_combo.addItem(f"{mark} {Path(row['path']).name}" + (f" · {row['match_number']}" if row["match_number"] else ""),
                                      int(row["id"]))
@@ -417,11 +419,10 @@ class IdentityPage(QWidget):
         self.dirty = True
         following = next((i for i, other in enumerate(self.entries) if other.seed is None and not other.absent
                           and i != self.current), None)
-        self._render()
-        self.cards[self.current].team.setFocus()
         if following is not None and self.entries[self.current].complete:
             self.current = following
-            self._render()
+        self._render()
+        self.cards[self.current].team.setFocus()
 
     def clear_marker(self) -> None:
         self.entries[self.current].seed = None
@@ -468,7 +469,11 @@ class IdentityPage(QWidget):
 
     def _results_change(self) -> bool:
         """True when saving would make existing results wrong (more than team numbers or positions changed)."""
-        if self.video is None or self.video.get("analysis_status") != "ready":
+        if self.video is None or self.db is None:
+            return False
+        # Read the status now: the video may have been processed since this page loaded it.
+        row = self.db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (int(self.video["id"]),)).fetchone()
+        if row is None or row["analysis_status"] != "ready":
             return False
         before = {entry.id: entry for entry in self.saved_entries if entry.id is not None}
         after = [entry for entry in self.entries if entry.complete]
