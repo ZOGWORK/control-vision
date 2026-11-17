@@ -398,6 +398,7 @@ class SplitterPage(QWidget):
 
     def close_source(self) -> None:
         self.timer.stop()
+        self.play_btn.setText("Play")
         if self.capture is not None:
             self.capture.release()
         self.capture, self.source, self.duration, self.position, self.segments = None, None, 0.0, 0.0, []
