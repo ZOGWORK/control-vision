@@ -265,6 +265,28 @@ class SplitterTests(SetupTest):
         self.assertNotEqual(splitter.clip_name(source, splitter.Segment(1, 3)), splitter.clip_name(source, splitter.Segment(3.5, 5.5)))
         self.assertEqual(splitter.clip_name(source, splitter.Segment(65, 90, "Q 7")), "stream-at01-05-Q7.mp4")
 
+    def test_clips_stay_with_the_project_they_were_cut_for(self):
+        from control_vision.app.pages import splitter
+        source = write_video(self.root / "stream.mp4", seconds=4)
+        page = splitter.SplitterPage()
+        self.addCleanup(page.close_source)
+        page.set_project(self.db, self.project, self.root)
+        page.open_source(source)
+        page.start_edit.setText("0:01"); page.end_edit.setText("0:03")
+        page.add_typed()
+        page.cards.setCurrentRow(0)
+        page.confirm_selected()
+        with patch.object(splitter.ClipWorker, "start", lambda worker: None):
+            page.create_clips()
+        other = self.db.add_project("Other meet")
+        page.set_project(self.db, other, self.root)  # Switched while the clip is being cut.
+        with patch.object(page, "clips_created") as created:
+            page.worker.run()
+        created.emit.assert_not_called()
+        projects = [row[0] for row in self.db.connection.execute("SELECT project_id FROM videos")]
+        self.assertEqual(projects, [self.project])
+        self.assertIsNone(page.worker)
+
     def test_detection_says_it_is_not_available(self):
         from control_vision.app.pages.splitter import SplitterPage
         page = SplitterPage()
@@ -350,6 +372,32 @@ class CalibrateTests(SetupTest):
         self.assertIsNone(page.video)
         self.assertEqual((page.canvas.corners, page.zones, page.map.zones), ([], {}, {}))
         self.assertIsNone(page.map.background)
+
+    def test_calibration_saved_elsewhere_is_shown_unless_edits_are_unsaved(self):
+        from control_vision.app.pages.calibrate import CalibratePage
+        video, _ = self.add_video("Q1.mp4")
+        page = CalibratePage()
+        page.set_project(self.db, self.project)
+        self.assertEqual(page.canvas.corners, [])
+        self.db.save_calibration(video, CORNERS, {"Hive": {"type": "scoring", "points": [[5, 5], [7, 5], [7, 7]]}})
+        page.refresh_videos()  # e.g. the page is shown again after Set up and process saved corners
+        self.assertEqual(page.canvas.corners, CORNERS)
+        self.assertIn("Hive", page.zones)
+        self.assertFalse(page.dirty)
+        page.canvas.corners[0] = [1.0, 1.0]
+        page._corners_changed()
+        page.refresh_videos()
+        self.assertEqual(page.canvas.corners[0], [1.0, 1.0])  # Unsaved edits are kept.
+
+    def test_keyboard_slider_moves_change_the_frame(self):
+        from control_vision.app.pages import calibrate, identity
+        self.add_video("Q1.mp4")
+        for module, page_class in ((calibrate, calibrate.CalibratePage), (identity, identity.IdentityPage)):
+            page = page_class()
+            page.set_project(self.db, self.project)
+            with patch.object(module, "read_frame", wraps=module.read_frame) as read:
+                page.frame_slider.setValue(page.frame_slider.value() + 5)  # as the arrow keys do
+            read.assert_called_once()
 
     def test_zone_names_are_checked(self):
         from control_vision.app.pages.calibrate import ZoneDialog, zone_type_for
@@ -442,6 +490,15 @@ class IdentityTests(SetupTest):
         status = self.db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (video,)).fetchone()[0]
         self.assertEqual(status, "unprocessed")
 
+    def test_robots_saved_elsewhere_are_shown(self):
+        from control_vision.app.pages.identity import IdentityPage
+        video, _ = self.add_video()
+        page = IdentityPage()
+        page.set_project(self.db, self.project)
+        self.db.save_identity(video, [{"team_number": 7, "alliance": "red", "seed_x": 5, "seed_y": 5}])
+        page.refresh_videos()
+        self.assertEqual((page.entries[0].team, page.entries[0].seed), ("7", (5, 5)))
+
     def test_typing_after_a_click_goes_to_the_next_robot(self):
         from control_vision.app.pages.identity import IdentityPage
         self.add_video()
@@ -496,6 +553,17 @@ class WindowSetupTests(SetupTest):
             self.window.open_in_calibrate(second)
         self.assertEqual(self.window.tabs.currentIndex(), mw.CALIBRATE_TAB)
         self.assertEqual(int(page.video["id"]), second)
+
+    def test_damaged_calibration_does_not_block_opening(self):
+        window = self.window
+        video, _ = self.add_video()
+        self.db.save_calibration(video, CORNERS, {})
+        self.db.connection.execute("UPDATE calibrations SET corners_json='{bad' WHERE video_id=?", (video,))
+        window.db, window.project_id = self.db, self.project
+        with patch.object(window, "_show_status") as status:
+            window.refresh_home()
+        self.assertIn("could not read", status.call_args.args[0])
+        self.assertIsNone(window.calibrate_page.db)
 
     def test_closing_the_app_asks_about_unsaved_setup_edits(self):
         from PySide6.QtGui import QCloseEvent
