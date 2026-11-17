@@ -1016,7 +1016,7 @@ class MainWindow(QMainWindow):
         try:
             self.db.touch_project(self.project_id, project_library.now_iso())
             self.library.register(Path(self.db.path))
-        except (OSError, sqlite3.Error) as exc:
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
             self._show_status(f"The project is open, but the recent list was not updated: {exc}", "pending")
         self.refresh_dashboard()
 
@@ -1092,6 +1092,10 @@ class MainWindow(QMainWindow):
     def delete_project_file(self, path):
         path = Path(path)
         summary = project_library.summarize_project(path)
+        if summary.missing:
+            # Nothing to move to the Recycle Bin: just drop the stale entry.
+            self.forget_project_file(path)
+            return
         if self._is_open_project(path):
             QMessageBox.information(self, "Project is open",
                                     f"\"{summary.display_name}\" is open. Open another project before deleting it.")
