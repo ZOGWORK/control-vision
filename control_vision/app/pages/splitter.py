@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import cv2
-from PySide6.QtCore import QRectF, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QRectF, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
@@ -224,7 +225,12 @@ class ClipWorker(QThread):
                 if self.cancelled:
                     break
                 cut_clip(self.source, segment.start, segment.end, output, self.ffmpeg)
-                done.append((segment, output, probe_video(output)))
+                try:
+                    metadata = probe_video(output)
+                except Exception:
+                    output.unlink(missing_ok=True)  # Otherwise it would block a retry as "already exists".
+                    raise
+                done.append((segment, output, metadata))
                 self.progress.emit(number, len(self.jobs))
         except Exception as exc:
             self.finished_clips.emit(done)
@@ -637,6 +643,15 @@ class SplitterPage(QWidget):
         self._render()
         self.worker.start()
 
+    def stop_clips(self) -> None:
+        """Stop cutting and add what was cut, before the window closes the database."""
+        if self.worker is None:
+            return
+        self.worker.cancelled = True
+        self.worker.wait()
+        QCoreApplication.sendPostedEvents()  # Delivers finished_clips, which adds the rows.
+        self.worker = None
+
     def cancel_clips(self) -> None:
         if self.worker is not None:
             self.worker.cancelled = True
@@ -644,29 +659,35 @@ class SplitterPage(QWidget):
 
     def _clips_done(self, done: list) -> None:
         db, project_id = getattr(self, "_clip_target", (self.db, self.project_id))
-        details = db.project_details(project_id) or {}
-        ids = []
-        for segment, path, metadata in done:
-            video_id = db.add_video(project_id, path, metadata, details.get("event_code"), segment.match or None)
-            db.set_video_details(video_id, file_size=Path(path).stat().st_size)
-            ids.append(video_id)
-        if (db, project_id) != (self.db, self.project_id):
-            # The project was switched while cutting: the videos stay with the project they were cut for.
+        same_project = (db, project_id) == (self.db, self.project_id)
+        ids, error = [], None
+        try:
+            details = db.project_details(project_id) or {}
+            for segment, path, metadata in done:
+                video_id = db.add_video(project_id, path, metadata, details.get("event_code"), segment.match or None)
+                ids.append(video_id)
+                if same_project:  # Cut and added: it is no longer a split to cut.
+                    self.segments = [other for other in self.segments if other is not segment]
+                try:
+                    db.set_video_details(video_id, file_size=Path(path).stat().st_size)
+                except OSError:
+                    pass  # The size is only shown in tables.
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            error = exc
+        finally:
             if self.worker is not None:
                 self.worker.wait()
             self.worker = None
             self.progress.hide(); self.cancel_btn.hide()
+        if not same_project:
+            # The project was switched while cutting: the videos stay with the project they were cut for.
             self._render()
             return
-        made = {id(segment) for segment, _path, _metadata in done}
-        self.segments = [segment for segment in self.segments if id(segment) not in made]
-        if self.worker is not None:
-            self.worker.wait()
-        self.worker = None
-        self.progress.hide(); self.cancel_btn.hide()
         self._changed()
         if ids:
             self._say(f"✓ Added {len(ids)} match video(s) to the project. Clips start at the nearest keyframe, "
                       "so they can begin a moment early.", "success")
             self.calibrate_btn.show()
             self.clips_created.emit(ids)
+        if error is not None:
+            self._say(f"✕ Could not add every match video to the project: {error}", "danger")
