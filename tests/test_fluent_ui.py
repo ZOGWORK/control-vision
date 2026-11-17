@@ -27,6 +27,25 @@ class FluentFoundationTests(unittest.TestCase):
         # On dark, Fluent draws a lighter shade of the accent; it must still be volt (yellow-green), not blue.
         self.assertLess(abs(themeColor().hslHue() - QColor(theme.VOLT).hslHue()), 6)
 
+    def test_applying_the_theme_writes_no_config_file(self):
+        import tempfile
+        from unittest import mock
+        from PySide6.QtGui import QColor
+        from qfluentwidgets import Theme, qconfig
+        from control_vision.ui import theme
+        # Start from other values: qfluentwidgets skips saving when a value does not change.
+        qconfig.set(qconfig.themeMode, Theme.LIGHT, save=False)
+        qconfig.set(qconfig.themeColor, QColor("#0078D4"), save=False)
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(qconfig, "save") as save:
+            before = Path.cwd()
+            os.chdir(folder)
+            try:
+                theme.apply()
+            finally:
+                os.chdir(before)
+            self.assertEqual(list(Path(folder).rglob("*")), [])
+        save.assert_not_called()
+
     def test_buttons_are_the_library_widgets(self):
         from qfluentwidgets import PrimaryPushButton, PushButton
         from control_vision.ui import components, theme

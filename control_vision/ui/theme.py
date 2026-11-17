@@ -29,6 +29,7 @@ ALLIANCE = {"red": RED, "blue": BLUE}
 
 
 def apply() -> None:
-    """Dark Fluent theme with the volt accent. Call once, after QApplication exists."""
-    setTheme(Theme.DARK)
-    setThemeColor(QColor(VOLT))
+    """Dark Fluent theme with the volt accent. Call once, after QApplication exists. Nothing is written to disk:
+    qfluentwidgets would otherwise save config/config.json in the working directory."""
+    setTheme(Theme.DARK, save=False)
+    setThemeColor(QColor(VOLT), save=False)
