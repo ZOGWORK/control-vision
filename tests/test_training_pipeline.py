@@ -196,6 +196,114 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(self.fake.feeds[0]["images"].shape, (1, 3, 640, 640))
         self.assertEqual(set(self.fake.env_at_init), {("False", "True")})
 
+    def _train_list(self, *lines):
+        listed = self.work / "train_list.txt"
+        listed.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+        return listed
+
+    def test_train_list_oversamples_audited_training_images(self):
+        listed = self._train_list("images/train/a.jpg", "./images/train/a.jpg", str(self.root / "images/train/a.jpg"))
+        seen = {}
+
+        def capture():
+            # The list Ultralytics trains on exists only while it trains.
+            [train] = self.fake.called("train")
+            data = json.loads(Path(train["data"]).read_text(encoding="utf-8"))
+            seen["data"] = data
+            seen["lines"] = Path(data["train"]).read_text(encoding="utf-8").splitlines()
+
+        self.fake.on_train = capture
+        code, stderr = self.run_main("--train-list", str(listed))
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(seen["lines"], [str((self.root / "images/train/a.jpg").resolve())] * 3)
+        self.assertEqual(seen["data"]["val"], "images/val")
+        record = self.record()
+        self.assertEqual(record["train_list"], {"file": str(listed.resolve()), "sha256": train_yolo._sha256(listed),
+                                                "lines": 3, "unique_images": 1, "robot_images": 1,
+                                                "train_images": 1,
+                                                "train_images_not_listed": 0})
+        # The audit and the dataset hash still cover images/train.
+        self.assertEqual(record["split_provenance"]["mode"], "match_audited")
+        self.assertEqual(record["dataset_sha256"], dataset_hash(self.root, self.config, self.data))
+        self.assertFalse(record["fine_tune"])
+
+    def test_train_list_entries_outside_images_train_are_refused_before_training(self):
+        (self.root / "notes.txt").write_text("", encoding="utf-8")
+        for entry, message in (("images/val/a.jpg", "not inside the training images"),
+                               ("images/train/../val/a.jpg", "not inside the training images"),
+                               ("../outside.jpg", "not inside the training images"),
+                               ("images/train/missing.jpg", "not an existing training image"),
+                               ("notes.txt", "not inside the training images"),
+                               ("images/train", "not an existing training image")):
+            with self.subTest(entry=entry):
+                code, stderr = self.run_main("--train-list", str(self._train_list("images/train/a.jpg", entry)))
+                self.assertEqual(code, 2)
+                self.assertIn(message, stderr)
+                self.assert_not_trained()
+        code, stderr = self.run_main("--train-list", str(self._train_list("", "  ")))
+        self.assertEqual(code, 2)
+        self.assertIn("names no images", stderr)
+        code, stderr = self.run_main("--train-list", str(self.work / "absent.txt"))
+        self.assertEqual(code, 2)
+        self.assertIn("Cannot read the train list", stderr)
+        self.assert_not_trained()
+
+    def test_train_list_record_describes_the_bytes_trained_on(self):
+        import hashlib
+        listed = self._train_list("images/train/a.jpg", "images/train/a.jpg")
+        original = listed.read_bytes()
+        read_text, read_bytes = Path.read_text, Path.read_bytes
+        list_read, rewritten = [], []
+
+        def note_list_read(path, *args, **kwargs):
+            if path == listed:
+                list_read.append(path)
+            return read_bytes(path, *args, **kwargs)
+
+        def rewrite_during_label_reads(path, *args, **kwargs):
+            # A generating script rewrites the list after it was read, while train_list reads the labels.
+            if path == listed:
+                list_read.append(path)
+            elif list_read and not rewritten and path.parent.name == "train" and path.parent.parent.name == "labels":
+                listed.write_text("images/train/a.jpg\n", encoding="utf-8")
+                rewritten.append(path)
+            return read_text(path, *args, **kwargs)
+
+        seen = {}
+        self.fake.on_train = lambda: seen.setdefault("lines", Path(json.loads(Path(
+            self.fake.called("train")[0]["data"]).read_text(encoding="utf-8"))["train"]).read_text(
+            encoding="utf-8").splitlines())
+        with patch.object(Path, "read_text", rewrite_during_label_reads), patch.object(Path, "read_bytes", note_list_read):
+            code, stderr = self.run_main("--train-list", str(listed))
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(rewritten)
+        self.assertEqual(len(seen["lines"]), 2)
+        self.assertEqual(self.record()["train_list"]["sha256"], hashlib.sha256(original).hexdigest())
+        self.assertEqual(self.record()["train_list"]["lines"], 2)
+
+    def test_train_list_without_robots_is_refused_before_training(self):
+        ok, encoded = cv2.imencode(".jpg", np.full((32, 32, 3), 60, dtype=np.uint8))
+        (self.root / "images" / "train" / "b.jpg").write_bytes(encoded.tobytes())
+        (self.root / "labels" / "train" / "b.txt").write_text("2 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+        with self.manifest.open("a", encoding="utf-8") as stream:
+            stream.write("images/train/b.jpg,train,USWASAM1:Q1,team video,team-owned\n")
+        self.config["names"] = {"0": "robot", "1": "pollen", "2": "nectar"}
+        self._write_config()
+        code, stderr = self.run_main("--train-list", str(self._train_list("images/train/b.jpg", "images/train/b.jpg")))
+        self.assertEqual(code, 2)
+        self.assertIn("names no image with a labeled robot", stderr)
+        self.assert_not_trained()
+
+    def test_fine_tune_names_the_optimizer_so_the_low_learning_rate_applies(self):
+        code, stderr = self.run_main("--fine-tune")
+        self.assertEqual(code, 0, stderr)
+        [train] = self.fake.called("train")
+        self.assertEqual({key: train[key] for key in train_yolo.FINE_TUNE_DEFAULTS}, train_yolo.FINE_TUNE_DEFAULTS)
+        self.assertEqual(train["optimizer"], "AdamW")
+        self.assertEqual((train["hsv_h"], train["plots"]), (0.0, False))  # the usual defaults still apply
+        self.assertTrue(self.record()["fine_tune"])
+        self.assertIsNone(self.record()["train_list"])
+
     def test_missing_manifest_is_refused_before_training(self):
         self.manifest.unlink()
         with patch.object(train_yolo, "validate_dataset", side_effect=AssertionError("images checked")):

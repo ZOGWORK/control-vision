@@ -26,6 +26,8 @@ The JSON record contains:
 | `base_weights`, `base_weights_sha256` | Starting checkpoint and its SHA-256. |
 | `best_checkpoint` | Local path of the best training checkpoint that was exported. |
 | `training_config` | Every training setting passed to Ultralytics, including image size, epochs, batch, learning rate, patience, and HSV augmentation. |
+| `fine_tune` | `true` when the run used `--fine-tune` (its settings are then in `training_config`), otherwise `false`. |
+| `train_list` | `null` when every image in `images/train` was trained on once. For a run with `--train-list`, it describes the list that was trained on: `file` (its path), `sha256` (of the bytes read), `lines` (images trained on per epoch, counting repeats), `unique_images`, `robot_images` (listed images with a labeled robot), `train_images` (images in `images/train`), and `train_images_not_listed`. |
 | `validation_metrics` | Val-split metrics: `overall` and `per_class` mAP50 and mAP50-95 (`null` for a class with no val labels), plus Ultralytics' `summary`. |
 | `export` | ONNX export settings, including the requested opset. |
 | `onnxruntime_check` | Result of the ONNX Runtime CPU check: opset found in the file, output shape, and `smoke_run`. |
