@@ -65,7 +65,7 @@ class _Logs(logging.Handler):
         self.messages.append(record.getMessage())
 
 
-def run_script(script, seeds, confidence=0.25, track_kwargs=None, paint=None, alliances="red"):
+def run_script(script, seeds, confidence=0.25, track_kwargs=None, paint=None, alliances="red", reseeds=None):
     """Run track_video on a scripted tracker output.
 
     ``script`` is a list, one entry per frame at 8 fps, of (track id, x ft, y ft)
@@ -100,7 +100,8 @@ def run_script(script, seeds, confidence=0.25, track_kwargs=None, paint=None, al
              patch("ultralytics.YOLO", return_value=SimpleNamespace(track=track)):
             rows, _, _ = track_video(Path("match.mp4"), model_path, CORNERS, seed_points, FPS,
                                      lambda: False, lambda *_: None, logger,
-                                     confidence_threshold=confidence, alliances=alliances)
+                                     confidence_threshold=confidence, alliances=alliances,
+                                     reseeds=[(rid, t, _px(x), _px(y)) for rid, t, x, y in reseeds or []])
     return rows, logs.messages, calls
 
 
@@ -291,6 +292,60 @@ class SeedWindowReseedTests(unittest.TestCase):
         self.assertEqual(_overlap_of_smaller((0, 0, 10, 10), (2, 2, 6, 6)), 1.0)
         self.assertEqual(_overlap_of_smaller((0, 0, 10, 10), (5, 0, 15, 10)), 0.5)
         self.assertEqual(_overlap_of_smaller((0, 0, 10, 10), (10, 0, 20, 10)), 0.0)
+
+
+class UserReseedTests(unittest.TestCase):
+    """Mid-match re-seeds: (robot id, time s, x ft, y ft) in these tests."""
+
+    def test_reseed_brings_back_a_robot_after_its_recovery_window_closed(self):
+        # Lost at 0.875 s; track 5 appears 10.5 s later, too late for automatic recovery.
+        script = _lost_then([(5, 3, 3)], gap_frames=84, tail=10)
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 11.5, 3, 3)])
+        self.assertTrue(any("identity recovery stopped" in m for m in messages), messages)
+        self.assertIn("Re-seeded robot 1 at 11.50s by the user: track 1 -> 5; 0 earlier positions kept",
+                      messages)
+        times = robot_times(rows, 1)
+        self.assertEqual([t for t in times if t > 1], [11.5 + 0.125 * i for i in range(10)])
+
+    def test_reseed_keeps_the_new_tracks_positions_since_the_robot_vanished(self):
+        # Two candidates block automatic recovery; the user picks track 5 at 1.625 s.
+        script = _lost_then([(5, 4, 3), (6, 3, 4)])
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 1.625, 4, 3)])
+        self.assertEqual(recovered(messages), [])
+        self.assertIn("Re-seeded robot 1 at 1.62s by the user: track 1 -> 5; 4 earlier positions kept", messages)
+        # Positions are smoothed over +-2 samples, so check past the switch.
+        positions = {(round(row[3], 1), round(row[4], 1)) for row in rows if row[0] == 1 and row[2] >= 1.375}
+        self.assertEqual(positions, {(4.0, 3.0)})
+        times = robot_times(rows, 1)
+        self.assertEqual(len(times), len(set(times)))
+        self.assertEqual(min(t for t in times if t > 1), 1.125)
+
+    def test_reseed_onto_another_robots_track_releases_that_robot(self):
+        script = [[(1, 3, 3), (2, 8, 8)] for _ in range(16)]
+        rows, messages, _ = run_script(script, [(1, 3, 3), (2, 8, 8)], reseeds=[(1, 1.0, 8, 8)])
+        self.assertTrue(any(m.startswith("Robot 2 released from track 2 at 1.00s") for m in messages), messages)
+        self.assertEqual(max(robot_times(rows, 2)), 0.875)
+        after = {(round(row[3], 1), round(row[4], 1)) for row in rows if row[0] == 1 and row[2] >= 1.25}
+        self.assertEqual(after, {(8.0, 8.0)})
+
+    def test_click_on_no_robot_is_not_applied(self):
+        script = [[(1, 3, 3)] for _ in range(20)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 1.0, 9, 9)])
+        self.assertIn("Re-seed of robot 1 at 1.00s was not applied: no tracked robot box at the click within 1.0s",
+                      messages)
+        self.assertEqual(len(robot_times(rows, 1)), 20)
+
+    def test_click_on_the_robots_own_track_changes_nothing(self):
+        script = [[(1, 3, 3)] for _ in range(20)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 1.0, 3, 3)])
+        self.assertIn("Re-seed of robot 1 at 1.00s confirms its current track 1", messages)
+        self.assertEqual(len(robot_times(rows, 1)), 20)
+
+    def test_invalid_reseeds_are_rejected_before_processing(self):
+        script = [[(1, 3, 3)] for _ in range(4)]
+        for bad in ([(2, 1.0, 3, 3)], [(1, -1.0, 3, 3)], [(1, float("nan"), 3, 3)]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                run_script(script, [(1, 3, 3)], reseeds=bad)
 
 
 class AllianceColourRunTests(unittest.TestCase):

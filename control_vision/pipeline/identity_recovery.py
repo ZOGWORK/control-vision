@@ -161,6 +161,12 @@ class IdentityRecovery:
         self.reference_closed.add(recovery.robot_id)
         self.rivals_seen.pop(recovery.robot_id, None)
 
+    def reseed(self, robot_id: int, track_id: int) -> None:
+        """A user assigned ``track_id`` to the robot: reopen its recovery window."""
+        self.ever_assigned.add(track_id)
+        self.expired.discard(robot_id)
+        self.rivals_seen.pop(robot_id, None)
+
     def forget_robot(self, robot_id: int) -> None:
         """Drop a robot's sightings and colour samples after it is re-seeded to another track."""
         self.last_seen.pop(robot_id, None)
