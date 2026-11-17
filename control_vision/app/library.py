@@ -239,7 +239,14 @@ class ProjectLibrary:
         """Point an entry at a file the user located after it moved."""
         old, new = Path(old).resolve(), Path(new).resolve()
         data = self._load()
-        data["projects"] = [str(new) if Path(entry).resolve() == old else entry for entry in data["projects"]]
+        entries = []
+        for entry in data["projects"]:
+            resolved = Path(entry).resolve()
+            target = str(new) if resolved == old else entry
+            # The located file may already be listed: keep it once, or it is counted twice.
+            if Path(target).resolve() not in {Path(kept).resolve() for kept in entries}:
+                entries.append(target)
+        data["projects"] = entries
         if data.get("last") and Path(data["last"]).resolve() == old:
             data["last"] = str(new)
         _write_json(self.file, data)
@@ -265,7 +272,7 @@ def remove_partial_database(path: Path) -> None:
     for candidate in (path, *(path.with_name(path.name + suffix) for suffix in ("-journal", "-wal", "-shm"))):
         try:
             candidate.unlink()
-        except FileNotFoundError:
+        except OSError:  # Already gone, or still locked: cleanup is best effort.
             pass
 
 
@@ -289,9 +296,11 @@ def duplicate_project(source: Path, target: Path, new_name: str) -> Path:
         calibrations = {row["video_id"]: row for row in original.connection.execute("SELECT * FROM calibrations")}
     finally:
         original.close()
-    copy = ProjectDatabase(target)
+    copy = None
     completed = False
     try:
+        # Opening creates the file before the schema is written, so it belongs inside the cleanup.
+        copy = ProjectDatabase(target)
         project_id = copy.add_project(new_name)
         copy.set_project_details(project_id, **{key: project[key] for key in
                                                 ("event_name", "event_code", "event_date", "season", "notes",
@@ -308,7 +317,8 @@ def duplicate_project(source: Path, target: Path, new_name: str) -> Path:
                                       json.loads(calibration["zones_json"] or "{}"))
         completed = True
     finally:
-        copy.close()
+        if copy is not None:
+            copy.close()
         if not completed:
             # A half-copied project would block a retry into the same folder.
             remove_partial_database(target)
@@ -388,7 +398,11 @@ class ModelStore:
 
     def _load(self) -> dict:
         data = _read_json(self.file, {"models": [], "active": None})
-        data.setdefault("models", [])
+        # As with projects.json, a damaged file must not break adding or choosing a model.
+        models = data.get("models")
+        data["models"] = [entry for entry in models if isinstance(entry, dict)] if isinstance(models, list) else []
+        if not isinstance(data.get("active"), str) or not data.get("active"):
+            data["active"] = None
         return data
 
     def versions(self) -> list[ModelVersion]:
