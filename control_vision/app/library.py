@@ -204,15 +204,19 @@ class ProjectLibrary:
 
     def _load(self) -> dict:
         data = _read_json(self.file, {"projects": [], "last": None})
-        data.setdefault("projects", [])
+        # A hand-edited or damaged file may hold anything: keep only path strings.
+        entries = data.get("projects")
+        data["projects"] = [entry for entry in entries if isinstance(entry, str) and entry] if isinstance(entries, list) else []
+        if not isinstance(data.get("last"), str) or not data.get("last"):
+            data["last"] = None
         return data
 
     def paths(self) -> list[Path]:
-        return [Path(entry) for entry in self._load()["projects"] if isinstance(entry, str)]
+        return [Path(entry) for entry in self._load()["projects"]]
 
     def last(self) -> Path | None:
-        last = self._load().get("last")
-        return Path(last) if isinstance(last, str) else None
+        last = self._load()["last"]
+        return Path(last) if last else None
 
     def register(self, path: Path, make_last: bool = True) -> None:
         path = Path(path).resolve()
@@ -256,6 +260,15 @@ def unique_name(name: str, existing: set[str]) -> str:
     return f"{name} ({number})"
 
 
+def remove_partial_database(path: Path) -> None:
+    """Delete a project file this code just created, with its SQLite side files, after a failure."""
+    for candidate in (path, *(path.with_name(path.name + suffix) for suffix in ("-journal", "-wal", "-shm"))):
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def duplicate_project(source: Path, target: Path, new_name: str) -> Path:
     """Copy a project's videos and calibrations into a new project file, without results.
 
@@ -277,6 +290,7 @@ def duplicate_project(source: Path, target: Path, new_name: str) -> Path:
     finally:
         original.close()
     copy = ProjectDatabase(target)
+    completed = False
     try:
         project_id = copy.add_project(new_name)
         copy.set_project_details(project_id, **{key: project[key] for key in
@@ -292,8 +306,12 @@ def duplicate_project(source: Path, target: Path, new_name: str) -> Path:
             if calibration is not None:
                 copy.save_calibration(video_id, json.loads(calibration["corners_json"]),
                                       json.loads(calibration["zones_json"] or "{}"))
+        completed = True
     finally:
         copy.close()
+        if not completed:
+            # A half-copied project would block a retry into the same folder.
+            remove_partial_database(target)
     return target
 
 
