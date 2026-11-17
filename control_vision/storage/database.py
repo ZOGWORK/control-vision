@@ -283,7 +283,7 @@ class ProjectDatabase:
             return None
         return json.loads(row["corners_json"]), json.loads(row["zones_json"] or "{}")
 
-    def save_identity(self, video_id: int, entries: list[dict[str, Any]]) -> list[int]:
+    def save_identity(self, video_id: int, entries: list[dict[str, Any]], mark_unprocessed: bool = False) -> list[int]:
         """Save a match's robot identities in one transaction; returns the robot ids in entry order.
 
         Each entry has team_number, alliance, start_position (or None), absent,
@@ -291,6 +291,8 @@ class ProjectDatabase:
         id. Existing robots are updated in place so tracks, cycles and events
         that point at them keep pointing at the right robot. Robots of this
         video that are not in ``entries`` are deleted with their results.
+        With ``mark_unprocessed`` the video's results are marked out of date in
+        the same transaction, so robots and status can never disagree.
         """
         teams = [int(entry["team_number"]) for entry in entries]
         if len(teams) != len(set(teams)):
@@ -325,6 +327,8 @@ class ProjectDatabase:
                     ids.append(_inserted_id(cursor))
             for robot_id in existing - set(ids):
                 self.connection.execute("DELETE FROM robots WHERE id=?", (robot_id,))
+            if mark_unprocessed:
+                self.connection.execute("UPDATE videos SET analysis_status='unprocessed' WHERE id=?", (video_id,))
         return ids
 
     def tracks_for_video(self, video_id: int):
