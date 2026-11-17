@@ -248,6 +248,39 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertIn("Cannot read the train list", stderr)
         self.assert_not_trained()
 
+    def test_train_list_record_describes_the_bytes_trained_on(self):
+        import hashlib
+        listed = self._train_list("images/train/a.jpg", "images/train/a.jpg")
+        original = listed.read_bytes()
+        read_text, read_bytes = Path.read_text, Path.read_bytes
+        list_read, rewritten = [], []
+
+        def note_list_read(path, *args, **kwargs):
+            if path == listed:
+                list_read.append(path)
+            return read_bytes(path, *args, **kwargs)
+
+        def rewrite_during_label_reads(path, *args, **kwargs):
+            # A generating script rewrites the list after it was read, while train_list reads the labels.
+            if path == listed:
+                list_read.append(path)
+            elif list_read and not rewritten and path.parent.name == "train" and path.parent.parent.name == "labels":
+                listed.write_text("images/train/a.jpg\n", encoding="utf-8")
+                rewritten.append(path)
+            return read_text(path, *args, **kwargs)
+
+        seen = {}
+        self.fake.on_train = lambda: seen.setdefault("lines", Path(json.loads(Path(
+            self.fake.called("train")[0]["data"]).read_text(encoding="utf-8"))["train"]).read_text(
+            encoding="utf-8").splitlines())
+        with patch.object(Path, "read_text", rewrite_during_label_reads), patch.object(Path, "read_bytes", note_list_read):
+            code, stderr = self.run_main("--train-list", str(listed))
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(rewritten)
+        self.assertEqual(len(seen["lines"]), 2)
+        self.assertEqual(self.record()["train_list"]["sha256"], hashlib.sha256(original).hexdigest())
+        self.assertEqual(self.record()["train_list"]["lines"], 2)
+
     def test_train_list_without_robots_is_refused_before_training(self):
         ok, encoded = cv2.imencode(".jpg", np.full((32, 32, 3), 60, dtype=np.uint8))
         (self.root / "images" / "train" / "b.jpg").write_bytes(encoded.tobytes())

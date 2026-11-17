@@ -269,7 +269,9 @@ def train_list(root: Path, config: dict, list_file: Path) -> tuple[list[Path], d
     root = root.resolve()
     train_dir = _split_images_dir(root, config, "train")
     try:
-        text = list_file.read_text(encoding="utf-8-sig")
+        # Read once: the recorded hash and counts describe exactly these bytes, which are what is trained on.
+        raw = list_file.read_bytes()
+        text = raw.decode("utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         raise ValueError(f"Cannot read the train list {list_file}: {exc}") from None
     images: list[Path] = []
@@ -297,7 +299,7 @@ def train_list(root: Path, config: dict, list_file: Path) -> tuple[list[Path], d
     if not with_robots:
         raise ValueError(f"The train list {list_file.name} names no image with a labeled robot (class 0)")
     in_train = sum(1 for path in train_dir.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
-    return images, {"file": str(list_file.resolve()), "sha256": _sha256(list_file), "lines": len(images),
+    return images, {"file": str(list_file.resolve()), "sha256": hashlib.sha256(raw).hexdigest(), "lines": len(images),
                     "unique_images": len(unique), "robot_images": with_robots, "train_images": in_train,
                     "train_images_not_listed": in_train - len(unique)}
 
