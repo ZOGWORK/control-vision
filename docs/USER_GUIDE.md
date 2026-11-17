@@ -22,6 +22,8 @@ Calibrate field: pick a clear frame, click the four field corners clockwise from
 
 Robots: select a robot card and click that robot on the frame where it touches the floor, within the first 3 seconds (the slider is limited to that window, which is when seeds are matched to detections). Enter the team number and alliance, and the starting position if known. Mark a robot as not visible yet if it cannot be seen then; it is kept but not tracked. A duplicate team number or a half-filled card blocks saving, and a split other than 2 v 2 is pointed out. Changing alliances, seeds or the set of robots after a video was processed asks first and marks the video for reprocessing; team numbers and positions can be changed without that.
 
+Later corrections: when a processed match shows a robot lost or mixed up, open Robots, choose Later corrections, select that robot's card, move the slider to the moment and click where the robot touches the floor. The correction is saved at once and listed under the cards; double-click one to go to it, or select it and Delete correction. Corrections apply the next time the match is processed: the robot is put on the detected robot box that contains the click (or the nearest one within 1 second), and its earlier positions on that box since it was last seen are kept. Only robots saved with a start click can be corrected.
+
 ## Analyze a practice video or match
 
 1. Create a project with New project: name it and its event (the event code is optional), add match videos, which stay where they are, and choose the detector model. Nothing is saved until Create project. Or reopen a project's `control_vision.sqlite` file.

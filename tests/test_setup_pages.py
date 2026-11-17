@@ -532,6 +532,76 @@ class IdentityTests(SetupTest):
         page.swap(0, 1)
         self.assertEqual((page.entries[0].team, page.entries[0].seed), ("16655", (40, 60)))
 
+    def test_later_corrections_are_saved_shown_near_their_time_and_deleted(self):
+        from control_vision.app.pages.identity import IdentityPage
+        video, _ = self.add_video()
+        ids = self.db.save_identity(video, [
+            {"team_number": 7, "alliance": "red", "seed_x": 5, "seed_y": 5},
+            {"team_number": 8, "alliance": "blue", "absent": True}])
+        page = IdentityPage()
+        page.set_project(self.db, self.project)
+        self.assertEqual(page.frame_slider.maximum(), 30)  # start mode: the 3 s seed window
+        self.assertFalse(page.corrections_box.isVisibleTo(page))
+        page.later_mode.click()
+        self.assertTrue(page.corrections_box.isVisibleTo(page))
+        self.assertEqual(page.frame_slider.maximum(), 20)  # the whole 2 s video
+        page.select(0)
+        page.frame_slider.setValue(15)
+        page._frame_clicked(30, 40)
+        rows = self.db.reseeds_for_video(video)
+        self.assertEqual([(r["robot_id"], r["t_s"], r["x_px"], r["y_px"]) for r in rows], [(ids[0], 1.5, 30.0, 40.0)])
+        self.assertEqual(page.correction_list.count(), 1)
+        self.assertIn("1.5 s — Robot 1 · 7", page.correction_list.item(0).text())
+        self.assertEqual(page.canvas.corrections, [(30.0, 40.0, 0)])
+        self.assertEqual(page.entries[0].seed, (5, 5))  # the start click is untouched
+        page.frame_slider.setValue(0)
+        self.assertEqual(page.canvas.corrections, [])  # 1.5 s away: not drawn
+        # A robot saved as not visible has no start click, so it cannot be corrected.
+        page.select(1)
+        self.assertFalse(page.add_correction(10, 10))
+        self.assertIn("start click", page.status.text())
+        self.assertEqual(len(self.db.reseeds_for_video(video)), 1)
+        # Leaving and coming back reloads them from the project.
+        page.start_mode.click()
+        self.assertIsNone(page.canvas.corrections)
+        page.load_video(video)
+        self.assertEqual(page.correction_list.count(), 1)
+        page.later_mode.click()
+        self.assertFalse(page.delete_correction_btn.isEnabled())
+        page.correction_list.setCurrentRow(0)
+        self.assertTrue(page.delete_correction_btn.isEnabled())
+        page.delete_correction()
+        self.assertEqual(self.db.reseeds_for_video(video), [])
+        self.assertEqual(page.correction_list.count(), 0)
+
+    def test_start_clicks_do_not_make_corrections(self):
+        from control_vision.app.pages.identity import IdentityPage
+        video, _ = self.add_video()
+        self.db.save_identity(video, [{"team_number": 7, "alliance": "red", "seed_x": 5, "seed_y": 5}])
+        page = IdentityPage()
+        page.set_project(self.db, self.project)
+        page.select(0)
+        page._frame_clicked(30, 40)
+        self.assertEqual(page.entries[0].seed, (30, 40))
+        self.assertEqual(self.db.reseeds_for_video(video), [])
+
+    def test_unsaved_start_changes_are_resolved_before_corrections(self):
+        from control_vision.app.pages import identity
+        video, _ = self.add_video()
+        self.db.save_identity(video, [{"team_number": 7, "alliance": "red", "seed_x": 5, "seed_y": 5}])
+        page = identity.IdentityPage()
+        page.set_project(self.db, self.project)
+        page.select(0)
+        page._frame_clicked(30, 40)
+        with patch.object(identity.QMessageBox, "question", return_value=identity.QMessageBox.StandardButton.Cancel):
+            page.later_mode.click()
+        self.assertTrue(page.start_mode.isChecked())
+        with patch.object(identity.QMessageBox, "question", return_value=identity.QMessageBox.StandardButton.Discard):
+            page.later_mode.click()
+        self.assertTrue(page.later_mode.isChecked())
+        self.assertEqual(page.entries[0].seed, (5, 5))
+        self.assertFalse(page.dirty)
+
     def test_changing_alliances_after_processing_asks_and_hides_results(self):
         from control_vision.app.pages import identity
         video, _ = self.add_video()
