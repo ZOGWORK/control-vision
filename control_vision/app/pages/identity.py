@@ -345,7 +345,10 @@ class IdentityPage(QWidget):
         elif self.video_combo.count():
             self.load_video(self.video_combo.itemData(0))
         else:
-            self.video = None
+            # No video: nothing from the previous project or video stays on the cards or the frame.
+            self.video, self.dirty, self.current = None, False, 0
+            self.entries = [RobotEntry() for _ in range(ROBOTS_PER_MATCH)]
+            self.saved_entries = [RobotEntry() for _ in range(ROBOTS_PER_MATCH)]
             self.canvas.placeholder = "Import a video first"
             self.canvas.set_frame(None)
             self._render()
