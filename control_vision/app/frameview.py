@@ -114,8 +114,18 @@ class FrameView(QWidget):
             self.moved.emit(*video)
         self.update()
 
+    def clamped_video(self, point: QPointF) -> tuple[float, float] | None:
+        """Video pixels for a point, moved onto the frame's edge when it is outside."""
+        if self.frame is None:
+            return None
+        rect = self.frame_rect()
+        inside = QPointF(min(max(point.x(), rect.left()), rect.right()), min(max(point.y(), rect.top()), rect.bottom()))
+        height, width = self.frame.shape[:2]
+        return ((inside.x() - rect.left()) * width / rect.width(), (inside.y() - rect.top()) * height / rect.height())
+
     def mouseReleaseEvent(self, event):
-        video = self.to_video(event.position())
+        # Always report a release, even over the black bars, so a drag never stays active.
+        video = self.clamped_video(event.position())
         if event.button() == Qt.MouseButton.LeftButton and video is not None:
             self.released.emit(*video)
 
