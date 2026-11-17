@@ -317,6 +317,45 @@ class WindowQueueTests(ReadyMatch):
         self.assertEqual(len(started), 2)
         self.assertEqual(window._queue_job, second)
 
+    def test_the_queue_pauses_and_says_so_while_another_run_is_active(self):
+        video, _ = self.ready_match(processed=False)
+        self.open()
+        model = self.root / "model.onnx"; model.write_bytes(b"x")
+        [job] = self.db.queue_jobs([video], 8, "yolo", str(model))
+        window = self.window
+        window._processing_active = True                    # A single-match run is going.
+        try:
+            with patch.object(window, "process") as process:
+                window.start_queue()
+                self.app.processEvents()
+            process.assert_not_called()
+            self.assertTrue(window._queue_paused)
+            self.assertIn("another run is in progress", window.progress_label.text())
+            self.assertEqual(self.db.processing_jobs()[0]["status"], "queued")
+        finally:
+            window._processing_active = False
+
+    def test_a_job_whose_start_raises_fails_and_pauses_the_queue(self):
+        first_video, _ = self.ready_match("Q1.mp4", processed=False)
+        second_video, _ = self.ready_match("Q2.mp4", processed=False)
+        self.open()
+        model = self.root / "model.onnx"; model.write_bytes(b"x")
+        first, second = self.db.queue_jobs([first_video, second_video], 6, "yolo", str(model))
+        window = self.window
+        window.sample_rate.setCurrentText("8")
+        with patch.object(window, "process", side_effect=OSError("run log is read-only")) as process:
+            window.start_queue()
+            self.app.processEvents()
+        self.assertEqual(process.call_count, 1)
+        jobs = {int(job["id"]): job for job in self.db.processing_jobs()}
+        self.assertEqual(jobs[first]["status"], "failed")
+        self.assertIn("run log is read-only", jobs[first]["error"])
+        self.assertEqual(jobs[second]["status"], "queued")
+        self.assertIsNone(window._queue_job)
+        self.assertTrue(window._queue_paused)
+        self.assertEqual(window.sample_rate.currentText(), "8")   # The user's setting is back.
+        self.assertIn("Processing could not start", window.progress_label.text())
+
     def test_a_finished_job_is_marked_done(self):
         video, ids = self.ready_match(processed=False)
         self.open()
