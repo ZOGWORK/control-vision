@@ -98,6 +98,43 @@ class ProjectsPageTests(PageTest):
         page.show_archived.setChecked(True)
         self.assertEqual(len(page.visible()), 4)
 
+    def test_remove_from_list_forgets_a_missing_project(self):
+        from control_vision.app.pages.projects import ProjectsPage
+        page = ProjectsPage()
+        page.refresh(self.summaries(), None)
+        forgotten, deleted = [], []
+        page.forget.connect(forgotten.append)
+        page.delete.connect(deleted.append)
+        missing_row = next(row for row in range(page.table.rowCount())
+                           if "Missing" in page.table.item(row, 6).text())
+        page.table.selectRow(missing_row)
+        self.assertEqual(page.delete_btn.text(), "Remove from list")
+        page.delete_btn.click()
+        self.assertEqual(len(forgotten), 1)
+        self.assertEqual(deleted, [])
+
+    def test_clear_filters_reveals_a_fully_archived_library(self):
+        from control_vision.app import library
+        from control_vision.app.pages.projects import ProjectsPage
+        page = ProjectsPage()
+        page.refresh([library.summarize_project(self.make_project("Old", "c", archived=True))], None)
+        self.assertEqual(page.visible(), [])
+        page.clear_filters()
+        self.assertEqual(len(page.visible()), 1)
+
+    def test_unreadable_files_are_not_shown_as_new_projects(self):
+        from control_vision.app import library
+        from control_vision.app.pages.home import ProjectCard
+        junk = self.root / "junk" / "control_vision.sqlite"
+        junk.parent.mkdir()
+        junk.write_bytes(b"not a database")
+        summary = library.summarize_project(junk)
+        card = ProjectCard(summary)
+        from PySide6.QtWidgets import QLabel
+        texts = [label.text() for label in card.findChildren(QLabel)]
+        self.assertIn("✕ Cannot read", texts)
+        self.assertNotIn("○ Not processed", texts)
+
     def test_model_column_names_the_active_version(self):
         from control_vision.app import library
         from control_vision.app.pages.projects import model_cell
@@ -118,6 +155,7 @@ class WizardTests(PageTest):
             (self.root / "v1.metrics.json").write_text(json.dumps({"map50": 0.8}), encoding="utf-8")
             store.add_file(weights)
         wizard = NewProjectWizard(store, lambda: set(names), lambda name: self.root / "projects" / name)
+        (self.root / "Q1.mp4").write_bytes(b"video")
         self.video = WizardVideo(path=self.root / "Q1.mp4", duration_s=150.0, size=1000, metadata=dict(META))
         return wizard
 
@@ -184,6 +222,49 @@ class WizardTests(PageTest):
         settings = json.loads((folder / "settings.json").read_text(encoding="utf-8"))
         self.assertTrue(settings["model_path"].endswith("v1.onnx"))
         self.assertEqual(wizard.step, 0)  # The wizard starts over after Create.
+        self.assertIsNone(wizard.model_list.currentItem())  # ...and keeps no model pick.
+
+    def reach_confirm(self, wizard, name="Meet"):
+        self.fill_first_step(wizard, name)
+        wizard.next()
+        wizard.videos = [self.video]
+        wizard._refresh_videos()
+        wizard.next()
+        wizard.model_list.setCurrentRow(0)
+        wizard.next()
+
+    def test_a_failed_create_leaves_the_folder_reusable(self):
+        from control_vision.app.pages import wizard as wizard_module
+        wizard = self.wizard()
+        self.reach_confirm(wizard)
+        folder = self.root / "projects" / "Meet"
+        with patch("control_vision.storage.database.ProjectDatabase.set_video_details", side_effect=OSError("disk full")):
+            wizard.create()
+        self.assertFalse(wizard.error.isHidden())
+        self.assertFalse(folder.exists())
+        self.assertIsNone(wizard_module.step_problem(0, wizard.spec(), set(), []))
+
+    def test_cancel_forgets_the_model_and_videos_can_be_removed(self):
+        wizard = self.wizard()
+        self.reach_confirm(wizard)
+        wizard.back(); wizard.back()
+        self.assertFalse(wizard.remove_video_btn.isEnabled())
+        wizard.video_list.setCurrentRow(0)
+        self.assertTrue(wizard.remove_video_btn.isEnabled())
+        wizard.remove_video_btn.click()
+        self.assertEqual(wizard.videos, [])
+        wizard.cancel()
+        self.assertIsNone(wizard.model_list.currentItem())
+
+    def test_moved_videos_are_skipped_and_names_are_escaped(self):
+        wizard = self.wizard()
+        self.reach_confirm(wizard, name="Meet <Final> & Co")
+        self.assertIn("&lt;Final&gt; &amp; Co", wizard.summary.text())
+        (self.root / "Q1.mp4").unlink()
+        wizard._show_step()
+        self.assertIn("File moved or deleted", wizard.video_list.item(0).text())
+        self.assertFalse(wizard.create_btn.isEnabled())
+        self.assertEqual(wizard.reason.text(), "Add at least 1 video")
 
 
 class WindowProjectTests(PageTest):
@@ -253,6 +334,17 @@ class WindowProjectTests(PageTest):
             window.delete_project_file(opened)
         told.assert_called_once()
         asked.assert_not_called()
+
+    def test_deleting_a_missing_project_just_removes_it_from_the_list(self):
+        from control_vision.app import main_window as mw
+        window = self.window
+        missing = self.root / "gone" / "control_vision.sqlite"
+        window.library.register(missing)
+        with patch.object(mw.QMessageBox, "question") as asked, patch.object(mw.QMessageBox, "critical") as failed:
+            window.delete_project_file(missing)
+        asked.assert_not_called()
+        failed.assert_not_called()
+        self.assertEqual(window.library.paths(), [])
 
 
 if __name__ == "__main__":
