@@ -380,6 +380,15 @@ class UserReseedTests(unittest.TestCase):
         self.assertEqual(len(recovered(messages)), 1, messages)
         self.assertIn("track 1 -> new track 5", recovered(messages)[0])
 
+    def test_a_click_inside_a_box_beats_a_nearer_box_it_is_only_near(self):
+        # Boxes are 8 px wide and 8 px tall above the footpoint (10 px per ft). Track 2's box is x 56-64,
+        # y 22-30 px; track 3 (footpoint (6.7, 2.2) ft) has box x 63-71, y 14-22 px. The click at (63.9, 22.5) px
+        # is inside track 2's box and 0.5 px below track 3's, yet 3.1 px from track 3's footpoint and 8.4 px
+        # from track 2's. Robot 1 must get track 2.
+        script = [[(1, 3, 3), (2, 6, 3), (3, 6.7, 2.2)] for _ in range(40)]
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 4.0, 6.39, 2.25)])
+        self.assertIn("Re-seeded robot 1 at 4.00s by the user: track 1 -> 2; 0 earlier positions kept", messages)
+
     def test_a_reseed_after_the_last_frame_is_reported(self):
         script = [[(1, 3, 3)] for _ in range(8)]
         rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 50.0, 3, 3)])

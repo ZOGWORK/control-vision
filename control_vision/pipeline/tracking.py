@@ -140,13 +140,16 @@ def _apply_reseed(robot_id, x, y, t_s, detections, visible, seed_to_track, recov
     held the clicked track loses it and becomes lost. Positions the track recorded
     while unowned, after the robot was last seen, are kept for the robot.
     """
-    margin = RESEED_BOX_MARGIN_PX
-    hits = [(math.hypot(fx - x, fy - y), tid) for tid, fx, fy, _, (x1, y1, x2, y2) in detections
-            if tid >= 0 and visible.get(tid) is not None
-            and x1 - margin <= x <= x2 + margin and y1 - margin <= y <= y2 + margin]
-    if not hits:
+    def hits(margin):
+        return [(math.hypot(fx - x, fy - y), tid) for tid, fx, fy, _, (x1, y1, x2, y2) in detections
+                if tid >= 0 and visible.get(tid) is not None
+                and x1 - margin <= x <= x2 + margin and y1 - margin <= y <= y2 + margin]
+
+    # A box the click is inside wins over one it is only near.
+    candidates = hits(0.0) or hits(RESEED_BOX_MARGIN_PX)
+    if not candidates:
         return False
-    track_id = min(hits)[1]
+    track_id = min(candidates)[1]
     if seed_to_track.get(robot_id) == track_id:
         # The user vouches for this identity now, so an expired robot can be re-linked again later.
         recovery.reseed(robot_id, track_id)
