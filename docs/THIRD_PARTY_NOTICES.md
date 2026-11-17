@@ -38,6 +38,10 @@ Versions are pinned in `requirements.txt` at the source commit.
   <https://code.qt.io/cgit/pyside/pyside-setup.git/>.
 - **Ultralytics**: AGPL-3.0, the same license as Control Vision
   (<https://github.com/ultralytics/ultralytics>).
+- **PySide6-Fluent-Widgets** (`qfluentwidgets`, 1.11.3): GPL-3.0 (`licenses/GPL-3.0.txt`),
+  combinable with Control Vision's AGPL-3.0; the author also sells a commercial license
+  (<https://github.com/zhiyiYo/PyQt-Fluent-Widgets>). Its dependencies: **PySideSix-Frameless-Window**
+  (LGPL-3.0), **pywin32** (PSF), **darkdetect** (BSD-3-Clause).
 - **PyTorch and torchvision**: BSD-style licenses. The copied `torch` files
   include PyTorch's `LICENSE` and the licenses of its bundled third-party
   components; the package declares the combined license expression shown in
