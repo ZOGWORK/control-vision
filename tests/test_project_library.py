@@ -105,6 +105,29 @@ class LibraryTests(TempFolderTest):
         store.replace(b, moved)
         self.assertEqual(store.paths(), [moved.resolve()])
 
+    def test_damaged_library_entries_are_ignored(self):
+        store = library.ProjectLibrary(self.root / "home")
+        store.file.parent.mkdir(parents=True)
+        store.file.write_text(json.dumps({"projects": [123, None, "", "x.sqlite"], "last": 5}), encoding="utf-8")
+        self.assertEqual(store.paths(), [Path("x.sqlite")])
+        self.assertIsNone(store.last())
+        project = self.make_project()
+        store.register(project)
+        store.forget(project)
+        self.assertEqual(store.paths(), [Path("x.sqlite")])
+
+    def test_a_failed_duplicate_leaves_no_partial_file(self):
+        from unittest.mock import patch
+        source = self.make_project()
+        target = self.root / "copy" / "control_vision.sqlite"
+        target.parent.mkdir()
+        with patch.object(ProjectDatabase, "set_video_details", side_effect=ValueError("bad camera view")):
+            with self.assertRaises(ValueError):
+                library.duplicate_project(source, target, "copy")
+        self.assertFalse(target.exists())
+        library.duplicate_project(source, target, "copy")  # A retry into the same folder works.
+        self.assertEqual(library.summarize_project(target).name, "copy")
+
     def test_unique_names(self):
         self.assertEqual(library.unique_name("Meet", set()), "Meet")
         self.assertEqual(library.unique_name("Meet", {"meet", "Meet (2)"}), "Meet (3)")
