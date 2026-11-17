@@ -14,8 +14,9 @@ from PySide6.QtCore import QObject, Signal
 
 from control_vision.game.scoreboard import classify_match_time
 
-_OF_TOTAL = re.compile(r"Processed (\d+) of (\d+) sampled frames")
-_DONE_ONLY = re.compile(r"Processed (\d+) sampled frames")
+# The pipeline writes counts with thousands separators ("Processed 1,234 of 5,000 sampled frames").
+_OF_TOTAL = re.compile(r"Processed (\d[\d,]*) of (\d[\d,]*) sampled frames")
+_DONE_ONLY = re.compile(r"Processed (\d[\d,]*) sampled frames")
 _SAMPLED = re.compile(r"Sampled frame (\d+) \(([\d.]+)s\): (\d+) robot detections")
 _TIME_AT = re.compile(r"at ([\d.]+) ?s\b")
 ID_SWITCH_PREFIXES = ("Recovered robot", "Re-seeded robot")
@@ -39,14 +40,18 @@ class RunLogHandler(logging.Handler):
             self.handleError(record)
 
 
+def _count(text: str) -> int:
+    return int(text.replace(",", ""))
+
+
 def frames_progress(percent: float, detail: str) -> tuple[int, int] | None:
     """Sampled frames done and in total, from a progress report; None when it does not say."""
     match = _OF_TOTAL.search(detail or "")
     if match:
-        return int(match.group(1)), int(match.group(2))
+        return _count(match.group(1)), _count(match.group(2))
     match = _DONE_ONLY.search(detail or "")
     if match and percent > 0:
-        done = int(match.group(1))
+        done = _count(match.group(1))
         return done, max(done, round(done * 100 / percent))
     return None
 
