@@ -370,7 +370,13 @@ class FieldMapPage(QWidget):
         if row is None:
             return
         self.video = dict(row)
-        calibration = self.db.calibration_for(int(video_id))
+        try:
+            calibration = self.db.calibration_for(int(video_id))
+        except ValueError:  # The saved corners or zones are not valid JSON.
+            self._empty("Calibration unreadable — calibrate again",
+                        "The saved calibration for this match could not be read.",
+                        "Calibrate field…", lambda: self.open_calibrate.emit(int(video_id)))
+            return
         if not calibration or len(calibration[0]) != 4:
             self._empty("No calibration — calibrate first", "Trails are placed on the field with the calibration.",
                         "Calibrate field…", lambda: self.open_calibrate.emit(int(video_id)))
