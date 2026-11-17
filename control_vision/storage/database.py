@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS scoring_events (id INTEGER PRIMARY KEY, robot_id INTE
 CREATE TABLE IF NOT EXISTS clips (id INTEGER PRIMARY KEY, scoring_event_id INTEGER REFERENCES scoring_events(id) ON DELETE CASCADE, path TEXT NOT NULL, start_t_s REAL NOT NULL, end_t_s REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, path TEXT NOT NULL, t_s REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS robot_reseeds (id INTEGER PRIMARY KEY, robot_id INTEGER NOT NULL REFERENCES robots(id) ON DELETE CASCADE, t_s REAL NOT NULL, x_px REAL NOT NULL, y_px REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS processing_jobs (id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE, position INTEGER NOT NULL, sample_fps INTEGER NOT NULL DEFAULT 8, tracking_mode TEXT NOT NULL, model_path TEXT, status TEXT NOT NULL DEFAULT 'queued', error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 """
 
 _UNCHANGED: Any = object()
@@ -357,6 +358,84 @@ class ProjectDatabase:
             if mark_unprocessed:
                 self.connection.execute("UPDATE videos SET analysis_status='unprocessed' WHERE id=?", (video_id,))
         return ids
+
+    # ----- processing queue -----
+
+    JOB_STATUSES = ("queued", "running", "done", "failed", "cancelled")
+
+    def queue_jobs(self, video_ids, sample_fps: int, tracking_mode: str, model_path: str | None) -> list[int]:
+        """Queue videos for processing with the settings each job will use; a video already waiting is skipped."""
+        if not 5 <= int(sample_fps) <= 10:
+            raise ValueError("The sample rate must be 5 to 10 frames per second.")
+        if tracking_mode not in ("yolo", "seeded_optical_flow"):
+            raise ValueError(f"Unknown tracking mode: {tracking_mode}")
+        waiting = {int(row[0]) for row in self.connection.execute(
+            "SELECT video_id FROM processing_jobs WHERE status IN ('queued','running')")}
+        ids = []
+        with self.connection:
+            position = self.connection.execute("SELECT COALESCE(MAX(position), 0) FROM processing_jobs").fetchone()[0]
+            for video_id in video_ids:
+                if int(video_id) in waiting:
+                    continue
+                waiting.add(int(video_id))
+                position += 1
+                cursor = self.connection.execute(
+                    "INSERT INTO processing_jobs(video_id,position,sample_fps,tracking_mode,model_path) VALUES (?,?,?,?,?)",
+                    (int(video_id), position, int(sample_fps), tracking_mode, model_path or None))
+                ids.append(_inserted_id(cursor))
+        return ids
+
+    def processing_jobs(self):
+        return self.connection.execute(
+            "SELECT j.*, v.path, v.event_code, v.match_number, v.duration_s FROM processing_jobs j "
+            "JOIN videos v ON v.id=j.video_id ORDER BY j.position, j.id").fetchall()
+
+    def next_queued_job(self):
+        return self.connection.execute(
+            "SELECT j.*, v.path FROM processing_jobs j JOIN videos v ON v.id=j.video_id "
+            "WHERE j.status='queued' ORDER BY j.position, j.id LIMIT 1").fetchone()
+
+    def set_job_status(self, job_id: int, status: str, error: str | None = None) -> None:
+        if status not in self.JOB_STATUSES:
+            raise ValueError(f"Unknown job status: {status}")
+        with self.connection:
+            self.connection.execute("UPDATE processing_jobs SET status=?, error=? WHERE id=?", (status, error, int(job_id)))
+
+    def move_job(self, job_id: int, offset: int) -> bool:
+        """Swap a job with its neighbour in the queue order; False at either end."""
+        rows = [int(row[0]) for row in self.connection.execute("SELECT id FROM processing_jobs ORDER BY position, id")]
+        if int(job_id) not in rows:
+            return False
+        index = rows.index(int(job_id))
+        target = index + int(offset)
+        if not 0 <= target < len(rows):
+            return False
+        rows[index], rows[target] = rows[target], rows[index]
+        with self.connection:
+            for position, row_id in enumerate(rows, start=1):
+                self.connection.execute("UPDATE processing_jobs SET position=? WHERE id=?", (position, row_id))
+        return True
+
+    def remove_jobs(self, job_ids) -> None:
+        with self.connection:
+            for job_id in job_ids:
+                self.connection.execute("DELETE FROM processing_jobs WHERE id=? AND status!='running'", (int(job_id),))
+
+    def clear_finished_jobs(self) -> int:
+        with self.connection:
+            return self.connection.execute(
+                "DELETE FROM processing_jobs WHERE status IN ('done','cancelled')").rowcount
+
+    def retry_failed_jobs(self) -> int:
+        with self.connection:
+            return self.connection.execute(
+                "UPDATE processing_jobs SET status='queued', error=NULL WHERE status IN ('failed','cancelled')").rowcount
+
+    def recover_interrupted_jobs(self) -> int:
+        """A job left running when the app closed saved nothing; queue it again. Returns how many jobs wait."""
+        with self.connection:
+            self.connection.execute("UPDATE processing_jobs SET status='queued' WHERE status='running'")
+        return self.connection.execute("SELECT COUNT(*) FROM processing_jobs WHERE status='queued'").fetchone()[0]
 
     def tracks_for_video(self, video_id: int):
         return self.connection.execute(
