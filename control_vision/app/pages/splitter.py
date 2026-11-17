@@ -626,6 +626,7 @@ class SplitterPage(QWidget):
                     self._say(f"✕ {output.name} already exists in {out_dir}. Delete or move it first.", "danger")
                     return
                 jobs.append((segment, output))
+        self._clip_target = (self.db, self.project_id)  # Even if the project changes while cutting.
         self.worker = ClipWorker(self.source, jobs, self.ffmpeg_path())
         self.worker.progress.connect(lambda done, total: self.progress.setValue(round(100 * done / total)))
         self.worker.finished_clips.connect(self._clips_done)
@@ -641,12 +642,21 @@ class SplitterPage(QWidget):
             self._say("Stopping after the current video…", "pending")
 
     def _clips_done(self, done: list) -> None:
-        details = self.db.project_details(self.project_id) or {}
+        db, project_id = getattr(self, "_clip_target", (self.db, self.project_id))
+        details = db.project_details(project_id) or {}
         ids = []
         for segment, path, metadata in done:
-            video_id = self.db.add_video(self.project_id, path, metadata, details.get("event_code"), segment.match or None)
-            self.db.set_video_details(video_id, file_size=Path(path).stat().st_size)
+            video_id = db.add_video(project_id, path, metadata, details.get("event_code"), segment.match or None)
+            db.set_video_details(video_id, file_size=Path(path).stat().st_size)
             ids.append(video_id)
+        if (db, project_id) != (self.db, self.project_id):
+            # The project was switched while cutting: the videos stay with the project they were cut for.
+            if self.worker is not None:
+                self.worker.wait()
+            self.worker = None
+            self.progress.hide(); self.cancel_btn.hide()
+            self._render()
+            return
         made = {id(segment) for segment, _path, _metadata in done}
         self.segments = [segment for segment in self.segments if id(segment) not in made]
         if self.worker is not None:
