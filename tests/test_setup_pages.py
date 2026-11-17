@@ -308,6 +308,25 @@ class SplitterTests(SetupTest):
         self.assertEqual(projects, [self.project])
         self.assertIsNone(page.worker)
 
+    def test_deleting_a_split_shows_the_next_ones_number(self):
+        from control_vision.app.pages.splitter import SplitterPage
+        page = SplitterPage()
+        self.addCleanup(page.close_source)
+        page.set_project(self.db, self.project, self.root)
+        page.open_source(write_video(self.root / "stream.mp4", seconds=6))
+        for start, end, match in (("0:00", "0:02", "Q1"), ("0:03", "0:05", "Q2")):
+            page.start_edit.setText(start); page.end_edit.setText(end)
+            page.add_typed()
+            page.cards.setCurrentRow(len(page.segments) - 1)
+            page.match_edit.setText(match); page._set_match_number()
+        page.cards.setCurrentRow(0)
+        self.assertEqual(page.match_edit.text(), "Q1")
+        page.delete_selected()
+        self.assertEqual([segment.match for segment in page.segments], ["Q2"])
+        self.assertEqual(page.match_edit.text(), "Q2")   # Not the deleted split's number.
+        page._set_match_number()
+        self.assertEqual(page.segments[0].match, "Q2")
+
     def test_closing_a_playing_stream_resets_play(self):
         from control_vision.app.pages.splitter import SplitterPage
         page = SplitterPage()
@@ -583,6 +602,18 @@ class IdentityTests(SetupTest):
             self.assertFalse(page.save())
         self.assertIn("database is locked", page.status.text())
         self.assertTrue(page.dirty)
+
+    def test_a_project_without_videos_shows_no_robots(self):
+        from control_vision.app.pages.identity import IdentityPage
+        video, _ = self.add_video()
+        self.db.save_identity(video, [{"team_number": 7, "alliance": "red", "seed_x": 5, "seed_y": 5}])
+        page = IdentityPage()
+        page.set_project(self.db, self.project)
+        self.assertEqual(page.entries[0].team, "7")
+        page.set_project(self.db, self.db.add_project("Empty"))
+        self.assertIsNone(page.video)
+        self.assertTrue(all(entry.empty for entry in page.entries + page.saved_entries))
+        self.assertEqual(page.cards[0].team.text(), "")
 
     def test_robots_saved_elsewhere_are_shown(self):
         from control_vision.app.pages.identity import IdentityPage
