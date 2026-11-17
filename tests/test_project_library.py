@@ -179,6 +179,15 @@ class LibraryTests(TempFolderTest):
         with self.assertRaises(ValueError):
             library.export_project_file(source, source)
 
+    def test_a_failed_export_leaves_no_file(self):
+        junk = self.root / "junk.sqlite"
+        junk.write_bytes(b"not a database at all, just text" * 10)
+        target = self.root / "export.db"
+        with self.assertRaises(Exception):
+            library.export_project_file(junk, target)
+        self.assertFalse(target.exists())
+        self.assertFalse((self.root / "export.db.part").exists())
+
 
 class ModelStoreTests(TempFolderTest):
     def write_model(self, name, metrics=None):
@@ -204,6 +213,23 @@ class ModelStoreTests(TempFolderTest):
         model = store.add_file(self.write_model("v1"))
         store.set_active(model.id)
         self.assertEqual(store.active().id, model.id)
+
+    def test_damaged_metrics_read_as_unmeasured(self):
+        store = library.ModelStore(self.root / "home")
+        store.file.parent.mkdir(parents=True)
+        store.file.write_text(json.dumps({"models": [
+            {"id": "a", "name": "a", "path": "a.onnx", "map50": "0.9", "per_class": [1], "epochs": True},
+            {"id": "b", "name": "b", "path": "b.onnx", "map50": 0.7, "per_class": {"robot": {"recall": "high", "map50": 0.6}}},
+        ]}), encoding="utf-8")
+        first, second = store.versions()
+        self.assertEqual((first.map50, first.per_class, first.epochs), (None, {}, None))
+        self.assertEqual(second.per_class, {"robot": {"map50": 0.6}})
+        model, reason = store.recommended()
+        self.assertEqual(model.id, "b")
+        self.assertIn("robot recall was not reported", reason)
+        sidecar = self.write_model("c", {"map50": "x", "per_class": "bad", "name": 5})
+        added = store.add_file(sidecar)
+        self.assertEqual((added.name, added.map50, added.per_class), ("c", None, {}))
 
     def test_recommendation_prefers_robot_recall(self):
         store = library.ModelStore(self.root / "home")
