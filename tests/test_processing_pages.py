@@ -1,4 +1,5 @@
 """UI phase 3: processing queue, live view, match results and field map."""
+import logging
 import os
 import unittest
 from pathlib import Path
@@ -131,6 +132,13 @@ class QueuePageTests(SetupTest):
         with patch.object(page, "cancel_requested") as cancel:
             page._cancel_selected()
         cancel.emit.assert_called_once_with(job)
+        # Cancelled at 40% and retried: the job runs again from 0%, not from its old progress.
+        self.db.set_job_status(job, "cancelled")
+        page.set_runner_state(None, True)
+        self.db.set_job_status(job, "running")
+        page.set_runner_state(job, False)
+        self.assertEqual(page.table.cellWidget(0, 6).value(), 0)
+        self.assertNotEqual(page.table.item(0, 7).text(), "01:30")
         page.show_resume_prompt(3)
         self.assertIn("3 job(s) were queued when the app closed", page.banner.text())
 
@@ -355,6 +363,26 @@ class WindowQueueTests(ReadyMatch):
         self.assertTrue(window._queue_paused)
         self.assertEqual(window.sample_rate.currentText(), "8")   # The user's setting is back.
         self.assertIn("Processing could not start", window.progress_label.text())
+
+    def test_a_queue_start_that_fails_inside_process_undoes_the_run(self):
+        video, _ = self.ready_match(processed=False)
+        self.open()
+        model = self.root / "model.onnx"; model.write_bytes(b"x")
+        [job] = self.db.queue_jobs([video], 8, "yolo", str(model))
+        window = self.window
+        with patch.object(self.db, "reseeds_for_video", side_effect=RuntimeError("database is locked")):
+            window.start_queue()
+            self.app.processEvents()
+        self.assertEqual(self.db.processing_jobs()[0]["status"], "failed")
+        self.assertIn("database is locked", self.db.processing_jobs()[0]["error"])
+        status = self.db.connection.execute("SELECT analysis_status FROM videos WHERE id=?", (video,)).fetchone()[0]
+        self.assertEqual(status, "failed")                          # Not left "running".
+        self.assertTrue(window.process_btn.isEnabled())
+        self.assertFalse(window._processing_active)
+        self.assertIsNone(window._run_log_handler)
+        self.assertFalse([h for h in window.logger.handlers if isinstance(h, logging.FileHandler)])
+        self.assertTrue(window._queue_paused)
+        self.assertIsNone(window._queue_job)
 
     def test_a_finished_job_is_marked_done(self):
         video, ids = self.ready_match(processed=False)
