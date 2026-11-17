@@ -43,6 +43,10 @@ from control_vision.app import widgets
 from control_vision.app.pages.home import HomePage
 from control_vision.app.pages.projects import ProjectsPage
 from control_vision.app.pages.wizard import NewProjectWizard
+from control_vision.app.pages.import_page import ImportPage
+from control_vision.app.pages.splitter import SplitterPage
+from control_vision.app.pages.calibrate import CalibratePage
+from control_vision.app.pages.identity import IdentityPage
 
 # Review and timeline rows keep the stored status and confidence for re-tinting.
 EVENT_STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -301,6 +305,11 @@ def missing_robot_labels(robots, robot_ids, track_rows) -> list[str]:
     return labels
 
 
+def _video_switch_blocked_quietly(window) -> bool:
+    """Whether a run is active, without telling the user (for background refreshes)."""
+    return bool(getattr(window, "_processing_active", False) or getattr(window, "_ocr_active", False))
+
+
 def _video_switch_blocked(window) -> bool:
     if (getattr(window, "_processing_active", False) or getattr(window, "_ocr_active", False)
             or getattr(window, "_live_active", False)):
@@ -369,10 +378,13 @@ def workflow_steps(*, project_open: bool, video_name: str | None, corners: int, 
 # Tab indices. 0-8 are the original pages; the pages from the UI report come after them.
 SETTINGS_TAB, RULES_TAB = 7, 8
 HOME_TAB, PROJECTS_TAB, WIZARD_TAB, DATASETS_TAB, MODELS_TAB = 9, 10, 11, 12, 13
+IMPORT_TAB, SPLITTER_TAB, CALIBRATE_TAB, IDENTITY_TAB = 14, 15, 16, 17
 
 # The first nine pages get Ctrl+1..Ctrl+9 in this order. Settings opens from the top bar.
 NAV_ENTRIES = (
     ("section", "Projects"), (HOME_TAB, "Home"), (PROJECTS_TAB, "Projects"), (0, "Current project"),
+    ("section", "Match setup"), (IMPORT_TAB, "Import videos"), (SPLITTER_TAB, "Livestream splitter"),
+    (CALIBRATE_TAB, "Calibrate field"), (IDENTITY_TAB, "Robots"),
     ("section", "Match workflow"), (1, "Set up and process"), (3, "Review queue"), (4, "Scoring timeline"),
     (2, "Cycles and stats"), (5, "Highlights"), (6, "Score and export"),
     ("section", "Training"), (DATASETS_TAB, "Datasets"), (MODELS_TAB, "Models"),
@@ -766,6 +778,14 @@ class MainWindow(QMainWindow):
             "Models", "Compare trained model versions and choose the one new projects use.",
             "Not available in this build yet. You can add a model file in the New project wizard today.",
             "New project", self.show_new_project_wizard), "Models")
+        self.import_page = ImportPage()
+        self.splitter_page = SplitterPage(lambda: self.ffmpeg_path_edit.text().strip() or None)
+        self.calibrate_page = CalibratePage()
+        self.identity_page = IdentityPage()
+        self.tabs.addTab(self.import_page, "Import videos")
+        self.tabs.addTab(self.splitter_page, "Livestream splitter")
+        self.tabs.addTab(self.calibrate_page, "Calibrate field")
+        self.tabs.addTab(self.identity_page, "Robots")
         self.tabs.tabBar().hide()
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self._build_shell())
@@ -789,6 +809,18 @@ class MainWindow(QMainWindow):
         self.wizard.cancelled.connect(lambda: self.tabs.setCurrentIndex(HOME_TAB))
         self.wizard.open_models.connect(lambda: self._go_to_tab(MODELS_TAB))
         self.tabs.currentChanged.connect(self._page_shown)
+        for page in (self.import_page, self.splitter_page, self.calibrate_page, self.identity_page):
+            page.new_project.connect(self.show_new_project_wizard)
+        self.import_page.imported.connect(self._videos_added)
+        self.import_page.open_splitter.connect(self.open_in_splitter)
+        self.import_page.open_calibrate.connect(self.open_in_calibrate)
+        self.import_page.open_identity.connect(self.open_in_identity)
+        self.splitter_page.clips_created.connect(self._videos_added)
+        self.splitter_page.open_calibrate.connect(lambda: self.tabs.setCurrentIndex(CALIBRATE_TAB))
+        self.calibrate_page.saved.connect(self._setup_saved)
+        self.calibrate_page.continue_identity.connect(self.open_in_identity)
+        self.identity_page.saved.connect(self._setup_saved)
+        self.identity_page.continue_processing.connect(self._continue_to_processing)
         self.open_project_btn.clicked.connect(self.open_project)
         self.video_btn.clicked.connect(self.import_video)
         self.load_video_btn.clicked.connect(self.load_saved_video)
@@ -978,6 +1010,77 @@ class MainWindow(QMainWindow):
     def _page_shown(self, index: int):
         if index in (HOME_TAB, PROJECTS_TAB):
             self.refresh_dashboard()
+        elif index == IMPORT_TAB:
+            self.import_page.refresh_project()
+        elif index == CALIBRATE_TAB:
+            self.calibrate_page.refresh_videos()
+        elif index == IDENTITY_TAB:
+            self.identity_page.refresh_videos()
+
+    # ----- Match setup: import, livestream, calibrate, robots -----
+
+    def _sync_setup_pages(self):
+        """Give the setup pages the open project (or none)."""
+        db, project_id = (self.db, self.project_id) if self.db is not None and self.project_id is not None else (None, None)
+        pages = (self.import_page, self.splitter_page, self.calibrate_page, self.identity_page)
+        try:
+            folder = self.project_dir() if db is not None else None
+            for page in pages:
+                if page is self.splitter_page:
+                    page.set_project(db, project_id, folder)
+                else:
+                    page.set_project(db, project_id)
+        except (sqlite3.Error, TypeError, AttributeError, KeyError) as exc:
+            # A project the pages cannot read leaves them empty instead of breaking the window.
+            for page in pages:
+                if page is self.splitter_page:
+                    page.set_project(None, None, None)
+                else:
+                    page.set_project(None, None)
+            self._show_status(f"The setup pages could not read this project: {exc}", "danger")
+
+    def setup_edits_allow_leaving(self) -> bool:
+        """Ask before unsaved calibration or robots are lost by switching project."""
+        for page in (getattr(self, "calibrate_page", None), getattr(self, "identity_page", None)):
+            if page is not None and not page.confirm_discard():
+                return False
+        return True
+
+    def _videos_added(self, video_ids):
+        self.refresh_home()
+        self.import_page.refresh_project()
+        self.calibrate_page.refresh_videos()
+        self.identity_page.refresh_videos()
+        self._show_status(f"Added {len(video_ids)} video(s) to the project. Calibrate each one next.", "success")
+
+    def open_in_splitter(self, path):
+        self.tabs.setCurrentIndex(SPLITTER_TAB)
+        self.splitter_page.open_source(Path(path))
+
+    def open_in_calibrate(self, video_id: int):
+        self.tabs.setCurrentIndex(CALIBRATE_TAB)
+        if self.calibrate_page.video is None or int(self.calibrate_page.video["id"]) != int(video_id):
+            if self.calibrate_page.confirm_discard():
+                self.calibrate_page.load_video(int(video_id))
+
+    def open_in_identity(self, video_id: int):
+        self.tabs.setCurrentIndex(IDENTITY_TAB)
+        if self.identity_page.video is None or int(self.identity_page.video["id"]) != int(video_id):
+            if self.identity_page.confirm_discard():
+                self.identity_page.load_video(int(video_id))
+
+    def _setup_saved(self, video_id: int):
+        """Calibration or robots changed in the database: reload them if that video is the one loaded."""
+        self.import_page.refresh_project()
+        if self.video_id is not None and int(self.video_id) == int(video_id) and not _video_switch_blocked_quietly(self):
+            self.load_saved_video_id(int(video_id))
+        else:
+            self._refresh_workflow()
+
+    def _continue_to_processing(self, video_id: int):
+        if self.video_id is None or int(self.video_id) != int(video_id):
+            self.load_saved_video_id(int(video_id))
+        self.tabs.setCurrentIndex(1)
 
     # ----- Projects: library, dashboard and the new project wizard -----
 
@@ -1549,19 +1652,23 @@ class MainWindow(QMainWindow):
             self.home_empty.show()
             self._refresh_workflow()
             self._refresh_top_bar()
+            self._sync_setup_pages()
             return
         project = self.db.connection.execute("SELECT name FROM projects WHERE id=?", (self.project_id,)).fetchone()
         self._project_name = project["name"]
         self.home_project_label.setText(project["name"])
         self.home_project_path.setText(str(self.db.path))
-        for row in self.db.connection.execute("SELECT id,path,event_code,match_number,duration_s,analysis_status FROM videos WHERE project_id=? ORDER BY id DESC LIMIT 20", (self.project_id,)):
+        for row in self.db.connection.execute("SELECT id,path,event_code,match_number,duration_s,analysis_status,is_holdout FROM videos WHERE project_id=? ORDER BY id DESC LIMIT 20", (self.project_id,)):
             state = {"ready": "Analysed", "unprocessed": "Not processed"}.get(row["analysis_status"], "Analysis did not finish")
             label = f"{Path(row['path']).name}  ·  {row['event_code'] or 'Practice'} {row['match_number'] or ''}  ·  {row['duration_s'] or 0:.0f}s  ·  {state}"
+            if row["is_holdout"]:
+                label += "  ·  ⚑ Holdout"
             item = QListWidgetItem(label); item.setData(Qt.ItemDataRole.UserRole, int(row['id'])); self.home_recent.addItem(item)
         self.home_empty.setText("No videos yet. Import a match video to start.")
         self.home_empty.setVisible(self.home_recent.count() == 0)
         self._refresh_workflow()
         self._refresh_top_bar()
+        self._sync_setup_pages()
 
     def load_settings(self):
         folder = self.project_dir()
@@ -1680,6 +1787,7 @@ class MainWindow(QMainWindow):
 
     def new_project(self):
         if _video_switch_blocked(self): return
+        if not MainWindow.setup_edits_allow_leaving(self): return
         folder = QFileDialog.getExistingDirectory(self, "Choose project folder")
         if not folder:
             return
@@ -1706,6 +1814,7 @@ class MainWindow(QMainWindow):
 
     def open_project(self):
         if _video_switch_blocked(self): return
+        if not MainWindow.setup_edits_allow_leaving(self): return
         selected, _ = QFileDialog.getOpenFileName(self, "Open Control Vision project", "", "Control Vision project (*.sqlite *.db)")
         if not selected:
             return
@@ -1714,6 +1823,7 @@ class MainWindow(QMainWindow):
     def open_project_path(self, path) -> bool:
         """Open a project from the library; returns whether it opened."""
         if path is None or _video_switch_blocked(self): return False
+        if not self.setup_edits_allow_leaving(): return False
         if not Path(path).is_file():
             # Opening a missing path would create an empty database there.
             self._show_status(f"Project file missing: {path}. Locate it from Projects.", "danger")
@@ -2613,6 +2723,7 @@ class MainWindow(QMainWindow):
                     event.ignore()
                     return
         if self.capture: self.capture.release()
+        self.splitter_page.close_source()
         if self.db: self.db.close()
         event.accept()
 
