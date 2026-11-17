@@ -369,6 +369,17 @@ class UserReseedTests(unittest.TestCase):
         times = robot_times(rows, 2)
         self.assertEqual([t for t in times if t > 1], [1.125 + 0.125 * i for i in range(15)])
 
+    def test_confirming_an_expired_robots_own_track_reopens_its_recovery(self):
+        # Track 1 vanishes at 0.875 s; robot 1 expires after 10 s; track 1 itself comes back at 12 s and the
+        # user confirms it at 12.5 s. When it vanishes again at 14 s, a clean new track must be re-linked.
+        script = ([[(1, 3, 3)] for _ in range(8)] + [[] for _ in range(88)]
+                  + [[(1, 3, 3)] for _ in range(16)] + [[]] + [[(5, 4, 3)] for _ in range(8)])
+        rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 12.5, 3, 3)])
+        self.assertTrue(any("identity recovery stopped" in m for m in messages), messages)
+        self.assertIn("Re-seed of robot 1 at 12.50s confirms its current track 1", messages)
+        self.assertEqual(len(recovered(messages)), 1, messages)
+        self.assertIn("track 1 -> new track 5", recovered(messages)[0])
+
     def test_a_reseed_after_the_last_frame_is_reported(self):
         script = [[(1, 3, 3)] for _ in range(8)]
         rows, messages, _ = run_script(script, [(1, 3, 3)], reseeds=[(1, 50.0, 3, 3)])

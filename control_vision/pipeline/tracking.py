@@ -148,6 +148,8 @@ def _apply_reseed(robot_id, x, y, t_s, detections, visible, seed_to_track, recov
         return False
     track_id = min(hits)[1]
     if seed_to_track.get(robot_id) == track_id:
+        # The user vouches for this identity now, so an expired robot can be re-linked again later.
+        recovery.reseed(robot_id, track_id)
         logger.info("Re-seed of robot %d at %.2fs confirms its current track %d", robot_id, t_s, track_id)
         return True
     previous_owner = next((rid for rid, tid in seed_to_track.items() if tid == track_id), None)
