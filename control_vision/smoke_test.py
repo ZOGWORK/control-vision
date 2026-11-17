@@ -24,8 +24,8 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable
 
-REQUIRED_DISTRIBUTIONS = ("PySide6", "opencv-python", "numpy", "ultralytics", "torch", "onnxruntime",
-                          "rapidocr-onnxruntime", "imageio-ffmpeg")
+REQUIRED_DISTRIBUTIONS = ("PySide6", "PySide6-Fluent-Widgets", "opencv-python", "numpy", "ultralytics", "torch",
+                          "onnxruntime", "rapidocr-onnxruntime", "imageio-ffmpeg")
 OCR_MODELS = ("ch_PP-OCRv4_det_infer.onnx", "ch_PP-OCRv4_rec_infer.onnx", "ch_ppocr_mobile_v2.0_cls_infer.onnx")
 CONFIG_FILES = ("scoring_biobuzz.json", "zones_biobuzz.json", "game_classes_biobuzz.json", "botsort.yaml")
 # Trained-weight formats. Only RapidOCR's own models may ship in the bundle.
@@ -129,6 +129,36 @@ def check_qt_window() -> dict[str, Any]:
         app.processEvents()
         return {"platform": app.platformName(), "title": window.windowTitle(),
                 "theme": app.property("control_vision_theme")}
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def check_fluent_ui() -> dict[str, Any]:
+    """The Fluent shell with the Control theme, and a navigation icon that actually renders: its SVGs are
+    compiled Qt resources, so a blank icon means the library was bundled without them."""
+    from PySide6.QtWidgets import QApplication, QWidget
+    from qfluentwidgets import FluentIcon, FluentWindow, qconfig
+
+    from control_vision.ui import theme
+
+    app = QApplication.instance() or QApplication([])
+    theme.apply()
+    window = FluentWindow()
+    try:
+        page = QWidget()
+        page.setObjectName("smoke-home")
+        window.addSubInterface(page, FluentIcon.HOME, "Home")
+        image = FluentIcon.HOME.icon().pixmap(32, 32).toImage()
+        drawn = sum(image.pixelColor(x, y).alpha() > 0 for x in range(image.width()) for y in range(image.height()))
+        if drawn == 0:
+            raise SmokeFailure("Fluent navigation icons are blank: qfluentwidgets resources are missing")
+        accent = qconfig.get(qconfig.themeColor).name().upper()
+        if accent != theme.VOLT.upper():
+            raise SmokeFailure(f"Fluent accent is {accent}, not Control volt {theme.VOLT}")
+        app.processEvents()
+        return {"accent": accent, "icon_pixels": drawn}
     finally:
         window.close()
         window.deleteLater()
@@ -275,6 +305,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             work = Path(temp)
             step("resources", lambda: check_resources(root, frozen))
             step("qt_window", check_qt_window)
+            step("fluent_ui", check_fluent_ui)
             step("ocr", check_ocr)
             _, clip = step("ffmpeg", lambda: check_ffmpeg(work, root, frozen))
             step("project_import", lambda: check_project_import(work, clip))
