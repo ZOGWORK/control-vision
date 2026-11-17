@@ -5,6 +5,8 @@ and audio come from the container, never from the file size or a guess.
 """
 from __future__ import annotations
 
+import math
+
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -37,7 +39,8 @@ def parse_clock(text: str) -> float:
         values = [float(part) for part in parts]
     except ValueError as exc:
         raise ValueError(f"\"{text}\" is not a time. Use h:mm:ss, mm:ss or seconds.") from exc
-    if any(value < 0 for value in values) or any(value >= 60 for value in values[1:]):
+    if (not all(math.isfinite(value) for value in values) or any(value < 0 for value in values)
+            or any(value >= 60 for value in values[1:])):
         raise ValueError(f"\"{text}\" is not a time. Use h:mm:ss, mm:ss or seconds.")
     total = 0.0
     for value in values:
